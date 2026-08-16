@@ -2,6 +2,88 @@
 
 ## NEXT PRIORITY
 
+### P2: Persona-fleet hostile-user harness (fork port wave 2 deferral)
+
+**What:** Port the methodology behind time-attack/gstack's 87-hostile-user
+field run (418 findings): machine-written t0 in an append-only run.jsonl
+(elapsed time measured, never self-reported), every metric resolving to an
+artifact, and a mandatory-quit contract with machine-checkable caps (300s to
+first useful output, 900s total, 40K context tokens, 3 consecutive dead ends)
+so abandonment is a computable outcome. Specs: fork `evals/fleet/METRICS.md`
++ `evals/fleet/ABANDONMENT.md` (methodology only — no runner code exists to
+port; this is a build).
+
+**Why:** A periodic hostile-user round against OUR 44-skill tree would surface
+the same first-five-minutes failure class the fork closed 418 of. Fits the
+existing eval-store/e2e harness as a new runner.
+
+**Effort:** L (human ~2wk) → M with CC. **Priority:** P2.
+**Depends on:** decisions on cost ceilings + journal storage.
+
+### P3: Answer-key eval methodology (rides the persona-fleet work)
+
+**What:** Pre-registered answer keys (fork `evals/answer-keys/` —
+codex-decorrelation, health-trending) grading our /codex and /health surfaces
+against planted ground truth instead of judge vibes.
+
+**Why:** Deterministic scoring for surfaces where LLM-judge drift is the
+known failure mode. **Effort:** M → S with CC. **Priority:** P3.
+**Depends on:** persona-fleet harness (shared runner shape).
+
+### P3: Quarterly Apple-journey live re-verification
+
+**What:** Run the /ship Apple release adapter against a real (TestFlight-only)
+release once a quarter, or on first user bug report, and fix drift. Apple's
+APIs move (the fork caught fastlane price_tier breaking live); the adapter's
+claims are evidence-backed today and must stay that way per its own
+evidence-before-claimed-limitations rule.
+
+**Effort:** S per run. **Priority:** P3. **Depends on:** a paid ADP account.
+
+### P2: office-hours design-doc dual-write functional E2E (fork port wave 2 review shortfall)
+
+**What:** A paid E2E (claude -p) that runs the office-hours Phase 5 handoff in
+a tmp repo and asserts BOTH write paths (docs/designs/<topic>.md + the
+~/.gstack copy) land and that `bin/gstack-redact` was invoked at the sink.
+Today only a static prose pin exists (test/skill-validation.test.ts) — the
+plan's R9 asked for the functional shape.
+
+**Why:** The dual-write is an egress path into the user's repo; prose drift
+that skips the redact scan-at-sink would ship user PII into git history with
+nothing failing. **Effort:** M → S with CC. **Priority:** P2.
+**Tier:** periodic (quality, non-deterministic).
+
+### P2: migration runners honor per-migration skip state
+
+**What:** Both migration runners (setup's post-setup block and
+/gstack-upgrade Step 4.75) select migrations purely by version window, so a
+migration that exits via the non-interactive default-skip (v1.27's
+GSTACK_MIGRATE_ASSUME_YES gate) is never offered again — the version marker
+advances past it. The remediation text now prints the honest direct
+invocation, but the runners should track per-migration .done/.skipped
+touchfiles and re-offer pending ones on the next interactive run.
+
+**Why:** Every remaining pre-v1.27 user upgrading via an agent session ([ -t 0 ]
+false) permanently misses the artifacts-rename migration unless they paste the
+manual command. **Effort:** M. **Priority:** P2.
+
+### P2: periodic tier — three documented-red tests need structural repair
+
+**What:** (1) The sidebar E2E trio (navigate, url-accuracy, css-interaction)
+POSTs to /sidebar-command and /sidebar-chat — endpoints removed on every tree
+when the PTY terminal replaced the chat queue (server.ts tombstone ~2671);
+rewrite them against the PTY surface or delete them. (2)
+skill-e2e-ship-idempotency: the PTY child sits at the Claude Code welcome
+screen in plan mode for the full budget — the typed /ship never lands
+(readiness/typing race vs CLI v2.1.233's welcome screen); never green since
+it was born in v1.63. (3) skill-e2e-brain-privacy-gate: never green anywhere;
+the artifacts-sync stop-gate preconditions don't survive the hermetic env
+even with per-test HOME/GSTACK_HOME injection — needs a transcript-level
+debug of what the child's preamble actually echoes.
+
+**Why:** every red periodic run costs triage time; two of these have burned
+three triage passes across two releases. **Effort:** M. **Priority:** P2.
+
 ### P1: #1882 — portable skill-install prefix (non-`gstack` install dirs break silently)
 
 **What:** Every generated SKILL.md hardcodes the literal `~/.claude/skills/gstack/...`
@@ -25,6 +107,9 @@ So #1882 is now purely the body-preamble portability work.
 invocation-time failures.
 **Cons:** Touches the most load-bearing bash in the repo (every skill's preamble);
 a silent mistake breaks all 52 skills. High blast radius — needs its own focused PR.
+**Note (fork port wave 2):** the Apple release adapter (ship/sections/
+apple-release.md) added template surface with `~/.claude/skills/gstack/bin`
+references — include it in this fix's coverage list.
 
 **Context / where to start:**
 - Rewire `ctx.paths.binDir` (and browse/design dir paths) + the ~9 resolvers that
@@ -2750,3 +2835,36 @@ rendering quirks"); or (c) move this test to periodic until (a)/(b) lands.
 **Context:** `test/skill-e2e-plan-design-with-ui.test.ts`,
 `test/helpers/claude-pty-runner.ts:308` (`isNumberedOptionListVisible`). Evidence:
 `~/.gstack-dev/eval-runs/pdwu-verify-*.log`. **Effort:** M (human ~half day / CC ~30min).
+
+### P2: Follow-up fix waves from the 2026-08-14 tracker audit (v1.64.0.0)
+
+The full-tracker audit behind v1.64.0.0 verified every open PR/issue against
+main and consciously deferred four coherent fix waves. Audit records:
+`~/.gstack/projects/garrytan-gstack/` eng-review artifacts + the v1.64 PR body.
+
+**Wave A — browse-daemon lifecycle.** Watchdog kills headed handoff sessions
+(PRs 2565/2405/2346), macOS headed launch broken by the rebrand-invalidated
+Chromium signature + XProtect (issues 2554/2242/2138/1829/1379 — the three
+darwin-skipped handoff tests in browse/test/handoff.test.ts un-skip when this
+lands), busy-daemon kill (2219/2231), cosmetic SIGTERM ignore (2220),
+Playwright pin bump (PR 1761, #1703 — rebuilds the CI browser image).
+Start with the signature/re-sign question; everything else is small.
+
+**Wave B — install integrity.** connect-chrome alias shadowing (PR 2202,
+issues 2201/2511), Playwright bootstrap aborts/timeouts (PRs 2233/2359,
+issues 1902/2136), --host cursor/slate wiring (PRs 2547/2432, issue 2361),
+review checklist/specialists never copied (issues 2317/2518), Windows re-run
+refresh (#2444). Blast radius is `setup` — one focused PR.
+
+**Wave C — gbrain trust boundary.** Transcript trust/scope/source isolation
+(PR 2232, issue 2140), brain-sync queue truncation (#2549), worktree source
+pins (PR 2417, #2516), thin-client detection gaps (#2520/#2456), plus small
+absorbs (2371/2360/2406/2369/2368/2321). Needs never-double-store review.
+
+**Wave D — ship/version allocator.** Queue-down fallback (PRs 2545/2546),
+npm-invalid subdir manifest versions (PR 2531), versionless repos
+(2343/2334/2501, #1474), diff-scope specialist routing rewrite
+(#2526/#2299/#2455), /review token runaway (#2519).
+
+**Depends on:** v1.64.0.0 landing. Each wave is one bundled PR per the
+fix-wave pattern.
