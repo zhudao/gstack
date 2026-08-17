@@ -1,5 +1,121 @@
 # Changelog
 
+## [1.66.1.0] - 2026-08-16
+
+**Every claim gstack makes now binds to the content it was made on.**
+**Tracker text is data. Guard hooks actually guard.**
+
+Reviews and test results used to be prose claims: "review is recent" meant a commit-count guess that a rebase could crash, and "tests passed" meant trusting output from a tree that may have changed since. Both now carry a working-tree content fingerprint (`bin/gstack-wtree`, ~0.2s). A review of identical content grades CURRENT through rebases, amends, and squashes. A test run recorded by the new `bin/gstack-evidence` ledger stays citable at /ship's verification gate only while the content is byte-identical (release files carve out), the command hash matches, and nothing edited the tree mid-run. /ship and /land-and-deploy cite fresh evidence instead of re-running, and re-run live when anything moved.
+
+PR bodies, PR comments, and model-judged issue titles now enter agent context only through a trust envelope (`bin/gstack-issue-guard`): content is data even when clean, injection-shaped lines get labeled through fullwidth and invisible-character evasion, forged envelope banners are defused, and a CI scanner fails the suite on any raw tracker-text read at all 8 ingress points. Write-backs keep a raw artifact so envelope markup can never reach a live PR.
+
+/freeze now fails closed: unparseable payloads, quote or newline paths (the deny used to silently no-op on them), boundaries with spaces, symlinks pointing outside the boundary, and a broken install all block instead of passing. /careful gains a hard-deny tier for `rm -rf /`-class deletes and force-pushes to the default branch — including the flag-less `git push origin +main` form and quoted or refspec targets — plus additive-only custom warn patterns that can never weaken the built-ins.
+
+### The numbers that matter
+
+Measured on this branch; re-run with `bun test`, `time bin/gstack-wtree`, and the commands in each bin's header.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Review staleness on rebased/amended identical content | crash or STALE | CURRENT | correct |
+| "Tests passed" binding | none (prose) | content fingerprint + command hash + max-age | new |
+| Tracker-text ingress points enveloped | 0 | 8, CI-scanner enforced | new |
+| /freeze deny on hostile/edge paths | silent no-op | blocks, fail-closed | fixed |
+| Working-tree fingerprint cost | — | ~0.09s warm (stat-cache seeded, 40x vs naive) | new |
+| Adversarial findings fixed pre-merge | — | 50 (4 specialists + red team + fresh-context pass), 6 critical | — |
+
+The fingerprint survives commits of identical content, so the common flow — test on a dirty tree, commit, ship — keeps its evidence valid, while one untracked new source file invalidates it.
+
+### What this means for you
+
+/ship stops re-running suites the content already proved green and stops trusting suites the content has outgrown — the IRON LAW is now a mechanical check, not an honor system. A hostile PR comment can no longer speak to your agent with authority, and /guard's boundary actually holds on the paths where it used to silently fail. Nothing to configure: the bins ship wired into /ship, /land-and-deploy, /review, /spec, and /document-release.
+
+### Itemized changes
+
+### Added
+- `bin/gstack-wtree` — working-tree content fingerprint (temp-index, stat-cache-seeded; identical hash to a full re-hash at ~40x less cost).
+- `bin/gstack-evidence` — verification-evidence ledger: `run` wraps any command transparently (exit code always passes through; 0600 per-run logs with 2MB cap and 30-day prune; HIGH credentials in commands stored redacted; mid-run tree edits void the fingerprint) and `check` grades FRESH/STALE/MISSING per label with `--expect-cmd`, `--max-age`, and `--allow-paths` binding.
+- `lib/tracker-guard.ts` + `bin/gstack-issue-guard` — trust envelope for tracker text: envelope-always, detection-only NFKC + full Unicode format-character sweep, banner-forgery defusal, no-envelope-on-fetch-failure, numeric argv validation.
+- `/careful` HIGH tier (hard deny: root/home recursive deletes incl. `--no-preserve-root` and `/*` forms; default-branch force-pushes incl. plus-refspec, refspec-colon, and quoted targets; simple commands only, `--force-with-lease` never matches) and additive-only project warn patterns (`~/.gstack/careful-patterns.txt`, per-project variant).
+- CI wiring scanner (`test/tracker-guard-wiring.test.ts`) failing the suite on raw tracker-text reads outside the guard, with reasoned, liveness-checked exemptions; template-drift tripwire pinning the grading rules and the write-side banner tripwire.
+
+### Changed
+- Review records (`bin/gstack-review-log`) stamp `commit_full`/`tree`/`dirty`/`wtree` authoritatively — caller-supplied binding fields are ignored; `bin/gstack-review-read` emits `---WTREE---`/`---TREE---`/`---DIRTY---`; the /ship dashboard and /land-and-deploy grade diff-scoped reviews content-first (plan-tier reviews keep time-based logic), and a rebased-away commit grades UNKNOWN instead of erroring.
+- /ship Step 5 test lanes run wrapped with per-lane labels and per-run logs (no shared /tmp collisions between concurrent ships); Step 16 and /land-and-deploy 3.5b check the ledger first and cite fresh evidence, advisory-never-blocking.
+- /document-release PR/MR body updates use a two-artifact flow (enveloped copy for reading, raw copy for the splice-and-write-back) with a banner tripwire that compares against the fetched original.
+- /spec issue-title dedupe reads titles through the envelope and distinguishes pipeline failure from zero matches instead of silently skipping.
+
+### Fixed
+- /freeze: five boundary defects — deny JSON silently no-oped on quote/newline paths, internal spaces in the boundary path were stripped (space-bearing project dirs could never match), symlink final components weren't resolved (in-boundary symlink wrote outside the boundary), the JSON extractor truncated at escaped quotes and failed open, and a missing helper file passed edits through instead of blocking.
+- /careful and /freeze now share one JSON extractor and one analytics writer (both honor `GSTACK_HOME`), ending the two-copy drift that let one hook keep a bug the other had fixed.
+
+### For contributors
+- `test/helpers/scratch-repo.ts` — shared hermetic git fixture (identity pinned, gpg signing disabled so fixture commits never invoke the operator's gpg-agent) and a PATH `gh` shim for exercising real gh success/failure branches.
+- ~150 new tests across six files, including the keystone case: evidence recorded on a dirty tree stays FRESH after committing the exact tested content.
+
+## [1.66.0.0] - 2026-08-15
+
+**The full ~7,000-test suite in about 90 seconds, verified honest.**
+**Paid evals now bill by diff, not $38 flat.**
+
+`bun run test` used to take 454 seconds. It now runs as up to six concurrent shard processes and finishes in about 90 to 100 seconds, under a strict output contract: a shard that exits without bun's own terminal summary line is a failure, a wedged shard is killed at a size-scaled deadline and named in the epilogue, and the console shows only what you need (per-shard status, then `✗ file — test name` for anything red, full stream in a per-run log, `--verbose` for the firehose). Twelve test files that ran under no script and no CI are wired in. A 3,372-line dead eval monolith is deleted, with four never-run tests revived out of it.
+
+Paid evals select by diff. Edit one skill and the runner executes only the shards your change touches, reports the rest as skipped-by-diff, and prints the reason. Selection sees uncommitted and untracked work, fails closed with a named cause on git errors, and an edit to the selection data itself re-runs only the changed keys instead of forcing the full suite.
+
+### The numbers that matter
+
+Measured on this branch. Re-run with `time bun run test` and `bun run eval:select`; eval receipts live in `~/.gstack-dev/evals/`.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Free suite wall clock (~7,000 tests) | 454s | ~90-100s, strict-verified | ~4.7x |
+| Free-test files with Linux CI coverage | 0 | ~420, as a required PR check | new |
+| Paid cost of a one-skill edit | ~$38 (full suite) | 4 of 45 shards, $0.67 | ~57x |
+| Slowest CI eval job | 741s, one serial file | three jobs, each under ~250s | ~3x |
+| Paid retry amplification | `--retry 2`, +84% measured | `--retry 1` | half |
+
+The $0.67 row is a live rehearsal, not a projection: a scratch edit to `qa/SKILL.md.tmpl` selected 17 of 177 tests, ran 4 of 45 shards, skipped 41 by diff, and the /qa E2E passed.
+
+### What this means for contributors
+
+Runs you used to schedule around now fit inside a thought. `bun run test` before every commit is a real habit again at ~90 seconds, red names the exact test, and green means every file actually ran. Fork PRs get true test signal from the new secretless Linux lane. Ship a change and the eval bill tracks your blast radius.
+
+### Itemized changes
+
+### Added
+- Linux free-tests CI lane (`.github/workflows/free-tests.yml`): the whole free suite on every PR and every push to main, required from day one, zero secrets, least-privilege token, failure logs uploaded as an artifact, wiring pinned by `test/free-tests-workflow-wiring.test.ts`.
+- Diff-based paid-shard selection: parent-side skipping with a `skipped-by-diff` taxonomy and a selection banner naming the reason (`scripts/test-paid-shards.ts`).
+- Map-diff selection for the selection data itself: editing `test/helpers/touchfiles-data.ts` re-runs only added/changed/retiered keys (old version evaluated via `git show` + a bun child; adversarial fixtures in `test/touchfiles-map-diff.test.ts`).
+- Selection unions committed, staged/unstaged, and untracked changes; git failures throw naming `EVALS_ALL=1` (fail closed), and non-ASCII filenames select correctly (`core.quotePath=false`).
+- `test/helpers/skill-fixture.ts`: E2E fixtures extract the SKILL.md sections a test needs instead of copying 1,800-line files — nine fixture sites cut 58-97%.
+- `GSTACK_EVAL_MODEL_JUDGE` env override for the LLM-judge model; eval model resolution centralized in `lib/eval-model.ts` with per-kind `GSTACK_EVAL_MODEL_<KIND>` overrides.
+
+### Changed
+- Free suite architecture: N concurrent shard processes (serial within each); tree-mutating tests and tree-measuring ratchet readers run in one serial shard after the parallel phase, so measurements never race regeneration. Shard curation lists are pinned against the live file census, and wall deadlines scale with shard size.
+- Agent SDK capture default Opus → Sonnet (D1a). The judge default stays Sonnet: a live A/B on the health rubric scored Haiku 2/2/2 against Sonnet's 4/3/4, so the downgrade was pinned back per D1a's regressor clause (receipts in `test/helpers/llm-judge.ts`).
+- Four expensive posture tests demoted gate → periodic (D2a).
+- Paid runners: `EVALS_JOBS` (shard process count) split from `EVALS_CONCURRENCY` (within-shard), `--retry 1` on every retry-bearing paid path, one preflight API ping per run instead of ~30, detach timeouts floor-enforced against the live shard census by `test/eval-detach-timeout-floor.test.ts`.
+- CI: eval Docker image cache keyed on Dockerfile + bun.lock so version bumps stop rebuilding it; Bun 1.3.13 in the image; `skill-e2e-review` split into three matrix shards; actionlint runs a digest-pinned prebuilt image; five single-core jobs right-sized; lint and skill-docs stop double-running every PR commit; the Windows lane caches bun installs and runs the curated suite instead of a hand list.
+- Skill-routing E2E fixture installs skill heads, not ~18 full SKILL.md files.
+
+### Fixed
+- Ctrl-C actually cancels a run: the signal forwarders now schedule the parent runner's own exit and both shard pools stop launching new work on `SIGINT`/`SIGTERM` — previously the parent killed the current child and kept spawning API-burning shards.
+- The intermittent whole-suite wedge: `browse/src/browser-manager.ts` `close()` captures the Chromium child before the close race and SIGKILLs it when graceful close times out, with unit coverage of the fallback.
+- The strict-output classifier keeps stdout and stderr line assembly separate, so interleaved pipe chunks cannot hide a failure line or fake a truncation. Windows shard kills take the whole process tree (`taskkill /T`) instead of orphaning grandchildren.
+- Redaction calibration: `${var}` template interpolations and ALL-CAPS `USER:PASSWORD` doc placeholders no longer block pushes, while a bare `$word` password and a literal lowercase `password`/`pass` at the URL-password position still do; the two connection-string validators share one helper so they cannot drift.
+- Supabase pooler DSNs percent-encode the password segment, `wait --timeout` rejects non-numeric values instead of polling forever, response-body read failures retry as transport errors, and the CLI entrypoint lets stdout drain before exiting.
+- The paid-suite preflight fails fast on a missing `claude` binary, a spawn error, or a timeout — outages surface once in the parent instead of once per shard.
+- Same-name branches from different forks can no longer cancel each other's CI runs (concurrency groups key on PR number across the free, eval, and Windows lanes).
+- Selection integrity: the `touchfiles.ts` facade, `e2e-helpers.ts`, and `paid-test-set.ts` are global touchfiles (an edit to selection-path code can never select zero tests); duplicate touchfiles keys fail the suite; rehomed E2E files list themselves in their own dependency maps; retro E2E passes require the report on disk.
+- The intermittent context-save-list eval test that had never passed in 26 recorded runs now passes.
+- `variants-retry-after` HTTP-date flake; watchdog E2E 22.7s → 1.5s; supabase-provision tests 16.5s → 0.45s via an in-process TS port.
+- `package.json` version drift against VERSION.
+
+### For contributors
+- `test:gate:sharded` / `test:periodic:sharded` run tiers through the sharded paid runner; `eval:bg:*` wrap runs in `gstack-detach` with a per-tier watchdog and the machine-wide `gstack-evals` lock.
+- Five pre-existing environment failures quarantined individually with in-file receipts; two dead-architecture security contract tests deleted.
+- `test/e2e-tier-alignment.test.ts` enforces tier declarations and fails fatally when a sharded-runner mapper cannot see a gate file.
+
 ## [1.65.0.0] - 2026-08-14
 
 **/autoplan, /codex on macOS, and memory ingest work again.**
