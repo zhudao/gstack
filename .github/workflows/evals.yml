@@ -28,7 +28,7 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: meta
         # Key on Dockerfile + lockfile only. package.json is deliberately NOT
@@ -36,9 +36,9 @@ jobs:
         # which rebuilt the image each time for a dependency set that only
         # bun.lock determines. A stale baked package.json is harmless — checkout
         # overwrites /workspace and node_modules comes from the lockfile.
-        run: echo "tag=${{ env.IMAGE }}:${{ hashFiles('.github/docker/Dockerfile.ci', 'bun.lock') }}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${{ env.IMAGE }}:${{ hashFiles('.github/docker/Dockerfile.ci', 'bun.lock', 'patches/**') }}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -54,7 +54,7 @@ jobs:
           fi
 
       - if: steps.check.outputs.exists == 'false'
-        run: cp package.json bun.lock .github/docker/
+        run: cp package.json bun.lock .github/docker/ && cp -R patches .github/docker/patches
 
       # A fork PR's GITHUB_TOKEN only has `packages: read`, so pushing fails.
       # Still BUILD (validates Dockerfile.ci changes), just don't publish. This
@@ -63,10 +63,10 @@ jobs:
       # Registry cache export needs a docker-container builder — the default
       # `docker` driver hard-errors on cache-to (first live run of the trio).
       - if: steps.check.outputs.exists == 'false'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - if: steps.check.outputs.exists == 'false'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .github/docker
           file: .github/docker/Dockerfile.ci
@@ -158,7 +158,7 @@ jobs:
             # row keeps --retry 1.
             retries: 2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -284,6 +284,27 @@ jobs:
             cp "$REPO/$s/SKILL.md" "$PROJ_SKILLS/$s/SKILL.md"
             cp -R "$REPO/$s/sections" "$PROJ_SKILLS/$s/sections"
           done
+          # Pre-seed every ONE-TIME preamble marker so no PTY child ever takes a
+          # first-run branch mid-test. On a fresh runner these are all missing, so
+          # each smoke's preamble fires feature discovery / telemetry / lake-intro
+          # prompts before the behavior under test — and touching the
+          # feature-discovery marker under ~/.claude/skills/gstack/ trips Claude
+          # Code's sensitive-file permission prompt, stalling the run before the
+          # scope gate renders (the documented intermittent
+          # scope-gate-question-NOT-observed failure: outcome=asked was the
+          # permission dialog, not the gate). Dev machines never hit this because
+          # the operator's markers already exist; CI must seed them explicitly.
+          mkdir -p "$HOME/.gstack"
+          touch "$HOME/.gstack/.activated" \
+                "$HOME/.gstack/.first-loop-tip-shown" \
+                "$HOME/.gstack/.telemetry-prompted" \
+                "$HOME/.gstack/.proactive-prompted" \
+                "$HOME/.gstack/.completeness-intro-seen" \
+                "$HOME/.gstack/.plan-tune-nudge-shown"
+          # These two resolve through the gstack root symlink into $REPO —
+          # untracked scratch in the CI checkout, exactly where the preamble looks.
+          touch "$SKILLS_DIR/gstack/.feature-prompted-continuous-checkpoint" \
+                "$SKILLS_DIR/gstack/.feature-prompted-model-overlay"
           echo "--- registry under $SKILLS_DIR ---"
           ls -la "$SKILLS_DIR/gstack" "$SKILLS_DIR/office-hours" "$SKILLS_DIR/plan-ceo-review"
           # Fail fast if any committed target moved/renamed — a dangling symlink
@@ -320,7 +341,7 @@ jobs:
 
       - name: Upload eval results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: eval-${{ matrix.suite.name }}
           path: ~/.gstack-dev/evals/*.json
@@ -341,12 +362,12 @@ jobs:
       # early and never hit it, which is why this stayed hidden). See #1802 CI fix.
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - name: Download all eval artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: eval-*
           path: /tmp/eval-results
