@@ -1,5 +1,129 @@
 # Changelog
 
+## [1.75.0.0] - 2026-08-29
+
+**Your review now hunts over-built code, not just broken code.**
+**And every skill's advice starts with "reuse before you build."**
+
+This release imports the best of ponytail, the code-minimalism ruleset, without importing its build-less posture. /review gains an eighth lens: a simplification specialist that flags unrequested structure (hand-rolled stdlib, one-implementation abstractions, dead flexibility, dependencies duplicating platform features) in a closed five-tag vocabulary. It is advisory only. It cannot dent your quality score, its fixes are never auto-applied, and on a lean diff it tells you something no reviewer ever says: "lean already — nothing to cut." Every tier-2+ skill also gains the reuse ladder (stop at the first rung that holds: this repo, stdlib, native platform, an installed dependency... then build the complete version of what remains) and a bounded closer, so completion reports stop touring every edit. Accepted shortcuts now leave a durable trail: a decision-ledger entry plus a `gstack-shortcut(dec-<id>)` marker in code, harvested into a debt ledger by /retro. Agent hosts without a full install (Zed, Amp, Cursor side projects) get a 1.8KB rules digest to copy into their own rules file. And /autoplan now runs the Eng review last, always, so the required shipping gate reviews the final amended plan instead of a stale one.
+
+### The numbers that matter
+
+Source: this branch's own runs, recorded under `~/.gstack/projects/<slug>/evals/` and the commit receipts.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| /review lenses | 7 | 8 (simplification, advisory) | +1 |
+| Simplification lens on this branch's own 5,190-line diff | n/a | `net: -37 lines possible` | dogfooded |
+| AskUserQuestion preamble section, per skill | baseline | -236 B (~9.7 KB across 41 skills) | gated by a live A/B: post-cut 7/7 format elements, substance equal to pre-cut |
+| Instruction-tier artifact for rules-reading hosts | none | 1,765 B committed digest (2,048 B budget) | new |
+| Skills-earn-their-tokens benchmark | none | 3 tasks x 2 arms (with/without skill), judged on the diff left behind | new |
+| /autoplan phase order | CEO, Design, Eng, DX | CEO, Design, DX, Eng always last | the gate sees the final plan |
+
+The A/B receipt is the one to trust: the AskUserQuestion cut only landed because a two-arm eval on real SDK captures showed the shorter render lost nothing (the gate outranked the approval, by design).
+
+### What this means for your workflow
+
+Run /review on a branch you suspect is over-built and read the `[ADVISORY]` rows plus the `net: -N lines possible` footer; nothing blocks, nothing auto-applies, you decide. Take a shortcut in an AskUserQuestion and it stops rotting silently: /retro reads the ledger back to you with its upgrade trigger. If you work in a rules-reading editor without a gstack install, copy `agents-digest/gstack-AGENTS.md` into your rules file and the ethos rides along.
+
+### Itemized changes
+
+### Added
+
+- **Simplification review specialist** (`review/specialists/simplification.md`): closed tag vocabulary (`delete:` / `stdlib:` / `native:` / `speculative:` / `shrink:`), dispatched on diffs over 100 lines, `--simplification` force flag. Advisory carve-out end to end: excluded from the quality score and findings-count header, ASK-only in Fix-First, `[ADVISORY]` labels, parent-printed `net: -N lines possible` footer, and a `Simplification: lean already — nothing to cut.` zero-findings line. Precision guarded by a false-flag fixture (a complete-but-lean diff must yield NO FINDINGS) and coverage-vs-structure boundary text (tests, error paths, and edge cases are never deletion targets).
+- **Reuse ladder in Search Before Building** (every tier-2+ skill): before writing new code, stop at the first rung that holds — a helper already in the repo, the stdlib, a native platform feature, an already-installed dependency — then build the complete version of what remains. Root-cause rule included: one guard in the shared function beats a guard in every caller.
+- **Bounded closer** (every tier-2+ skill): after completing work, report what changed, what was skipped, what to watch — a few short lines, with report-shaped skills (/qa-only, /plan-*-review, /retro, /document-generate) explicitly exempt because their report IS the work.
+- **Shortcut debt ledger**: accepting a Completeness ≤ 7 option on a durable-scope call now logs the ceiling and upgrade trigger to the decision ledger and marks each cut corner with `gstack-shortcut(dec-<id>): <ceiling>, upgrade when <trigger>`; /retro Step 11.5 harvests the markers, joins them on decision ids, and tags `unlinked` and `no-trigger` rot risks. Markers survive the redaction engine (pinned by test).
+- **Instruction-only host tier**: `agents-digest/gstack-AGENTS.md`, a committed, generated, budget-capped (2,048 B) digest of the ethos, reuse ladder, and voice rules. Setup's openclaw/hermes explainer arms print its path for copy-in; setup never writes a user's AGENTS.md (tripwire-tested, including laundered write shapes). README's host table now matches what setup actually does.
+- **With/without-skill arm benchmark** (periodic eval): three build-shaped tasks (a native-platform overbuild trap, a CRUD endpoint, a bugfix with planted decoys) run through real `claude -p` sessions twice — with the behavioral-layer skill installed and without — and the staged diff each arm leaves is judged for over-engineering on a 0-3 rubric with a full failure taxonomy (judge_error cells excluded from aggregates but surfaced; zero-diff arms are valid cells). Each cell also runs the fixture's own functional oracle (`checks=pass|fail|none`), so a refusal, a broken implementation, and working code stay distinguishable — correctness before LOC. A research instrument, not a gate.
+- **/autoplan runs Eng last, always**: mandatory order is now CEO → Design (if UI scope) → DX (if developer-facing scope) → Eng, with a single final approval gate; clearly-wrong premises queue as User-Challenge items instead of stopping mid-run, and accepting one at the gate amends the plan and re-runs Eng on the amended plan. Static test pins the Eng-terminal order.
+
+### Changed
+
+- **AskUserQuestion preamble section slimmed** (-236 B per skill, ~9.7 KB across the corpus): duplicate statements of the completeness rule, auto-decide marker, and tool-not-prose rule removed while keeping every verbosity floor and all 14 format pins. Landed only after a live NOT-WORSE A/B (pre-cut vs post-cut render, identical prompt, SDK capture) showed zero format-element loss and equal recommendation substance.
+- **Terse-mode label tells the truth**: the claimed savings is now the measured 2.6 KB, not "~3-5 KB".
+- `/review` checklist knows Completeness Gaps and Simplification are orthogonal (coverage up, structure down), and a `gstack-shortcut` marker downgrades a would-be gap finding to acknowledged debt — but only when its decision id resolves in the ledger; an orphan marker is reported as a forged suppression (cross-model adversarial catch).
+
+### Fixed
+
+- **Version bumps no longer strand the agents digest**: `gstack-version-bump write --regen-digest` reruns the repo's digest generator in the same mutation (explicit opt-in — a plain `write` never executes repo files it merely finds), and both ship's and land-and-deploy's evidence gates allow-list the digest alongside VERSION. Without this, every release commit of this repo would have failed the freshness CI check.
+- **The free-suite flaky retry can no longer mask real failures**: the retry pass vetoes on ANY unattributable failure evidence (headerless failures, unhandled errors between tests, truncated runs), an empty shard carries an empty failing-files list instead of crashing the retry, and a dead conditional was removed.
+- **Version allocation distrusts laundered git**: `gstack-next-version` consults `ls-remote` only when origin is actually configured, and a configured origin that "successfully" advertises zero heads (the Conductor git shim's failure shape) now falls back to local refs with a loud warning instead of reading an empty queue and reallocating a taken version. Both shim shapes are pinned by regression tests.
+- **Browse temp paths are portable**: local file serving accepts both the browse TEMP_DIR and the OS tmpdir (`TEMP_DIRS` allowlist), while remote serving stays pinned to TEMP_DIR only (the security asymmetry is test-enforced). An untrustable TMPDIR (`/`, `$HOME`, an ancestor of the daemon's cwd) is ignored rather than trusted for the daemon's lifetime.
+- Setup's instruction-tier pointer prints a script-anchored digest path instead of a cwd-relative one that broke when invoked from another directory.
+- /retro's shortcut harvest no longer reports phantom debt from files that merely document the marker convention (placeholder filter + judgment prose).
+- The arm benchmark harvests against a recorded seed commit (immune to agents that commit and push), ignores node_modules, survives multi-megabyte patches, names its judge-diff cap and reports truncation loudly, and wraps untrusted diffs in per-call random sentinels so a faked closing marker cannot steer the judge.
+- The AUQ A/B eval treats a judge failure on either side as inconclusive instead of coercing it to a fake degradation-or-mask, and reads its pre-cut arm from a vendored fixture instead of a branch-local SHA that dies with the branch.
+
+### For contributors
+
+- `bun run test` gains sandbox knobs: `GSTACK_FREE_JOBS` overrides shard count (digits-only, loud on garbage) and `GSTACK_FREE_RETRY_FLAKY=1` opts into one serial retry pass for syscall-supervised sandboxes (default stays OFF — dev boxes should see flakes). `scripts/sandbox-doctor.sh` makes a Vercel/Conductor cloud sandbox run the suite green in one idempotent command (documented in docs/TESTING_INTERNALS.md): atomic git-shim patching with a backup, loud on patch-pattern drift, :99-socket Xvfb detection, dnf-gated installs, and it survives a missing /dev/shm. A failed digest regen now fails `bun run gen:skill-docs` locally instead of deferring the red to CI.
+- The arm-benchmark selftest (fixture integrity, judge plumbing, install asymmetry) now runs FREE in `bun run test` on every PR via `test/arm-benchmark-selftest.test.ts` — the paid periodic instrument can no longer burn money on broken fixtures.
+- Eval-store schema v2: harvest records carry `{insertions, deletions, net}`; `recordE2E` now populates `tokens_used`.
+- Touchfiles dep lists closed gaps (fixtures, judge helper, harness, ship render) and the context-budget ratchet fixture was re-captured, locking the AskUserQuestion reduction so it cannot silently regress.
+- New coverage: TEMP_DIRS widening + remote-serving asymmetry, shortcut-marker writer/harvester grammar joint, sandbox-doctor shell guards, GSTACK_FREE_JOBS parsing, laundered-ls-remote shims, digest freshness/budget/writer tripwires, and a real generator round-trip through the version bump.
+## [1.74.0.0] - 2026-08-29
+
+**Green now means green: every test runs somewhere, provably.**
+**The suites got faster by deleting lies, not by skipping work.**
+
+This release is a full audit and overhaul of gstack's own test and CI system. The audit found the safety net lying in specific ways: three CI eval jobs ran zero tests and passed on every PR, four paid test files could never execute in any lane, the required free-tests check silently skipped nine make-pdf gates on Linux for their entire life, and about 57 E2E files ran in no scheduled lane at all. All of it is fixed, and each fixed class now has a tripwire so it cannot quietly return.
+
+Speed came from structure. The free suite packs shards by recorded per-file durations instead of file counts, and the serial tree-mutating shard is gone entirely: the generator gained a main() guard and renders every host into out-dirs, so the suite never writes the live tree. The paid lane re-platforms CI onto the same sharded runner you use locally, with one planner manifest, sliced executors, and a report that fails closed when a slice's artifact never lands.
+
+### The numbers that matter
+
+Sources: live CI run 33194732051 (pre-change shard timings), the committed durations seed (`bun run test:free --record-durations`, 496 files), and the planner's own output on this branch.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Free-suite shard spread | 28s to 97s | 6 shards, ~80s predicted each | balanced |
+| Serial mutator tail, every run | ~35-40s | 0s (shard dissolved) | gone |
+| Paid files runnable in NO lane | 4 | 0 | tripwired |
+| E2E files in no weekly CI lane | ~57 | 0 (3 reasoned excludes) | contract |
+| Zero-test green CI jobs per PR | 3 | 0 | deleted |
+| Touchfiles keys missing self-registration | 129 | 0 | enforced |
+| Hand-tuned paid timeout literals | 395 | 97 (46 justified) | 5 tiers |
+
+The self-registration number is the quiet one that matters most: before it, editing only a test's assertions selected nothing, so the changed test never ran on the change that changed it.
+
+### What this means for you
+
+`bun run test` is honest and flat: no hidden slop scan, no serial tail, shards that finish together. Paid CI and local paid runs share one engine, so a shard that never starts, a slice that dies, or a file that self-skips everything is a red check with a name, never a silent pass. When you add a paid test, the orphan tripwire forces it into the census the same commit. Upgrade, run `bun run test:free`, and read `docs/TESTING_INTERNALS.md` if you maintain tests.
+
+### Itemized changes
+
+#### Fixed (what green means)
+- The required free-tests lane builds the gate binaries (`build:gates`) and runs the nine make-pdf e2e gates that silently self-skipped on Linux since they existed; `GSTACK_EXPECT_BINARIES=1` + `ci-prereqs.test.ts` invert the skip polarity in CI so the class cannot return.
+- Deleted the two vestigial eval matrix rows that ran zero tests per PR (codex/gemini, periodic-tier files with no row tier) and armed `e2e-pty-plan-smoke` with its missing `tier: gate` (it burned ~7 minutes of setup then skipped every describe).
+- Activated the four paid test files whose names fell outside the paid globs (net execution zero, forever): carve-section-loading, codex-e2e-plan-format (+ its missing periodic gate), codex-e2e-recommendation-substance, llm-judge-recommendation. New `paid-orphan-tripwire.test.ts` fails the suite on any EVALS-gated file outside the globs.
+- 135 touchfiles keys now name their own declaring test file; the tier-alignment warning became a hard failure with a 4-entry ratchet.
+- Five quarantined browse tests reactivated (two guard the extension's privileged-message security boundary); root cause was stale dev-machine state, proven byte-identical since v1.66.
+- The two `expect(true)` paid stubs are `test.todo` (reported as todo, never pass), keeping their selector surfaces.
+- Five test files stopped assigning `GSTACK_HOME` at module scope (it leaked into every sibling in the shard process); a static tripwire blocks recurrence.
+- Shared `/tmp` artifact paths in six PTY tests became per-test mkdtemps (they collided under retry and parallel worktrees); 18 live-repo `cwd:` sites audited and reason-commented.
+- `restrictDirectoryPermissions` warns and skips symlinked dirs on both platforms (chmod and icacls dereference the link), closing the Windows lane's standing red with a platform-aware regression test.
+- Judges resolve their model through `lib/eval-model.ts` (the global `GSTACK_EVAL_MODEL` override now applies) and retry 429s with jittered exponential backoff instead of one fixed second.
+- Seven 28-minute test timeouts inside 25-minute CI jobs trimmed to the physical ceiling; an `eval-budgets` fit test pins that budgets above the wall cannot come back.
+
+#### Changed (speed and structure)
+- Free suite: duration-aware LPT shard packing from the committed seed (`scripts/free-test-durations.json`, refresh with `bun run test:free --record-durations`), duration-aware wall timeouts, per-shard prediction logging, corrupt-seed fallback to hash sharding. The `--shard` CI-matrix contract is untouched.
+- `TREE_MUTATING` is empty: `gen-skill-docs.ts` gained a `main()` guard (imports never regenerate; pinned by an import-purity test) and `--out-dir` renders every host, so all eight former mutators render into mkdtemps and the four ratchet readers rejoined the parallel shards.
+- Paid runner: full-stream spooling to per-shard log files (no more 30-minute streams held in RAM), shared `runShardChild` lifecycle with the expectedFiles enforcement drift fixed, parent-computed selection propagated to children via `EVALS_SELECTION_JSON` (fail-open), retry parity as literals.
+- Paid CI re-platform (parity phase): evals.yml gains a sliced lane (planner manifest, 6 executors, fail-closed report) running alongside the legacy matrix; evals-periodic.yml runs ALL periodic-tier tests weekly minus the reasoned exclusions in `periodic-exclude-data.ts`, plus a weekly full-gate census and a tracking-issue upsert on red weeks. The hollow-shard guard fails exit-0 shards that executed zero tests under `EVALS_ALL`.
+- 298 paid timeout literals swept onto five named tiers (`test/helpers/eval-budgets.ts`), round-up only.
+- `slop:diff` left `bun run test` (it silently added up to 240s) and runs in quality-gate per PR instead; `/review` keeps its interactive run.
+- The four worst fixed sleeps (300s/30s/30s/20s) became condition polls or stdin-EOF-bound child lifetimes; the parent-watchdog test dropped from 24s to 3.6s with a strictly stronger assertion.
+- CI hygiene: least-privilege permissions on every workflow, one pinned Bun version everywhere (drift-tested), the image-tag triple bound by test, ci-image stops rebuilding identical images on every ship, quality-gate dropped its 74-second full-history checkout, fork-safe concurrency keys, timeouts on every job, windows caches warm-start on lockfile bumps.
+
+#### Added
+- 95 tests for six zero-coverage surfaces: the eval CLI family (eval-list/compare/summary/select), slop-diff, the code-intelligence CLI, browse media-extract and session-cookie-store, and lib/version-source.
+- Policy and tripwire tests: paid-orphan tripwire, GSTACK_HOME module-scope tripwire, bun-version drift, image-tag binding, gen-skill-docs import purity, out-dir byte-identity for external hosts, manifest/slice/report contract, eval-budget fit and ratchet, periodic-exclude policy, selection propagation drift.
+- `test/helpers/run-bin.ts`: one spawnSync wrapper replacing ~36 near-identical local `run()` helpers (first three files migrated; the rest are a filed follow-up).
+
+#### For contributors
+- `docs/TESTING_INTERNALS.md` documents the new runner architecture; CLAUDE.md's testing prose matches it. TODOS.md closes the absorbed backlog items (periodic coverage contract, eval-harness observability, the sidebar trio, which turned out already deleted) and files the follow-ups: legacy matrix deletion after parity, the required-check decision, browse /tmp-namespace hardening, PTY boot-readiness waits, the single typed test registry, and the bun-native LPT swap at the next Bun unpin.
+
 ## [1.72.0.0] - 2026-08-28
 
 **"Go register an API key" now drives your real browser.**
