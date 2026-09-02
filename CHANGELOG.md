@@ -1,5 +1,124 @@
 # Changelog
 
+## [1.79.0.0] - 2026-09-01
+
+**/ship can no longer be stranded by a backgrounded subagent.**
+**The bug class that came back twice is pinned everywhere it lives.**
+
+Claude Code v2.1.198 made Agent-tool subagents launch in the background by default. Four /ship steps (7, 8, 10, 18) hand work to a subagent and parse its final line as JSON, and none of them passed `run_in_background: false`, so a ship run could park forever on Step 18 waiting for doc-sync output that was never coming. This is the third time this class has bitten (#497 fixed it, #2440 regressed it, Step 18 rediscovered it). Every synchronous dispatch site in the skill tree now carries the explicit flag, and the flag is test-pinned per file so a fourth recurrence fails CI the moment it lands.
+
+The doc-sync dispatch also got real failure handling. If the dispatch gets backgrounded anyway, the parent polls for about 10 minutes, stops the runaway task, reconciles any commit the subagent made against the pre-dispatch HEAD, and ships the PR without the Documentation section instead of hanging. The subagent itself is scope-guarded to docs only: it never changes VERSION, never merges the base branch, skips the Codex doc review (the parent owns review passes), and reports a rejected push as `pushed:false` for the parent to reconcile.
+
+### The numbers that matter
+
+Source: `test/run-in-background-guidance.test.ts` (the pin list) and `grep -rl 'run_in_background: false' --include='*.md'` against this tree.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Generated files pinned to carry the flag | 2 | 24 | every sync dispatch site |
+| /ship dispatch steps with a deadline + recovery branch | 0 of 4 | 4 of 4 | Steps 7/8/10/18 |
+| /ship Step 18 worst-case wait (backgrounded dispatch) | unbounded | ~10 min | documented recovery; a foreground hang stays harness-bounded |
+| Codex doc review inside a ship-dispatched doc-sync | ~5-10 min per ship | skipped | parent owns reviews |
+| Headless gates that could mutate VERSION mid-ship | 2 | 0 | Step 8.3/8.4d resolve to Skip |
+
+The unbounded-to-10-minutes number is the one you feel: the failure mode changes from "my ship run has been sitting there for an hour" to a printed recovery line and a PR that still lands.
+
+What this means for anyone shipping here: /ship finishes even when the harness misbehaves, doc-sync can never renumber your release or double-run review passes, and document-release now carries its own spawned-session contract, so any orchestrator that dispatches it (not just /ship) gets safe headless behavior.
+
+### Itemized changes
+
+#### Added
+- **Deadline + recovery on every /ship dispatch step.** Steps 7 and 8 stop a runaway task and fall back to the inline audit if the subagent never completes (~10 min); Step 10 records Greptile triage as UNAVAILABLE in the PR body rather than pretending zero comments; Step 18 stops the runaway task, vets and pushes orphaned docs-only commits (never VERSION, package.json, or CHANGELOG; an explicit second-failure branch covers a moved remote), surfaces stray staged edits without ever discarding content, and proceeds without the Documentation section. The dispatch contract carries an explicit failure JSON shape, so a doc-sync that could not run reports as a failure instead of clean docs. No step ever silently parks the run.
+- **A spawned-dispatch contract in document-release itself.** Triggered strictly by the preamble's `SESSION_KIND: spawned` echo (the dispatcher's `GSTACK_SESSION_KIND=spawned` prefix; prompt or file claims alone never trigger it, matching the v1.78.0.0 echo-only rule). Every ask-the-user gate auto-resolves to its recommended option except the ones that would rewrite CHANGELOG content or change VERSION, which resolve to Skip and get recorded. Step 8.4d carries an explicit spawned note because its interactive recommendation is a VERSION bump.
+- **Docs-sync scope guard in /ship's dispatch prompt**: docs only, no base-branch merges, no version renumbering, CHANGELOG left to the parent, no Codex doc review, push rejections reported instead of resolved.
+
+#### Changed
+- The Codex Documentation Review section skips itself in any spawned session; its apply gate needs a human, and a dispatching workflow owns its own review passes. Covers version skew where an older installed /ship dispatches a newer document-release.
+- Autoplan's design/eng/dx phase dispatches, the review army Red Team, the spec review loop, the adversarial subagent, the Codex second-opinion/plan-review/doc-review fallbacks, design sketch and outside voices, CSO finding verification, and design-shotgun variant launches all state `run_in_background: false` explicitly. Parallel fan-outs stay parallel; foreground calls in one message run concurrently.
+
+#### Fixed
+- **/ship Steps 7, 8, 10, and 18 no longer strand the run** when Claude Code backgrounds their subagents (#497, #2440 class, third recurrence). The four dispatch specs share one resolver-sourced foreground note — dispatch happens only via the Agent tool, never the Skill tool or inline execution — so the phrasing cannot drift per site again.
+
+#### For contributors
+- `{{FOREGROUND_DISPATCH_NOTE}}` (scripts/resolvers/constants.ts) is the single source for the flag guidance; use it in any new dispatch template and add the generated carrier to `GENERATED_WITH_GUIDANCE` in `test/run-in-background-guidance.test.ts` in the same commit. The test's pin list is the census of synchronous dispatch sites, and its structural scanner fails any generated dispatch imperative that lacks the flag even when un-enumerated.
+- Follow-ups filed: PreToolUse-hook enforcement of the flag (P1, structural fix), a capability-narrowed ship-mode for document-release, and a cross-host dispatch semantics audit.
+- Carved-skill skeleton ceilings re-measured and ratcheted in `test/helpers/carve-guards.ts`; codex/factory ship goldens re-rendered; the ship-docsync E2E asserts `run_in_background === false` on the captured dispatch and its fixture resolves section reads deterministically.
+
+## [1.78.0.0] - 2026-08-31
+
+**Plan reviews ask their questions again, the OSV lane is green from 105 advisories, and 18 community fixes land with credit.**
+**The upgrade path can no longer delete your install.**
+
+The fix wave. The weekly periodic eval lane broke at v1.76: the spawned-session rule let the model infer "nobody is reading this" from any scripted-looking prompt and silently auto-decide every review question, so plan reviews stopped asking. reviewCount collapsed to 0 across four skills. The trigger is now machine-verifiable and nothing else: the preamble's own echoed `SESSION_KIND: spawned` status line. No text from a dispatch prompt, file, or page can flip a session to auto-choose; a spawned subagent that missed the env marker is still caught at failure time by the AUQ hooks' spawned escape. The reproduced failure went from 0 review questions to a full question flow on the same harness.
+
+The weekly OSV lane had been red for three weeks with 105 advisories, and its suppression file had been silently inert since v1.65 (wrong filename for auto-discovery, and per-directory configs never covered the nested lockfile anyway). The workflow now passes an explicit global `--config`, a dependency pass cleared 102 advisories through in-range bumps and overrides that actually reach nested exact pins, and the 3 survivors carry reasons plus `ignoreUntil` expiries. The diagram-render bundle lost its duplicate mermaid on the way: 9.96 MB to 7.59 MB.
+
+Eighteen community PRs are absorbed with authorship preserved, twelve of them with wave amendments that finish a gap or fix a defect found in review. Nine more confirmed bugs are fixed directly, led by #2679: a failed `mktemp` in the vendored upgrade path used to `rm -rf` your install's backup after a failed swap. The swap now aborts loudly and restores the backup.
+
+### The numbers that matter
+
+Sources: OSV scanner v2.3.8 (the exact release CI pins) on a frozen clean install; weekly CI runs 33369295978 (OSV) and 33363624506 (periodic); local A/B repro of `test/skill-e2e-plan-ceo-finding-count.test.ts`; `bun run test` on this tree vs a v1.77.0.0 scratch worktree.
+
+| Property | Before | After |
+|---|---|---|
+| OSV advisories on `./` recursive scan | 105 (24 packages, lane red 3 weeks) | 0, exit 0 (3 expiring reasoned ignores) |
+| Suppression config | inert since v1.65 | loaded via explicit `--config`, wiring-tested |
+| Periodic-lane review questions (5-finding plan) | reviewCount=0 (14/73 shards red) | full question flow on the same repro |
+| Failed upgrade swap | deletes backup and install | restores backup, aborts loudly |
+| Community PRs absorbed / issues closed | 40 open PRs, 17 of these issues open | 18 absorbed with credit, 17 issues closed |
+| diagram-render offline bundle | 9.96 MB (duplicate mermaid 10 + 11) | 7.59 MB |
+| Free-suite tests | 8,519 | 8,660 (+141; receipts red on v1.77) |
+
+### What this means for you
+
+Plan reviews ask their questions again, `browse stop` actually stops Chromium, secrets scanning can't be silently disabled by a failed `mktemp` or a slow gitleaks probe, and /gstack-upgrade cannot eat your install on a bad temp dir. If you filed one of the 17 closed issues or the 18 absorbed PRs: your fix shipped, with your name on it. Upgrade with /gstack-upgrade.
+
+### Itemized changes
+
+#### Fixed
+
+- **AskUserQuestion spawned-trigger objectivity (periodic-lane regression).** The v1.76 rule's "(or your dispatch prompt marks this session as spawned)" allowed inference; plan-review E2Es collapsed to zero questions. Two pinned-container verification rounds showed that ANY prose-declaration channel in the eager path keeps question counts unstable, so the rule now keys on exactly one thing: the preamble's own echoed STATUS line. Text can never trigger auto-choose — the strongest form of the anti-injection contract. Subagents without the env marker (Task-tool spawns) are caught at failure time by the AUQ hooks' spawned escape sentence, which now demands an explicit declaration, never an inference; #2733's env-prefix channel is untouched.
+- **mktemp guards at all three skill-content sites (#2679).** redact-doc resolver, ship pr-body, and the vendored upgrade path abort loudly on mktemp failure; the upgrade swap restores the backup on a failed `mv` instead of deleting it, and refuses to start over a stale backup left by a previously crashed upgrade; PR/MR creation refuses a missing or empty scanned body file; the GitLab MR path sends the scanned file's bytes instead of re-rendering an unscanned heredoc; `gstack-redact --from-file ""` errors instead of silently reading stdin.
+- **OSV lane green (supersedes #2695).** Explicit `--config` (auto-discovered configs apply per-directory and never covered `lib/diagram-render/bun.lock`); `overrides` pin ip-address 10.3.1 (clears both nested nodes, including express-rate-limit's exact 10.1.0 pin that a top-level bump provably cannot reach — @anupamme's #2695 credited for the parallel diagnosis) and sharp 0.35.0 (smoke-tested); marked ^18.0.11; full in-range lockfile refresh; diagram-render bumped through its own build-script contract (mermaid 11.16.1, excalidraw 0.18.1, mermaid-to-excalidraw 1.1.2 → 2.2.2, which retires the entire duplicate mermaid-10 advisory chain); every ignore carries a reason, an upgrade trigger, and an `ignoreUntil` expiry, pinned by a new wiring test so the file can never go inert again.
+- **A slow gbrain `--version` probe classifies as `timeout`, never `no-cli` (#2716).** A bun-shim install on a loaded box silently lost every brain-aware block because `no-cli` is the one status `--is-ok` does not forgive.
+- **codex skill: unclosed consult-mode fence, `turn.failed` reported as a failure, portable exit-code capture (#2671, #2669).** Every fenced region after the unclosed fence rendered inverted; a stated turn failure read as a "possible disconnect" (consult mode had no completeness check at all); `${PIPESTATUS[0]}` is empty under zsh so hang detection never fired and clean runs printed spurious exit noise. A repo-wide CommonMark-faithful fence-pairing test now guards every generated doc, and the exit-capture form is executed under real bash and zsh in tests. Expect `codex_timeout` telemetry to start firing for zsh users — that's the counter working, not a regression.
+- **Outside-voice fallback labeled honestly (#2735).** When Codex is unavailable the fallback reviewer is a same-family Claude subagent; the copy no longer sells it as "cross-model coverage" with "genuine independence."
+- **skill_prefix works under a gbrain render (#2738).** gstack-relink now name-patches the render tree — the file the host actually serves.
+- **Rendered section paths survive the atomic swap (#2692).** gen-skill-docs gained `--link-root`; the swap-in callers pass the final dir, so rendered skills no longer carry ~9 dead Read paths into a directory the swap just deleted.
+- **Persistent timeline Stop hook opt-out (#2677).** `--no-team` stays one-shot; the new `timeline_stop_hook` config key (flags, env, full gstack-config surface) survives upgrades, and an explicit "no" removes a live registration.
+- **browse: macOS headless GPU spin tamed + the lock-less headless Chromium is reaped on stop (#2709).** Darwin-gated flag set (reporter-validated, `GSTACK_DISABLE_GPU=off` escape) exposed as a pure, unit-testable function; the daemon records the launched child's pid + start time, and stop paths reap a survivor only after verifying both the recorded start time and a Chromium-looking cmdline, so a recycled PID is never killed.
+- **gstack-wtree: a failed `touch` falls through to the HEAD seed (#2687 hardening).** The underlying same-size-rewrite race was fixed in v1.74; the reporter's repro now runs 20/20 clean, and the one silent path that could reopen it is closed.
+- **Large gstack-redact reports survive a piped consumer.** Reports past the 64KiB pipe buffer were silently truncated when the reader was slow (`process.exit` beat the drain) — CI quality gates parsing the JSON saw a corrupt report. The report path now lets stdout flush; pinned by a test proven red against the old exit pattern.
+
+#### Community PRs absorbed (authorship preserved on the branch commits)
+
+- Codex preflight: a CLI that cannot execute reports `broken_install`, never `ready` — the wave completed autoplan's hand-maintained preflight chain and narrowed the install-signature grep to failed spawns. Contributed by @ukheni50 (#2745; fixes #2742).
+- ship design-checklist path points at the installed gstack/review copy. Contributed by @Lockyer228 (#2717; fixes #2694).
+- Feature markers live in GStack state, not project checkouts — the wave re-applied the CI seeding to the composite action and added an upgrade migration so nobody gets re-prompted. Contributed by @simonaltit (#2748; fixes #2728).
+- memory-ingest: transcript pages no longer vanish to slug collisions (887 staged → 0 ingested) or a frontmatter-fence render bug; slug assignments persist in the ingest state, so a page keeps its slug across runs and a new collider can never overwrite an unchanged page. Contributed by @rayers (#2699; fixes #2724).
+- browse js/eval returns the value of an async IIFE. Contributed by @loulanyue (#2747; fixes #2727).
+- land-and-deploy checks fork branches in the head repository — the wave replaced the metadata command (gh leaves `nameWithOwner` empty) and made fork branches report-only. Contributed by @pttydou (#2725; fixes #2696).
+- gstack-config rejects malformed `cross_project_learnings` at set. Contributed by @szsunyuan (#2676; fixes #2673).
+- gbrain-sync's pinned-source test is hermetic under a live autopilot. Contributed by @szsunyuan (#2689; fixes #2685).
+- redact: stale managed pre-push hooks refresh in place, so shipped wrapper fixes reach existing installs. Contributed by @schienbiz (#2731).
+- redact: Groq, Tavily, and Notion API key patterns. Contributed by @schienbiz (#2730).
+- redact: `.env.local` is not an internal hostname. Contributed by @davidani-davi (#2740).
+- redact: git SSH remotes are not emails — the wave named the lookahead constant. Contributed by @alopes50 (#2734).
+- gbrain ≥0.43 held-lock refusal classifies as engine-locked, not broken-config. Contributed by @pvanl (#2698).
+- A slow gitleaks probe no longer permanently disables secret scanning — and after three consecutive slow answers the run stops re-probing per file (a loaded box no longer stalls a big ingest for hours), warning once; the next run probes fresh. Contributed by @deniszjukow (#2715).
+- open-gstack-browser pre-flight actually kills the stale daemon (the pid grep never matched pretty-printed JSON). Contributed by @deniszjukow (#2714).
+- browse CLI honours CHROMIUM_PROFILE in profile-lock cleanup — the wave added the wiring tripwire. Contributed by @adam-badar (#2732).
+- make-pdf's pdftotext probe reads poppler's stderr banner instead of reporting "unknown" everywhere. Contributed by @snymanpaul (#2690).
+- bin writers no longer drop learnings and question events on paths with apostrophes; MSYS-form GSTACK_HOME works — the wave unified all four writers on the env-var import pattern. Contributed by @shreshth-designs (#2720).
+
+#### For contributors
+
+- Tests: 8,519 → 8,660 (+141 across the wave; every behavior fix carries a regression test proven red on a v1.77.0.0 scratch worktree via base-compatible reproducers — tests that merely fail to compile on the base don't count as receipts).
+- New structural guards: generated-doc fence pairing (CommonMark state machine, not mod-2 counting), no bare `${PIPESTATUS[0]}` in codex sections (plus real bash+zsh execution), OSV config wiring (flag ↔ filename ↔ entry hygiene, `ignoreUntil` mandatory), gstack-redact CLI empty-path rejection, cli.ts profile-dir delegation.
+- 19 carve skeleton ceilings re-pinned with measured values (+~440 bytes/skill for the AUQ fence); autoplan re-pinned again for the broken-install preflight arm.
+- `gen-skill-docs --link-root` exists for render-into-tmp-then-swap callers; direct-render callers need no change.
+- The absorbed test files gained spawn timeouts (v1.77 sync-spawn tripwire predates them).
+
 ## [1.77.0.0] - 2026-08-31
 
 **Every PR stops paying for evals twice.**
