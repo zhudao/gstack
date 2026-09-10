@@ -197,7 +197,7 @@ The browser registry (Comet, Chrome, Arc, Brave, Edge) is hardcoded. Database pa
 
 Every enumerated gstack-initiated off-machine sink writes a hash-chained, tamper-evident receipt to `~/.gstack/security/egress.jsonl` BEFORE the send — `writeReceipt` in `lib/egress-receipt.ts` for TypeScript callers, `_receipted_curl` / `_receipted_git` from `bin/gstack-egress-lib.sh` for shell scripts. Receipts record a sha256 of the exact bytes sent when the caller owns them (subprocess-owned sends like git pushes record `sha256: null`); they never store the body.
 
-Failure polarity is per-class and pinned by tests. Sensitive sinks are fail-closed: brain-sync pushes, memory-ingest, gbrain-sync, telemetry, ngrok tunnel starts, mcp-verify, and supabase-provision refuse to send if the receipt can't be written (each refusal prints problem + cause + fix). User-facing sinks fail open with a stderr warning — the design binary's OpenAI calls, update-check, the read-only dashboards, and git-class receipts proceed even when the receipt write failed, so a fail-open send can go unrecorded (warned, by design). The new-sink scanner in `test/egress-receipt-wiring.test.ts` fails CI when an off-machine sink ships unwired; its only exemptions are enumerated with reasons (user-directed page fetches, reachability probes, install-doc strings, skill prose).
+Failure polarity is per-class and pinned by tests. Sensitive sinks are fail-closed: brain-sync pushes, memory-ingest, gbrain-sync, telemetry, ngrok tunnel starts, mcp-verify, supabase-provision, and the Memorable bridge's per-prompt `memorable-recall` hand-off (a prompt handed to a local vendor binary; see [docs/memorable-workflow-memory.md](docs/memorable-workflow-memory.md)) refuse to send if the receipt can't be written (each refusal prints problem + cause + fix). User-facing sinks fail open with a stderr warning — the design binary's OpenAI calls, update-check, the read-only dashboards, and git-class receipts proceed even when the receipt write failed, so a fail-open send can go unrecorded (warned, by design). The new-sink scanner in `test/egress-receipt-wiring.test.ts` fails CI when an off-machine sink ships unwired; its only exemptions are enumerated with reasons (user-directed page fetches, reachability probes, install-doc strings, skill prose).
 
 Inspect the ledger with `bin/gstack-egress`: `list` (what gstack attempted to send), `verify` (recompute the chain, exit 3 on tamper), `grants` (the standing consent settings and how to revoke each). `verify` detects in-place edits, reordering, and mid-chain deletion; it does NOT detect tail-truncation, whole-file re-fabrication, or deletion of the ledger itself — guarding against the same-machine, same-user actor who owns the file is out of scope for a forensic log. Threat model: the ledger is forensic observability of ATTEMPTED egress — it records what gstack tried to send so accidents are auditable; it is not an exfiltration control.
 
@@ -340,6 +340,10 @@ Templates contain the workflows, tips, and examples that require human judgment.
 | `{{TEST_BOOTSTRAP}}` | `gen-skill-docs.ts` | Test framework detection, bootstrap, CI/CD setup for /qa, /ship, /design-review |
 | `{{CODEX_PLAN_REVIEW}}` | `gen-skill-docs.ts` | Optional cross-model plan review (Codex or Claude subagent fallback) for /plan-ceo-review and /plan-eng-review |
 | `{{DESIGN_SETUP}}` | `resolvers/design.ts` | Discovery pattern for `$D` design binary, mirrors `{{BROWSE_SETUP}}` |
+| `{{DESIGN_DETECTOR}}` | `resolvers/design.ts` | Probe block + sentinel reading for the user-installed impeccable engine (`bin/gstack-design-detect.ts`); `:phase0` renders design-review's mechanical scan, `:gate` design-html's bounded slop gate |
+| `{{DESIGN_MD_CHECK}}` | `resolvers/design.ts` | Open DESIGN.md format check through `bin/gstack-design-md.ts`, with the one-time conversion offer persisted in the file; `:calibrate` renders the tokens-as-calibration form for /design-review |
+| `{{OVERUSED_FONTS}}` | `resolvers/design.ts` | Role-scoped font lists from `lib/design-catalog.ts` (overused as display, fine as body/UI, mono, banned, verified-free) for /design-consultation |
+| `{{DESIGN_SLOP_BULLETS}}` | `resolvers/design.ts` | Prose-only slop bullets from `lib/design-catalog.ts` (no rule ids) for the proposal skills |
 | `{{DESIGN_SHOTGUN_LOOP}}` | `resolvers/design.ts` | Shared comparison board feedback loop for /design-shotgun, /plan-design-review, /design-consultation |
 | `{{UX_PRINCIPLES}}` | `resolvers/design.ts` | User behavioral foundations (scanning, satisficing, goodwill reservoir, trunk test) for /design-html, /design-shotgun, /design-review, /plan-design-review |
 | `{{GBRAIN_CONTEXT_LOAD}}` | `resolvers/gbrain.ts` | Brain-first context search with keyword extraction, health awareness, and data-research routing. Injected into 10 brain-aware skills. Suppressed on non-brain hosts. |
@@ -347,6 +351,8 @@ Templates contain the workflows, tips, and examples that require human judgment.
 | `{{FOREGROUND_DISPATCH_NOTE}}` | `resolvers/constants.ts` | Canonical `run_in_background: false` guidance for every synchronous Agent-tool subagent dispatch (subagents run in the background by default since Claude Code v2.1.198). Single source of truth; carriers are pinned per file by `test/run-in-background-guidance.test.ts`. |
 
 This is structurally sound — if a command exists in code, it appears in docs. If it doesn't exist, it can't appear.
+
+The generator also owns two files that are not skill docs: `review/design-checklist.md` is rendered from `lib/design-catalog.ts` (through `scripts/resolvers/design-checklist.ts`), and `lib/dom-dump.js` is written from `lib/dom-dump-script.ts`. The checklist `/review` and `/ship` read and the DOM dump `/design-review` runs therefore cannot drift from the catalog and the script the templates describe; `test/design-checklist-sync.test.ts` pins both.
 
 ### The preamble
 
@@ -368,11 +374,14 @@ Three reasons:
 
 ### Template test tiers
 
+Paid-tier cost and speed estimates below predate the current model defaults.
+See [eval defaults and overrides](CONTRIBUTING.md#testing--evals).
+
 | Tier | What | Cost | Speed |
 |------|------|------|-------|
 | 1 — Static validation | Parse every `$B` command in SKILL.md and validate it against the registry; pin the Aside contract sentences and the render wrapper's option mapping | Free | <2s |
 | 2 — E2E via `claude -p` | Spawn real Claude session, run each skill, check for errors | ~$3.85 | ~20min |
-| 3 — LLM-as-judge | Sonnet scores docs on clarity/completeness/actionability | ~$0.15 | ~30s |
+| 3 — LLM-as-judge | `claude-fable-5-1` by default scores docs on clarity/completeness/actionability | ~$0.15 | ~30s |
 
 Tier 1 runs on every `bun run test`. Tiers 2+3 are gated behind `EVALS=1`. The idea is: catch 95% of issues for free, use LLMs only for judgment calls.
 
@@ -482,11 +491,14 @@ The `EvalCollector` accumulates test results and writes them in two ways:
 
 ### Test tiers
 
+Paid-tier cost and speed estimates below predate the current model defaults.
+See [eval defaults and overrides](CONTRIBUTING.md#testing--evals).
+
 | Tier | What | Cost | Speed |
 |------|------|------|-------|
 | 1 — Static validation | Parse `$B` commands against the registry, Aside contract pins, render-wrapper pins, observability unit tests | Free | <5s |
 | 2 — E2E via `claude -p` | Spawn real Claude session, run each skill, scan for errors | ~$3.85 | ~20min |
-| 3 — LLM-as-judge | Sonnet scores docs on clarity/completeness/actionability | ~$0.15 | ~30s |
+| 3 — LLM-as-judge | `claude-fable-5-1` by default scores docs on clarity/completeness/actionability | ~$0.15 | ~30s |
 
 Tier 1 runs on every `bun run test`. Tiers 2+3 are gated behind `EVALS=1`. The idea: catch 95% of issues for free, use LLMs only for judgment calls and integration testing.
 

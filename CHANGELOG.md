@@ -1,5 +1,115 @@
 # Changelog
 
+## [1.84.1.0] - 2026-09-09
+
+### Changed
+- Codex reviews, consultations, and evals now default to GPT-6 Astra. Choose another model with `GSTACK_CODEX_MODEL` or an explicit model in your request; the readiness probe checks that same selection.
+- Claude outside voices and eval capture/judging now default to Fable 5.1. Outside voices accept `GSTACK_CLAUDE_MODEL`; evals retain their explicit and environment model overrides. Warmup and distillation keep their cheaper defaults.
+
+### Fixed
+- Native Codex reviews honor the selected model even when the CLI has a separate review-model pin. Claude judges parse text after thinking blocks, and arm judgments omit the temperature setting Fable does not support.
+- Frontier judges have enough output budget for thinking and JSON. Workflow evals read generated sections in execution order, without duplicated content.
+- Ship and plan reviews keep approval gates with the parent agent, preserve readiness checks, and use project-native test commands. QA scoring and monitoring rules are explicit; Aside drive options wait for a successful readiness probe.
+- Benchmark timing uses the navigation entry's actual fields. Deploy setup collects missing configuration, and failed vendored upgrades restore their backup instead of deleting it.
+- Retro reports distinguish verified merges from PR references, use the session date for snapshots, and define report ordering. The quality eval includes compare-mode instructions instead of cutting them off.
+- Documentation review runs before publication so approved fixes reach the PR. Changelog protection, unavailable-review handling, and raw/enveloped PR-body handling are consistent across the workflow.
+
+## [1.84.0.0] - 2026-09-09
+
+**gstack's design skills now start with 61 deterministic anti-pattern checks, in your voice, then spend their judgment where a detector cannot.**
+**DESIGN.md is written in the open format that impeccable and Google Stitch read, and the AI-slop list lives in one typed catalog instead of four drifting copies.**
+
+If you have [impeccable](https://impeccable.style) installed, `/design-review`, `/design-html`, `/review`, and `/ship` run its engine first and hand you its findings as `FINDING-NNN [rule-id]` rows with file:line and a handoff (`/impeccable typeset`, `layout`, `colorize`, ...) before the LLM pass reads a page. gstack never runs impeccable's installer or launcher. The first time a design skill finds no engine it asks once: download the 16 MB engine binary from impeccable's own GitHub release into `~/.impeccable`, checked against a checksum gstack pins and recorded in your egress ledger first, or not. Say no and nothing changes and nothing nags; `gstack-config set design_detector off` silences every trace. The probe only reads files, the engine runs only from under your home directory, and a checked-out repository can never make gstack execute one of its own files.
+
+On a live URL, `/design-review` scans the rendered page: the DOM is dumped with linked stylesheets inlined and scripts, input values, handlers, and query strings stripped, redaction-checked, kept owner-only, and the engine reads that, so Rule 4 holds on a deployed site. `/design-consultation` writes the open DESIGN.md spec (tokens in front matter, eight canonical sections, your Motion and Decisions Log kept). An existing file is converted only when you say so, once, and the answer is recorded in the file.
+
+### The numbers that matter
+
+Source: `git diff origin/main --shortstat`, `lib/design-catalog.ts` (`bun -e` over the exports), the free-suite log recorded by `gstack-evidence`, and the paid E2E rerun on this branch (`test/skill-e2e-design.test.ts`, `test/skill-e2e-review.test.ts`, 12 cases).
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Deterministic checks in a design review | 0 | 61 rules (impeccable's engine, one consented download away) | evidence before judgment |
+| Places the AI-slop vocabulary lived | 4 files, drifting | 1 typed catalog, 86 entries (57 slop, 29 quality) | `review/design-checklist.md` is generated from it |
+| Skills that run the detector | 0 | 4 (`/design-review`, `/design-html`, `/review`, `/ship`) | same rule ids everywhere |
+| What a scan can read | source files | source files or the rendered DOM of a live URL | works on deployed sites |
+| DESIGN.md format gstack writes | private schema | open DESIGN.md spec | impeccable and Stitch read it |
+| New `test()` declarations (platform-gated ones included) | | 194 across 11 files | free suite: 9,206 tests, 12/12 paid E2E |
+
+The row you feel is the first one: a purple gradient, a kicker above a heading, a nested card, or `Inter` as the display face is a machine finding with a file:line before anyone forms an opinion, so the review's judgment goes to hierarchy, trust, and copy.
+
+What this means for anyone shipping a UI with gstack: say yes once when a design skill offers the engine (or install impeccable yourself), then run `/design-review` as before. The mechanical rows arrive first, tagged, deduplicated against the checklist, and calibrated against your DESIGN.md tokens. Never install it and every design skill behaves as in v1.81, with sharper doctrine.
+
+### Itemized changes
+
+#### Added
+- **Design detector** (`bin/gstack-design-detect.ts`, config key `design_detector: auto|off`): `probe` reports `IMPECCABLE_READY | NOT_CACHED | NOT_AVAILABLE | DISABLED` plus skill, hook, and config-ignore lines without executing anything; `scan` runs the user-installed engine over repository files, changed frontend files (`--changed <base>`, NUL-safe, batched), or DOM dumps under `~/.gstack/projects/<slug>/designs/`, and prints one normalized JSON document plus a fenced, untrusted `DETECT_TOP` block grouped by rule; `rules` lists the mapping. Only an install under HOME (cache, env override, PATH, or the skill's sibling engine) whose real file is named `impeccable` is ever READY; URLs are refused; the engine sees a minimal environment; per-batch and whole-scan timeouts; findings capped and every field sanitized; exit 3 marks a gstack bug.
+- **Consent-gated engine install** (`gstack-design-detect.ts install`): when the probe finds no engine, the design skills ask one question, once, in interactive sessions only (never in spawned or headless runs). Yes downloads the engine version gstack has tested for your platform from github.com/pbakaus/impeccable's releases, verifies it against the checksum pinned in gstack for all five platforms, writes an egress receipt before the fetch (fail-closed), and places the one file under `~/.impeccable/bin/<version>/`: no impeccable skill, no editor hook, no launcher. "Never ask again" is remembered in `design_detector_install_prompted`; "turn it off" is `design_detector off`. gstack never runs `npx impeccable`.
+- **Phase 0 in `/design-review`**: source mode on a feature branch, DOM mode on any URL (Aside first, the bundled browser otherwise) through one shared dump script, `lib/dom-dump.js`; `design-baseline.json` gains per-page detector counts with id-level deltas and an `engine changed` caveat; Phase 10 reports `Detector: N → M`; deferred findings end with the `/impeccable <cmd>` handoff when the skill is installed.
+- **`/review` and `/ship`** design pass: the mechanical scan runs first, its rows bucket by tier (auto-fix, ask, possible), and a detector hit at the same file:line as a checklist hit is one row. **`/design-html`**: a bounded slop gate before screenshots, one fix pass, then accepted-with-reason rows.
+- **Typed design catalog** (`lib/design-catalog.ts`): 86 entries with rule ids, impact, tier, confidence, detection method, handoff, fonts, and the ten `mockupNever` patterns the image-generation prompt now refuses by default. `review/design-checklist.md` is generated from it by `bun run gen:skill-docs`.
+- **Doctrine**: Persuade / Operate / Read / Experience modes (MARKETING and APP UI kept as aliases), craft-floor reflexes (browser surfaces, one authored motion moment, depth with an offset, tinted secondary text, more space above a heading than below, light or dark from the use scene), the three-looks calibration, a font procedure with a role-scoped overused list, and Restrained / Committed / Full palette / Drenched color strategies.
+- **Open DESIGN.md format** (`lib/design-md.ts`, `bin/gstack-design-md.ts`: `check`, `convert`, `tokens`, `mark`): read, write, convert a legacy gstack file (backup kept), flatten tokens for calibration, and persist the one-time format choice as a marker line. `/design-consultation`, `/design-review`, and `/design-html` write and read it; `PRODUCT.md` prefills the consultation's questions.
+- **Attribution**: `NOTICE.md`, `licenses/Apache-2.0.txt`, and changed-file headers for material derived from impeccable and the DESIGN.md specification.
+
+#### Changed
+- `/design-consultation` chooses type by a procedure (name the world, shortlist per role, strike the overused list for that role, verify availability, state loading), varies direction across generations without flipping light and dark, and lists banned faces (Courier New now among them) from the catalog.
+- Landing-page rules ask for one authored motion moment and a brand texture or asset instead of halo, spotlight, stripe, or grid gradients; the universal font rule is scoped to the display voice with body/UI exceptions on Operate and Read surfaces.
+- gstack's own `DESIGN.md` is in the open format, with its intentional exceptions (the live-feed pulse, 11px mono data labels) recorded in the Decisions Log.
+- The design binary's variant set trades its light/dark flip for a drenched-color dial.
+- Repository `.impeccable/config*.json` ignores are surfaced (`IMPECCABLE_IGNORED_RULES`, `_FILES`, `_VALUES`) and treated as evidence in `/review` and `/ship`, settled decisions in your own project.
+
+#### For contributors
+- Real engine captures pin the contract (`test/fixtures/impeccable-*.json`, the dumped slop page, captured with engine 0.1.3 and its 61-rule registry); `test/fixtures/fake-impeccable.ts` drives the unit and E2E suites through env knobs (output file, exit code, sleep, argv log) that pass the wrapper's minimal engine environment.
+- New free suites: `gstack-design-detect`, `design-md`, `design-catalog`, `design-checklist-sync`, `design-detect-contract`, `frontend-scope`, `impeccable-fixtures`, `dom-dump-hygiene` (a real Chromium run, CI or `GSTACK_DOM_DUMP_HYGIENE=1`), plus the brief test for the design binary. Gate E2E: `design-review-detector-shim` (source and DOM); periodic: `design-html-slop-gate`.
+- `design-review`'s eager ceiling moved to 31,319 tokens; the carve guards for `design-html` and `plan-design-review` are re-measured; the `bin/`-and-`lib/` linking rule now carries two more runtime bins.
+
+## [1.83.0.0] - 2026-09-09
+
+**Memorable's workflow memory plugs into Claude Code through gstack, behind a consent key you control.**
+**Every prompt it sees is receipted, secret-scanned and enveloped. The switch is off until you flip it.**
+
+Memorable (memorable.sh) is a third-party CLI that remembers how you did a task and recalls it the next time you ask for something similar. Its own installer registers a Claude Code hook directly. This release lets you register that hook through gstack instead, with `gstack-memorable enable`, and nothing changes until you run it. When you do, gstack records its own consent key (`memorable_recall`, listed by `gstack-egress grants` with its revoke command), writes an egress receipt before every prompt it hands to the vendor binary and skips the hand-off if the receipt cannot be written, refuses to hand over a prompt carrying a live-shaped credential, skips repositories whose trust policy is `deny` or `read-only`, runs the binary in an allowlisted environment inside its own process group under a 4.5 second budget, and wraps whatever comes back in the trust envelope so recalled text can never block a prompt or speak as gstack. `gstack-memorable status` shows the vendor CLI, the gate, who registered the hook (by identity, so it stays correct after Claude Code rewrites `settings.json`), receipt counts and recent errors. `disable` turns it off and verifies both the consent and the registration before it says so. Claude Code only; Windows is refused for now because there are no process groups to contain the vendor.
+
+The numbers that matter. Measured on a Linux sandbox with a fake vendor; the scan rows come from `scan()` in `lib/redact-engine.ts` on a synthetic log-like prompt dense in emails and IP addresses (256 KiB: 5,462 findings; 512 KiB: 10,898 findings), `main` against this release.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Redaction scan, 256 KiB log-like prompt | 1,573 ms | 65 ms | 24x faster |
+| Redaction scan, 512 KiB log-like prompt | 6,182 ms | 126 ms | 49x faster |
+| Hook cost per prompt with the bridge disabled | no hook | 49 ms | shim, bun, one config read |
+| gstack work per prompt before the vendor runs | no hook | ~25 ms | gate, policy, scan, receipt |
+| Tests in the free suite covering this bridge and the hook manager | 0 | 128 | +128 |
+
+The scan speedup is not bridge-specific. Line and column for each finding used to be computed by walking the text from the start, so a pasted log full of addresses cost time quadratic in its matches; it is a binary search over a line index now, and every caller of the engine (`gstack-redact`, the pre-push hook, the PR-body scan in `/ship`) gets it.
+
+What this means for you: if you use Memorable, run `memorable login`, `memorable enable`, then `gstack-memorable enable`, and look at `gstack-egress list --sink memorable-recall` after a few prompts. If you do not, nothing changes: the key defaults to off, no hook is registered, `./setup` never registers one for you, and upgrading needs no migration. `docs/memorable-workflow-memory.md` says exactly what gstack hands over, what it can attest, and what is Memorable's own claim. Contributed by @AdvaiytSane and @NIkhil-cmd-cmd (#2831).
+
+### Itemized changes
+
+#### Added
+
+- **`bin/gstack-memorable enable | disable | status`**, the Memorable recall bridge (Claude Code only, off by default). `enable` needs the vendor CLI on the machine, registers gstack's hook at the stable install path with a 5 second timeout, refuses when Memorable's own installer already registered its hook (two entries would run the hook twice per prompt), verifies the stable install carries this bridge before touching anything, and sets `memorable_recall=on`. It never runs `memorable enable`: the vendor's capture consent is yours to grant. `disable` flips the key off first, removes gstack's entry by identity (tag or no tag), verifies both, and reports a partial failure as one. `status` never executes the vendor. One lifecycle transition runs at a time (a lock under `~/.gstack/locks`, stale after 30 seconds). Exit codes mirror the hook manager: 1 refused, 3 unparseable `settings.json`, 4 unexpected shape, 5 lock.
+- **`hosts/claude/hooks/memorable-user-prompt-hook`** (bash shim plus `memorable-user-prompt-hook.ts`), the UserPromptSubmit hook the bridge registers. One deadline clock undercuts Claude Code's 5 second hook kill; stdin is capped at 1 MiB; the prompt is scanned for HIGH-tier credential shapes on the raw bytes and on the decoded string values; the vendor sees only `PATH`, `HOME`, identity and locale variables, temp directories, the standard proxy, TLS and `XDG_*` variables and its own `MEMORABLE*` knobs; only a string `additionalContext` is accepted from it (a vendor `decision`, `continue` or `systemMessage` is dropped), control and Unicode format characters are stripped, the text is capped at 8 KiB on a UTF-8 boundary and enveloped. The vendor's whole process group is killed when the hook finishes, hangs past its budget, or is terminated by the host mid-flight (a process the vendor detaches into its own session is outside that guarantee); a vendor that exits but leaves a helper holding its pipes still gets its answer delivered. Every refusal is one rate-limited line in `~/.gstack/hook-errors.log` (created 0600); the hook always exits 0.
+- **`memorable_recall` config key** (`on | off`, default `off`, a typo is rejected and the prior value kept) and a **`memorable-recall` row in `gstack-egress grants`** naming the vendor CLI, the per-prompt receipt sink and the revoke command.
+- **Egress receipts for the `memorable-recall` sink**, fail-closed: no receipt, no hand-off. The receipt records the byte count and sha256 of the exact stdin handed over, the consent key, and `local:<path to the vendor executable>` as the recipient gstack can attest; the outcome records `exit:0 output-written bytes=N gstack_ms=N`, `exit:N injected=no`, `timeout`, `spawn-error:<code>` or `budget-exhausted`. A receipt with no outcome reads as unknown, never as success.
+- **`gstack-settings-hook list-items --event <E> [--owned-by <source>] [--command-regex <js-re>]`**, a read-only identity view: one JSON string literal per matching hook command, identity from the hook table rather than the tag, empty output when nothing matches, exit 3 on unparseable settings and 4 on an unexpected shape, so a caller can decide a mutation from it.
+- **`runExternal` in `hosts/claude/hooks/spawn-bin.ts`**, the contained way for a hook to run a third-party executable: its own process group, a wall-clock limit that kills the group, a stdout cap, a drained stderr tail, stdin write errors kept separate from spawn errors, resolution on the child's exit rather than on the last pipe closing, and a refusal on Windows.
+- **`lockBudgetMs`** on `writeReceipt` and `writeOutcome` in `lib/egress-receipt.ts`, so a caller on a deadline can bound the ledger lock wait (default unchanged at 2.5 seconds), and a **spawn timeout parameter** on `repoPolicyTier` in `lib/gbrain-repo-policy-client.ts`.
+- **`docs/memorable-workflow-memory.md`**: what you get, the two consents (gstack's and Memorable's, neither implies the other), what gstack hands over and what it can attest, what gstack tests and what is the vendor's claim, turning it on and off, and a troubleshooting runbook. A README row, a Docs-table row and a privacy pointer link to it.
+
+#### Changed
+
+- **`gstack-settings-hook remove-source` removes by identity as well as by tag.** Claude Code strips gstack's `_gstack_source` tag when it rewrites `settings.json`; the off switch for every gstack hook used to no-op on exactly those entries. Items the hook table identifies as the requested source are removed whether or not the entry is tagged, other sources' items are never touched, and entries with nothing of the source's stay byte-identical.
+- **`./setup --no-team` keeps the opt-in Memorable hook** when it sweeps stray gstack hooks, alongside the verify gate.
+- **`gstack-uninstall` removes the Memorable hook by name**, sets `memorable_recall` off wherever gstack's config lives (kept state or not, hook manager present or not, and a failed revocation is named), and says that Memorable's own consent is unchanged (`memorable disable`, `memorable forget`).
+- **Redaction findings locate their line and column by binary search** over a per-scan line index, so scan time is linear in the input for every caller of `lib/redact-engine.ts`.
+
+#### For contributors
+
+- New test files: `test/gstack-memorable.test.ts`, `test/memorable-user-prompt-hook.test.ts` (a fake vendor written in sh; the hook's stdin bytes are compared byte for byte with what the vendor received), `test/gstack-config-memorable-key.test.ts`. Extended: `test/gstack-settings-hook-schema-aware.test.ts` (identity removal pinned for every source in the hook table), `test/egress-receipt.test.ts`, `test/egress-receipt-wiring.test.ts` (the `hosts/` tree is now swept for unreceipted sinks), `test/uninstall.test.ts`, `test/gbrain-repo-policy-client.test.ts`, `test/redact-engine.test.ts`, `test/verify-gate.test.ts`, `test/setup-hook-canonical-paths.test.ts`, `test/hooks-windows-paths.test.ts`, `test/gstack-egress-cli.test.ts`.
+- `docs/PROJECT_STRUCTURE.md` lists the new hook and bin.
+
 ## [1.81.0.0] - 2026-09-06
 
 **Aside is the browser gstack drives first. Every browsing skill, the PDF and diagram renderer, and web research go through it.**
