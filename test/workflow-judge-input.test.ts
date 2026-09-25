@@ -189,17 +189,19 @@ describe('workflow judge file bundle', () => {
   test('generated ship includes base-branch initialization and every lazy section once', () => {
     const skillPath = 'ship/SKILL.md';
     const source = readFileSync(join(ROOT, skillPath), 'utf8');
-    // Read the paid caller's actual slice so changing its marker back to the
-    // title cannot silently drop initialization while this helper test passes.
+    // Bind to the paid caller's actual slice and retain both the opening contract
+    // and initialization, regardless of their ordering in the authored workflow.
     const caller = readFileSync(join(ROOT, 'test/skill-llm-eval.test.ts'), 'utf8');
     const markers = caller.match(/skillPath: 'ship\/SKILL\.md',\s+startMarker: '([^']+)',\s+endMarker: '([^']+)'/);
     expect(markers).not.toBeNull();
     const [, startMarker, endMarker] = markers!;
-    expect(startMarker).toBe('## Step 0: Detect platform and base branch');
+    expect(startMarker).toBe('# Ship:');
     const input = readWorkflowJudgeInput({ root: ROOT, skillPath, startMarker, endMarker });
     const entrypoint = input.files.find(file => file.kind === 'entrypoint');
     expect(entrypoint?.content).toBe(source.slice(source.indexOf(startMarker), source.indexOf(endMarker, source.indexOf(startMarker))));
     expect(entrypoint?.content).toContain('git remote get-url origin');
+    expect(entrypoint?.content).toContain('**Follow every STOP and AskUserQuestion gate**');
+    expect(entrypoint?.content).toContain('## Step 0: Detect platform and base branch');
     expect(entrypoint?.content).toContain('gh pr view --json baseRefName');
     expect(entrypoint?.content).toContain('Print the detected base branch name.');
     expect(occurrences(input.text, startMarker)).toBe(1);
@@ -227,9 +229,9 @@ describe('workflow judge file bundle', () => {
     expect(entrypoint.content.indexOf('## Scope gate')).toBeLessThan(entrypoint.content.indexOf('### Step 0: Scope Challenge'));
     expect(entrypoint.content).toContain('## Web research runs in Aside');
     expect(entrypoint.content).toContain('echo "READY: aside');
-    expect(input.text.indexOf('echo "READY: aside')).toBeLessThan(input.text.indexOf('4. **Search check:**'));
-    expect(entrypoint.content).not.toContain('4. **Search check:**');
-    expect(occurrences(input.text, '4. **Search check:**')).toBe(1);
+    expect(input.text.indexOf('echo "READY: aside')).toBeLessThan(input.text.indexOf('- **Search check:**'));
+    expect(entrypoint.content).not.toContain('- **Search check:**');
+    expect(occurrences(input.text, '- **Search check:**')).toBe(1);
     expect(occurrences(input.text, '## Scope gate')).toBe(1);
     expect(occurrences(input.text, '### 1. Architecture review')).toBe(1);
     const sections = input.files.filter(file => file.kind === 'section');
