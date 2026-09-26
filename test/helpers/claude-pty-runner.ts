@@ -4605,7 +4605,7 @@ export async function runPlanSkillObservation(opts: {
     };
     // Entry deadline → boot → owned paste/receipt/ack → slash → observation.
     // Setup consumes the existing case budget; cleanup has its separate grace.
-    await Bun.sleep(Math.min(8000, Math.max(0, deadlineAt - Date.now())));
+    if (!opts.initialPlanContent) await Bun.sleep(Math.min(8000, Math.max(0, deadlineAt - Date.now())));
     if (opts.initialPlanContent) {
       const seed = `Keep this draft plan as context. Briefly acknowledge receipt, then wait for my next message containing a slash command. Do not start the review or call tools yet.\n\n${opts.initialPlanContent}`;
       try {
@@ -5480,7 +5480,8 @@ export interface PlanSkillFloorObservation {
  * matcher still authenticates the pending question and native menu. */
 export function planFloorDXPane(visible: string, call: NativePlanQuestionCall): string | null {
   if (call.answered || call.failed || call.questions.length !== 1) return null;
-  const text = stripPtyResidue(visible).replace(/\r+\n?/g, '\n');
+  const text = stripPtyResidue(visible).replace(/\r+\n?/g, '\n')
+    .replace(/((?:^|\n)Enter\s+to\s+select\s*·\s*↑\/↓\s+to\s+navigate\s*·\s*)ctrl\+g\s+to\s+edit\s+in[ \t]+[^\s·\x00-\x1f\x7f][^·\x00-\x1f\x7f]*?\s*·\s*(Esc\s+to\s+cancel\s*)$/, '$1$2');
   const headers = [...text.matchAll(/(?:^|\n)[\t ]*[☐□][^\n]*\n/g)];
   const header = headers.at(-1);
   if (!header) return null;

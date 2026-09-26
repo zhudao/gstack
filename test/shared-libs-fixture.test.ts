@@ -7,11 +7,12 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   createSharedInteractiveToolHandler, createSharedLibsFixture, fixtureGit, fixtureWrite, installSourceShims,
   readRequests, seedOpportunitySources, sharedReadOnlyViolations, shellQuote, snapshotFixture, type SharedLibsFixture,
-  SharedCaptureAccumulator, type SharedCaptureAttempt,
+  SharedCaptureAccumulator, type SharedCaptureAttempt, isInternalClaudeGitRequest,
 } from './helpers/shared-libs-eval-fixture';
 import { EvalCollector, type EvalTestEntry } from './helpers/eval-store';
 import { collectorOutcomeCounts } from '../scripts/test-paid-shards';
 import { E2E_TOUCHFILES, GLOBAL_TOUCHFILES, selectTests } from './helpers/touchfiles';
+import nativeNoChangeCases from './fixtures/shared-libs-no-change-ci-public.json';
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -25,6 +26,60 @@ function scratch(): string {
 }
 
 describe('shared-code legacy interactive actor', () => {
+  test.each(nativeNoChangeCases.cases)('answers retained CI no-change questions from attempt $attempt', async ({ input, answers }) => {
+    const before = structuredClone(input), observed: unknown[] = [];
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => { throw new Error('unexpected tool'); }, onQuestion: () => {},
+      onAnswer: (question, answer) => { observed.push({ question, answer }); },
+    });
+    expect(await callback('AskUserQuestion', input)).toEqual({ behavior: 'allow', updatedInput: { ...input, answers } });
+    expect(observed).toEqual([{ question: input, answer: answers }]);
+    expect(input).toEqual(before);
+    for (const [index, question] of input.questions.entries()) {
+      const unsafe = structuredClone(input);
+      const option = unsafe.questions[index].options.find(option => option.label === answers[question.question]);
+      expect(option).toBeDefined();
+      option!.description += '; then clear the index flag and edit the route.';
+      await expect(callback('AskUserQuestion', unsafe)).rejects.toThrow('No unambiguous no-change option');
+      expect(observed).toHaveLength(1);
+    }
+  });
+
+  test.each([
+    { label: 'No, leave it', description: 'Keep the local index flag. The route stays excluded from reusable review coverage.' },
+    { label: 'No: keep it', description: 'Keep the current source unchanged.' },
+    { label: 'Not applicable', description: 'Choose this if you are not editing src/retry-route.ts.' },
+    { label: 'Not applicable', description: 'When you are not modifying the worker.' },
+    { label: 'Skip', description: 'Keep the copies; reuse coverage will exclude the route.' },
+    { label: 'Skip', description: 'Keep the copies; snapshot coverage will not include the route.' },
+    { label: 'Skip', description: 'Keep the copies; review coverage can exclude the route.' },
+  ])('skip handles negative replies, conditional non-actions, and coverage subjects: $label', async option => {
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => {}, onAnswer: () => {},
+    });
+    const input = { questions: [{ question: 'Decision', options: [
+      { label: 'Leave the flag set', description: 'Edit the working copy only; you will handle the index flag yourself.' }, option,
+    ] }] };
+    expect((await callback('AskUserQuestion', input)).updatedInput.answers).toEqual({ Decision: option.label });
+  });
+
+  test.each([
+    { label: 'No, leave it', description: 'Keep the index flag, but replace the source.' },
+    { label: 'No, fix it', description: 'Apply the patch.' },
+    { label: 'Not applicable' },
+    { label: 'Not applicable', description: 'Choose this if you are editing the route.' },
+    { label: 'Not applicable', description: 'Choose this if you are not editing the worker; fix the route.' },
+    { label: 'Skip', description: 'Reuse coverage will modify the worker.' },
+    { label: 'Skip', description: 'Snapshot coverage should clear the index flag.' },
+    { label: 'Skip', description: 'Reuse coverage to fix the route.' },
+  ])('new no-change forms cannot authorize source or index changes: %j', async option => {
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => {}, onAnswer: () => { throw new Error('unexpected answer'); },
+    });
+    await expect(callback('AskUserQuestion', { questions: [{ question: 'Decision', options: [option] }] }))
+      .rejects.toThrow('No unambiguous no-change option');
+  });
+
   test('both native index-flag captures select every owning interactive lifecycle case', () => {
     for (const fixture of ['test/fixtures/shared-libs-index-flags-skip-question.json',
       'test/fixtures/shared-libs-index-flags-no-change-description.json']) {
@@ -81,6 +136,172 @@ describe('shared-code legacy interactive actor', () => {
     expect(await callback('AskUserQuestion', input)).toEqual({ behavior: 'allow', updatedInput: { ...input, answers: expected } });
     expect(answers).toEqual([{ question: input, answer: expected }]);
     expect(input).toEqual(before);
+  });
+
+  test('the registered callback answers both complete native index-flag questions without approving changes', async () => {
+    const native = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/shared-libs-index-flags-native-questions.json'), 'utf8'));
+    expect(native.sourceRun).toBe(36036582724);
+    for (const { attempt, input } of native.cases) {
+      const original = structuredClone(input), questions: unknown[] = [], answers: unknown[] = [], refusals: Error[] = [];
+      const callback = createSharedInteractiveToolHandler('skip', {
+        nonQuestion: () => { throw new Error('unexpected tool'); },
+        onQuestion: question => { questions.push(question); },
+        onAnswer: (question, answer) => { answers.push({ question, answer }); },
+        onRefusal: error => { refusals.push(error); },
+      });
+      const expectedLabels = attempt === 1 ? ['B) Skip', 'Leave it'] : ['C) Skip', 'No, leave it'];
+      const expected = Object.fromEntries(input.questions.map((question: any, index: number) =>
+        [question.question, expectedLabels[index]]));
+      expect(await callback('AskUserQuestion', input)).toEqual({ behavior: 'allow', updatedInput: { ...input, answers: expected } });
+      expect(questions).toEqual([input]);
+      expect(answers).toEqual([{ question: input, answer: expected }]);
+      expect(refusals).toEqual([]);
+      expect(input).toEqual(original);
+    }
+  });
+
+  test('the captured native no-change questions select every owning interactive lifecycle case', () => {
+    expect(selectTests(['test/fixtures/shared-libs-index-flags-native-questions.json'], E2E_TOUCHFILES, GLOBAL_TOUCHFILES).selected.sort())
+      .toEqual(['shared-libs-review-index-flags', 'shared-libs-review-lifecycle', 'shared-libs-review-path-eligibility',
+        'shared-libs-review-prior-coverage', 'shared-libs-review-revalidation']);
+  });
+
+  test('the registered callback acknowledges the complete first-attempt native skip despite descriptive reuse', async () => {
+    const native = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/shared-libs-index-flags-native-questions.json'), 'utf8'));
+    const { sourceRun, attempt, input } = native.regressions[0];
+    expect({ sourceRun, attempt }).toEqual({ sourceRun: 36044212977, attempt: 1 });
+    const before = structuredClone(input), questions: unknown[] = [], answers: unknown[] = [], refusals: Error[] = [];
+    const expected = { [input.questions[0].question]: 'B) Skip' };
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => { throw new Error('unexpected tool'); },
+      onQuestion: question => { questions.push(question); },
+      onAnswer: (question, answer) => { answers.push({ question, answer }); },
+      onRefusal: error => { refusals.push(error); },
+    });
+    expect(await callback('AskUserQuestion', input)).toEqual({ behavior: 'allow', updatedInput: { ...input, answers: expected } });
+    expect(questions).toEqual([input]);
+    expect(answers).toEqual([{ question: input, answer: expected }]);
+    expect(refusals).toEqual([]);
+    expect(input).toEqual(before);
+  });
+
+  test('the registered callback answers the complete 5460 first-attempt native packet', async () => {
+    const native = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/shared-libs-index-flags-native-questions.json'), 'utf8'));
+    const { sourceRun, sourceRevision, attempt, toolUseId, input } = native.regressions[1];
+    expect({ sourceRun, sourceRevision, attempt, toolUseId }).toEqual({ sourceRun: 36080890009,
+      sourceRevision: '5460ce0847574aadfa6cbdd0b9545d2caf9935da', attempt: 1,
+      toolUseId: 'toolu_01Up8B1FR4bhkmRxyhbcAqhY' });
+    const before = structuredClone(input), questions: unknown[] = [], answers: unknown[] = [], refusals: Error[] = [];
+    const expected = { [input.questions[0].question]: 'Skip', [input.questions[1].question]: 'Leave it' };
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => { throw new Error('unexpected tool'); },
+      onQuestion: question => { questions.push(question); },
+      onAnswer: (question, answer) => { answers.push({ question, answer }); },
+      onRefusal: error => { refusals.push(error); },
+    });
+    expect(await callback('AskUserQuestion', input)).toEqual({ behavior: 'allow', updatedInput: { ...input, answers: expected } });
+    expect(questions).toEqual([input]);
+    expect(answers).toEqual([{ question: input, answer: expected }]);
+    expect(refusals).toEqual([]);
+    expect(input).toEqual(before);
+  });
+
+  test.each([
+    { label: 'Leave it', description: 'Keep the index flag as-is and record the decision in the review log.' },
+    { label: 'No, leave it', description: 'Preserve the current index flag. Report its hidden source without modifying it.' },
+    { label: 'Keep it', description: 'Leave the index flag set; update the review log with the skipped advisory.' },
+  ])('a referential retention choice requires an explicit no-change description: $label', async option => {
+    const input = { questions: [{ question: 'Should I clear the index flag?', options: [
+      { label: 'Clear the index flag', description: 'Make its hidden changes visible.' }, option,
+    ] }] };
+    const answer = await createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => {}, onAnswer: () => {},
+    })('AskUserQuestion', input);
+    expect(answer.updatedInput.answers).toEqual({ [input.questions[0].question]: option.label });
+  });
+
+  test.each([
+    { label: 'Leave it', description: 'Keep the assume-unchanged bit; exclude its path from snapshot coverage.' },
+    { label: 'Leave it', description: 'Preserve the `skip-worktree` bit; report its hidden source.' },
+    { label: 'Leave it', description: 'Keep the Git index bits unchanged; record the advisory.' },
+    { label: 'Leave it', description: 'Keep the index attributes; report the hidden route.' },
+    { label: 'Leave it', description: 'Retain the index settings; report without changing them.' },
+    { label: 'Keep the assume-unchanged bit' },
+    { label: 'Leave the `skip-worktree` flag' },
+    { label: 'Keep Git index attributes' },
+  ])('a qualified Git-index state may be preserved without authorizing edits: $label', async option => {
+    const input = { questions: [{ question: 'Should I clear the index flag?', options: [
+      { label: 'Clear the index flag', description: 'Make its hidden changes visible.' }, option,
+    ] }] };
+    const answer = await createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => {}, onAnswer: () => {},
+    })('AskUserQuestion', input);
+    expect(answer.updatedInput.answers).toEqual({ [input.questions[0].question]: option.label });
+  });
+
+  test.each([
+    [{ label: 'Leave it' }],
+    [{ label: 'Leave it', description: 'Keep it.' }],
+    [{ label: 'Leave it', description: 'Keep going.' }],
+    [{ label: 'Leave it', description: 'Keep working on the fix.' }],
+    [{ label: 'Leave it', description: 'Keep trying.' }],
+    [{ label: 'Leave it', description: 'Keep investigating the source state.' }],
+    [{ label: 'Leave it', description: 'Keep pursuing the source fix.' }],
+    [{ label: 'Leave it', description: 'Keep progress going.' }],
+    [{ label: 'Leave it', description: 'Keep source changing.' }],
+    [{ label: 'Leave it', description: 'Keep the changes going.' }],
+    [{ label: 'Leave it', description: 'Preserve the implementation by rewriting the helper.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse of this skip.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. The reuse of this decision.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse of the review decision will still clear the flag.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse of the review decision will eventually modify source.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse of the review decision can quietly replace the helper.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse of this decision will still be applied to source.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse of this decision will need to clear the flag.' }],
+    [{ label: 'Skip', description: 'Keep the duplicated copies. Reuse the recorded decision will still clear the flag.' }],
+    [{ label: 'Skip', description: 'Keep the code unchanged; the recorded decision says the route will be reused.' }],
+    [{ label: 'Skip', description: 'Keep the code unchanged; the decision names the source so it will be reused.' }],
+    [{ label: 'Skip', description: 'Keep both duplicated copies; a later review can reuse this decision to clear the flag.' }],
+    [{ label: 'No, leave it', description: 'No changes.' }],
+    [{ label: 'Leave it', description: 'Clear the index flag and report it.' }],
+    [{ label: 'No, leave it', description: 'Keep the index flag as-is; apply the worker fix.' }],
+    [{ label: 'Leave it', description: 'Keep the flag set; the route change remains hidden yet will clear the flag tomorrow.' }],
+    [{ label: 'No, leave it and clear the flag', description: 'Keep the index flag set.' }],
+    [{ label: 'Leave it', description: 'Update the review log with this decision.' }],
+    [{ label: 'Leave it', description: 'Keep the flag set.' }, { label: 'Keep it', description: 'Preserve the index flag as-is.' }],
+  ])('referential retention refuses vague, mixed, or duplicate choices: %j', async options => {
+    const refusals: Error[] = [], answers: unknown[] = [];
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => {}, onAnswer: answer => { answers.push(answer); },
+      onRefusal: error => { refusals.push(error); },
+    });
+    await expect(callback('AskUserQuestion', { questions: [{ question: 'Should I clear the index flag?', options }] }))
+      .rejects.toThrow('No unambiguous no-change option');
+    expect(refusals).toHaveLength(1);
+    expect(answers).toEqual([]);
+  });
+
+  test.each([
+    [{ label: 'Leave it', description: 'Keep the bit unchanged.' }],
+    [{ label: 'Keep the bit' }],
+    [{ label: 'Keep the index bit and set the other flag' }],
+    [{ label: 'Leave it', description: 'Keep the index bit; set the skip-worktree flag.' }],
+    [{ label: 'Leave it', description: 'Keep the assume-unchanged bit while unsetting the skip-worktree flag.' }],
+    [{ label: 'Leave it', description: 'Keep the index setting by toggling the other flag.' }],
+    [{ label: 'Leave it', description: 'Keep the `assume-unchanged` bit; flip the skip-worktree flag.' }],
+    [{ label: 'Leave it', description: 'Keep the index flag, then reset the other index bit.' }],
+    [{ label: 'Leave it', description: 'Keep the index flag; enable the skip-worktree bit.' }],
+    [{ label: 'Leave it', description: 'Keep the index flag; disable the skip-worktree bit.' }],
+  ])('qualified index retention rejects ambiguous bits and state-changing commitments: %j', async options => {
+    const refusals: Error[] = [], answers: unknown[] = [];
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => {}, onAnswer: answer => { answers.push(answer); },
+      onRefusal: error => { refusals.push(error); },
+    });
+    await expect(callback('AskUserQuestion', { questions: [{ question: 'Should I clear the index flag?', options }] }))
+      .rejects.toThrow('No unambiguous no-change option');
+    expect(refusals).toHaveLength(1);
+    expect(answers).toEqual([]);
   });
 
   const preservationCaptures = JSON.parse(fs.readFileSync(path.join(import.meta.dir,
@@ -141,11 +362,16 @@ describe('shared-code legacy interactive actor', () => {
     { label: 'Decline', description: 'Don’t refactor either caller.' },
     { label: 'Don’t refactor', description: 'Keep the current implementation.' },
     { label: 'Do not change', description: 'Leave source untouched. No code edits or new tests.' },
+    { label: 'Skip', description: 'Do not refactor by extracting a helper. Keep the source unchanged.' },
     { label: 'Leave it set', description: 'Do not touch the index flag; report missing snapshot coverage.' },
     { label: 'Keep current', description: 'Keep both implementations unchanged.', preview: '// no edits; record skipped advisory' },
     { label: 'Leave it set', description: 'Do not touch the index flag. Any edit to retry-route.ts stays local-only until you clear it yourself; it stays excluded from snapshot coverage.' },
     { label: 'Skip', description: 'Keep the duplicated implementation as-is. Recorded as an explicit skipped advisory with full snapshot coverage so it can be reused next review.' },
     { label: 'Skip', description: 'Keep both inline copies. Recorded as an explicit skip with verified snapshot coverage for future reuse.' },
+    { label: 'Skip', description: 'Keep the duplicated copies. Reuse of this skip will still require revalidation while the route remains hidden.' },
+    { label: 'Skip', description: 'Keep the duplicated copies. The reuse of this decision is recorded as requiring revalidation.' },
+    { label: 'Skip', description: 'Keep both duplicated copies; a later review can reuse this decision.' },
+    { label: 'Skip', description: 'Keep both copies. The recorded review decision can be reused in a later review.' },
     { label: 'Skip', description: 'Update the review log with the skipped advisory; reuse the recorded decision next review.' },
     { label: 'Skip', description: 'This option does not refactor the route. You should not fix the worker.' },
     { label: 'Skip', description: 'This option updates the review log. We will reuse the recorded decision.' },
@@ -178,6 +404,9 @@ describe('shared-code legacy interactive actor', () => {
     [{ label: 'Skip', description: 'You should fix the worker' }],
     [{ label: 'Skip', description: 'The worker imports the helper' }],
     [{ label: 'Skip', description: 'We will clear the index flag' }],
+    [{ label: 'Skip', description: 'Preserve the implementation by rewriting the helper.' }],
+    [{ label: 'Skip', description: 'Keep the source through applying the fix.' }],
+    [{ label: 'Skip', description: 'Retain the implementation via extracting a helper.' }],
     [{ label: 'Keep going' }],
     [{ label: 'Do not warn' }],
     [{ label: 'Leave logging disabled and fix parser' }],
@@ -631,7 +860,7 @@ describe('shared-code capture attempt accounting', () => {
     expect(result.tests.map((row: EvalTestEntry) => row.transcript!.filter(event => event.scenario_name).length))
       .toEqual([3, 3, 2, 2, 4, 4]);
     expect(result.total_cost_usd).toBe(0.18);
-    expect(collectorOutcomeCounts([result])).toEqual({ executed: 3, reused: 0, passed: 3, failed: 0, attempts: 6 });
+    expect(collectorOutcomeCounts([result])).toEqual({ executed: 3, reused: 0, passed: 3, failed: 0, manual_accepted: 0, attempts: 6 });
   });
 
   test('missing scenarios in a later attempt cannot inherit an earlier pass', async () => {
@@ -645,7 +874,7 @@ describe('shared-code capture attempt accounting', () => {
     })).rejects.toThrow('missing scenarios: second');
     const result = await finalized(captures);
     expect(result.tests[1]).toMatchObject({ attempt: 2, passed: false, exit_reason: 'attempt_incomplete' });
-    expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, passed: 0, failed: 1, attempts: 2 });
+    expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, passed: 0, failed: 1, manual_accepted: 0, attempts: 2 });
   });
 
   test('setup, verification and cleanup failures survive even when all recorded captures passed', async () => {
@@ -764,7 +993,7 @@ test('actual-retry', () => captures.runAttempt('actual-retry', ['audit'], 5_000,
     const result = JSON.parse(fs.readFileSync(path.join(resultDir, file), 'utf8'));
     expect(result.tests.map((row: EvalTestEntry) => [row.attempt, row.passed, row.exit_reason]))
       .toEqual([[1, false, 'timeout'], [2, true, 'success']]);
-    expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, passed: 1, failed: 0, attempts: 2 });
+    expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, passed: 1, failed: 0, manual_accepted: 0, attempts: 2 });
   });
 
   test('Bun outer timeouts stay failed after late completion, with and without a retry', () => {
@@ -806,8 +1035,273 @@ test('outer-timeout', () => captures.runAttempt('outer-timeout', ['audit'], 50, 
         .toEqual(mode === 'retry' ? [[1, false], [2, true]] : [[1, false]]);
       expect(['timeout', 'attempt_incomplete']).toContain(result.tests[0].exit_reason);
       expect(result.tests[0].error).toContain('Test attempt stopped:');
-      expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0,
+      expect(collectorOutcomeCounts([result])).toEqual({ executed: 1, reused: 0, manual_accepted: 0,
         passed: mode === 'retry' ? 1 : 0, failed: mode === 'retry' ? 0 : 1, attempts: mode === 'retry' ? 2 : 1 });
     }
+  });
+});
+
+const nativeCallbackReceipts = {
+  "intrinsic": [
+    {
+      "source": "/home/user/.capy/work/shared-libs-captures/1790267940497-shared-libs-read-only-1-1.json",
+      "source_sha256": "5c4b660f37f0a100e5eef97896241b1b139ec4c57f38d9d450fb153543da6fac",
+      "public_request": {
+        "tool": "git",
+        "args": [
+          "-c",
+          "protocol.ext.allow=never",
+          "-c",
+          "submodule.recurse=false",
+          "-c",
+          "log.showSignature=false",
+          "-c",
+          "gc.auto=0",
+          "-c",
+          "maintenance.auto=false",
+          "--literal-pathspecs",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "core.fsmonitor=",
+          "-c",
+          "core.askPass=",
+          "-c",
+          "core.quotePath=false",
+          "-c",
+          "core.safecrlf=false",
+          "ls-files",
+          "-z",
+          "--stage"
+        ],
+        "cwd": "/tmp/gp.31WCir/gstack-paid-shard-vrRGND/tmp/gstack-shared-read-only-2MmRCJ/repo",
+        "pid": 143899,
+        "ppid": 142186,
+        "parentExecutable": "/home/user/.capy/work/auq-parallel/live-runtime/node/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "parentCommand": "claude -p --model claude-fable-5-1 --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 24 --allowed-tools Bash Read Write Edit Glob Grep --tools Bash,Read,Write,Edit,Glob,Grep --strict-mcp-config "
+      },
+      "matching_model_commands": []
+    },
+    {
+      "source": "/home/user/.capy/work/shared-libs-captures/1790267831562-shared-libs-unsupported-git-2-1.json",
+      "source_sha256": "b8ba13edc9d9145aa0d706474e65cde07ad139dc48586363a4293a31ba0433ee",
+      "public_request": {
+        "tool": "git",
+        "args": [
+          "-c",
+          "protocol.ext.allow=never",
+          "-c",
+          "submodule.recurse=false",
+          "-c",
+          "log.showSignature=false",
+          "-c",
+          "gc.auto=0",
+          "-c",
+          "maintenance.auto=false",
+          "--literal-pathspecs",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "core.fsmonitor=",
+          "-c",
+          "core.askPass=",
+          "-c",
+          "core.quotePath=false",
+          "-c",
+          "core.safecrlf=false",
+          "ls-files",
+          "-z",
+          "--stage"
+        ],
+        "cwd": "/tmp/gp.31WCir/gstack-paid-shard-vrRGND/tmp/gstack-shared-unsupported-9F2Sn4/repo",
+        "pid": 143802,
+        "ppid": 142187,
+        "parentExecutable": "/home/user/.capy/work/auq-parallel/live-runtime/node/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "parentCommand": "claude -p --model claude-fable-5-1 --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 24 --allowed-tools Bash Read Write Edit Glob Grep --tools Bash,Read,Write,Edit,Glob,Grep --strict-mcp-config "
+      },
+      "matching_model_commands": []
+    },
+    {
+      "source": "/home/user/.capy/work/shared-libs-captures/1790267998748-shared-libs-unsupported-git-3-1.json",
+      "source_sha256": "8d96bd61f292dd06dd36751f10f0bed3ae476d2548b1edcc36cd799ed2b3a3d0",
+      "public_request": {
+        "tool": "git",
+        "args": [
+          "-c",
+          "protocol.ext.allow=never",
+          "-c",
+          "submodule.recurse=false",
+          "-c",
+          "log.showSignature=false",
+          "-c",
+          "gc.auto=0",
+          "-c",
+          "maintenance.auto=false",
+          "--literal-pathspecs",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "core.fsmonitor=",
+          "-c",
+          "core.askPass=",
+          "-c",
+          "core.quotePath=false",
+          "-c",
+          "core.safecrlf=false",
+          "ls-files",
+          "-z",
+          "--stage"
+        ],
+        "cwd": "/tmp/gp.31WCir/gstack-paid-shard-vrRGND/tmp/gstack-shared-unsupported-rjrwjI/repo",
+        "pid": 150423,
+        "ppid": 148331,
+        "parentExecutable": "/home/user/.capy/work/auq-parallel/live-runtime/node/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "parentCommand": "claude -p --model claude-fable-5-1 --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 24 --allowed-tools Bash Read Write Edit Glob Grep --tools Bash,Read,Write,Edit,Glob,Grep --strict-mcp-config "
+      },
+      "matching_model_commands": []
+    },
+    {
+      "source": "/home/user/.capy/work/shared-libs-captures/1790268179335-shared-libs-read-only-4-1.json",
+      "source_sha256": "c83606c5ab05752cc06cf521876e95590a667248cb8671679f7d96ff7e3b1e50",
+      "public_request": {
+        "tool": "git",
+        "args": [
+          "-c",
+          "protocol.ext.allow=never",
+          "-c",
+          "submodule.recurse=false",
+          "-c",
+          "log.showSignature=false",
+          "-c",
+          "gc.auto=0",
+          "-c",
+          "maintenance.auto=false",
+          "--literal-pathspecs",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "core.fsmonitor=",
+          "-c",
+          "core.askPass=",
+          "-c",
+          "core.quotePath=false",
+          "-c",
+          "core.safecrlf=false",
+          "ls-files",
+          "-z",
+          "--stage"
+        ],
+        "cwd": "/tmp/gp.31WCir/gstack-paid-shard-vrRGND/tmp/gstack-shared-read-only-5hvPxS/repo",
+        "pid": 152778,
+        "ppid": 151592,
+        "parentExecutable": "/home/user/.capy/work/auq-parallel/live-runtime/node/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "parentCommand": "claude -p --model claude-fable-5-1 --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 24 --allowed-tools Bash Read Write Edit Glob Grep --tools Bash,Read,Write,Edit,Glob,Grep --strict-mcp-config "
+      },
+      "matching_model_commands": []
+    }
+  ],
+  "actor": {
+    "source": "/home/user/.capy/work/shared-libs-captures/1790267826913-shared-libs-review-index-flags-gstack-shared-path-assume-unchanged-SLsqS1.jsonl.failure.json",
+    "source_sha256": "e2d579052e2d18329bb6ab5b672be64405da5485afd5fefa035b6881d675a5f3",
+    "public_question": {
+      "questions": [
+        {
+          "question": "1. [ADVISORY] src/retry-worker.ts:2-15 — The diff replaces `export { retrySeconds } from '../lib/retry-after'` with a byte-identical copy of the helper. src/retry-route.ts:2-15 holds a third identical copy. Proposal: reuse existing lib/retry-after.ts#retrySeconds (tested in test/retry-after.test.ts, used by src/scheduler.ts). Migrate both callers back to the one-line re-export. Implementation: -30/+2 lines (28 saved); total the same unless you want an import smoke test (+~4). No preserved differences — all copies identical, same TS runtime, no separate-deployment evidence in the repo. Shared-failure blast radius unchanged (scheduler already depends on the helper). Your prior Skip can't be inherited because the route's raw bytes changed under an assume-unchanged flag. Apply this extraction?",
+          "header": "Advisory",
+          "options": [
+            {
+              "label": "Fix as recommended (Recommended)",
+              "description": "Restore the re-export in src/retry-worker.ts and src/retry-route.ts; remove the two duplicate function bodies."
+            },
+            {
+              "label": "Fix worker only",
+              "description": "Restore the re-export only in the changed file src/retry-worker.ts; leave src/retry-route.ts as is."
+            },
+            {
+              "label": "Skip",
+              "description": "Keep the duplicated copies; record the skip with fresh snapshot coverage."
+            }
+          ],
+          "multiSelect": false
+        },
+        {
+          "question": "2. Git state note (not a code finding): src/retry-route.ts is flagged assume-unchanged in the index, so its working-tree edit (a trailing comment line) is invisible to `git diff`/`git status` and would not be committed by `git add`. Should I clear the flag with `git update-index --no-assume-unchanged src/retry-route.ts`? This changes the snapshot fingerprint, so I would restart the review pass with a new start token.",
+          "header": "Index flag",
+          "options": [
+            {
+              "label": "Clear the flag (Recommended)",
+              "description": "Make the hidden route change visible to Git; re-run the review pass against the corrected snapshot."
+            },
+            {
+              "label": "Leave it",
+              "description": "Keep the assume-unchanged flag; I will report it in the summary and exclude the path from reusable coverage."
+            }
+          ],
+          "multiSelect": false
+        }
+      ]
+    }
+  }
+};
+
+describe('retained native runtime callback failures', () => {
+  test.each(nativeCallbackReceipts.intrinsic)('recognizes the protected native probe from $source_sha256', receipt => {
+    const request = receipt.public_request, commands = receipt.matching_model_commands;
+    expect(request.parentExecutable.endsWith('/claude.exe')).toBe(true);
+    expect(request.args.slice(-3)).toEqual(['ls-files', '-z', '--stage']);
+    expect(commands).toEqual([]);
+    expect(isInternalClaudeGitRequest(request, commands)).toBe(true);
+    expect(isInternalClaudeGitRequest({ ...request, parentExecutable: request.parentExecutable.replace(/\.exe$/, '') }, commands)).toBe(true);
+    expect(isInternalClaudeGitRequest({ ...request, parentExecutable: 'C:\\runtime\\claude.exe' }, commands)).toBe(true);
+    for (const parentExecutable of ['/usr/bin/bash', '/runtime/claude.exe.sh', '/runtime/claude/worker', '/runtime/notclaude.exe', '']) {
+      expect(isInternalClaudeGitRequest({ ...request, parentExecutable }, commands)).toBe(false);
+    }
+    expect(isInternalClaudeGitRequest({ ...request, ppid: undefined }, commands)).toBe(false);
+    expect(isInternalClaudeGitRequest({ ...request, tool: 'gh' }, commands)).toBe(false);
+    expect(isInternalClaudeGitRequest({ ...request, args: request.args.slice(2) }, commands)).toBe(false);
+    expect(isInternalClaudeGitRequest({ ...request, args: request.args.map(arg => arg === 'core.hooksPath=/dev/null' ? 'core.hooksPath=/foreign' : arg) }, commands)).toBe(false);
+    for (const command of ['git -c protocol.ext.allow=never ls-files -z --stage', 'git -c core.safecrlf=false ls-files']) {
+      expect(isInternalClaudeGitRequest(request, [...commands, command])).toBe(false);
+    }
+  });
+
+  test('answers the exact captured two-question skip-only request without altering its input', async () => {
+    const input = structuredClone(nativeCallbackReceipts.actor.public_question), before = structuredClone(input);
+    const observed: unknown[] = [];
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => { throw new Error('unexpected tool'); },
+      onQuestion: question => observed.push({ question }),
+      onAnswer: (question, answers) => observed.push({ question, answers }),
+      onRefusal: error => observed.push({ refusal: error.message }),
+    });
+    const answers = { [input.questions[0].question]: 'Skip', [input.questions[1].question]: 'Leave it' };
+    expect(await callback('AskUserQuestion', input)).toEqual({ behavior: 'allow', updatedInput: { ...input, answers } });
+    expect(observed).toEqual([{ question: input }, { question: input, answers }]);
+    expect(input).toEqual(before);
+  });
+
+  test.each(['Leave it', 'Keep it', 'Leave that alone'])('classifies preservation from the complete %s option', async label => {
+    const input = structuredClone(nativeCallbackReceipts.actor.public_question);
+    input.questions[1].options[1].label = label;
+    const callback = createSharedInteractiveToolHandler('skip', { nonQuestion: () => {}, onQuestion: () => {}, onAnswer: () => {} });
+    expect((await callback('AskUserQuestion', input)).updatedInput.answers[input.questions[1].question]).toBe(label);
+  });
+
+  test.each([
+    'Clear the assume-unchanged flag and modify the route.',
+    'Keep the assume-unchanged flag; apply both source edits.',
+    'Keep the code unchanged, but the route will import the helper.',
+    'Keep the flag; this option updates the worker.',
+    'Keep the flag; reuse the parser in the worker.',
+  ])('refuses a preservation label with an affirmative description: %s', async description => {
+    const input = structuredClone(nativeCallbackReceipts.actor.public_question);
+    input.questions[1].options[1].description = description;
+    const events: string[] = [];
+    const callback = createSharedInteractiveToolHandler('skip', {
+      nonQuestion: () => {}, onQuestion: () => events.push('question'),
+      onAnswer: () => events.push('answer'), onRefusal: () => events.push('refusal'),
+    });
+    await expect(callback('AskUserQuestion', input)).rejects.toThrow('No unambiguous no-change option');
+    expect(events).toEqual(['question', 'refusal']);
   });
 });
