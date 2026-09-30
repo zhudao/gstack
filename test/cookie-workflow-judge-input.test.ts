@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildCookieWorkflowJudgeInput, COOKIE_WORKFLOW_JUDGE } from './helpers/cookie-workflow-judge-input';
-import { buildWorkflowJudgePrompt, readWorkflowJudgeInput } from './helpers/workflow-judge-input';
-import { prepareWorkflowJudgeCache, type WorkflowCacheOptions } from './helpers/workflow-judge-cache';
+import { buildWorkflowJudgePrompt, readWorkflowJudgeInput, WORKFLOW_JUDGE_RESPONSE_SCHEMA } from './helpers/workflow-judge-input';
+import { prepareWorkflowJudgeCache, validWorkflowJudgeScore, type WorkflowCacheOptions } from './helpers/workflow-judge-cache';
 import type { EvalTestEntry } from './helpers/eval-store';
 import { selectTests } from './helpers/test-selection';
 import { E2E_TOUCHFILES, LLM_JUDGE_TOUCHFILES } from './helpers/touchfiles-data';
@@ -70,7 +70,7 @@ function actualCookieCallback(root: string, overrides: {
   const records: EvalTestEntry[] = [];
   const attempts = new Map<string, { attempt: number }>();
   let callback: () => Promise<void> = async () => { throw new Error('Judge callback was not registered'); };
-  new Function('describeIfSelected', 'testIfSelected', 'ROOT', 'buildCookieWorkflowJudgeInput', 'resolveEvalModel', 'callJudge', 'COOKIE_WORKFLOW_JUDGE', 'JUDGE_MS', 'WORKFLOW_JUDGE_TEST_MS', 'WORKFLOW_JUDGE_RECORD_MS', 'evalCollector', 'expect', 'console', 'readWorkflowJudgeInput', 'buildWorkflowJudgePrompt', 'prepareWorkflowJudgeCache', 'workflowJudgeAttempts', 'performance', 'setTimeout', 'clearTimeout', 'JudgeRefusalError', 'getCookieWorkflowManualReview', 'DEFAULT_JUDGE_MAX_TOKENS', registration)(
+  new Function('describeIfSelected', 'testIfSelected', 'ROOT', 'buildCookieWorkflowJudgeInput', 'resolveEvalModel', 'callJudge', 'COOKIE_WORKFLOW_JUDGE', 'JUDGE_MS', 'WORKFLOW_JUDGE_TEST_MS', 'WORKFLOW_JUDGE_RECORD_MS', 'evalCollector', 'expect', 'console', 'readWorkflowJudgeInput', 'buildWorkflowJudgePrompt', 'prepareWorkflowJudgeCache', 'workflowJudgeAttempts', 'performance', 'setTimeout', 'clearTimeout', 'JudgeRefusalError', 'getCookieWorkflowManualReview', 'DEFAULT_JUDGE_MAX_TOKENS', 'WORKFLOW_JUDGE_RESPONSE_SCHEMA', 'validWorkflowJudgeScore', registration)(
     (_suite: string, names: string[], run: () => void) => { expect(names).toEqual([NAME]); run(); },
     (name: string, run: () => Promise<void>, budget: number) => { expect(name).toBe(NAME); expect(budget).toBe(JUDGE_MS + 10_000); callback = run; },
     root, buildCookieWorkflowJudgeInput, (_kind: string, explicit?: string) => explicit ?? 'fixture-model',
@@ -85,6 +85,7 @@ function actualCookieCallback(root: string, overrides: {
     attempts, overrides.clock ? { now: overrides.clock } : performance,
     overrides.setTimer ?? setTimeout, overrides.clearTimer ?? clearTimeout,
     JudgeRefusalError, getCookieWorkflowManualReview, DEFAULT_JUDGE_MAX_TOKENS,
+    WORKFLOW_JUDGE_RESPONSE_SCHEMA, validWorkflowJudgeScore,
   );
   return { run: () => callback(), requests, records, attempts };
 }
@@ -253,12 +254,14 @@ describe('cookie workflow judge input', () => {
   });
 
   test('each owned dependency selects this judge in the fast PR profile', () => {
-    for (const file of ['setup-browser-cookies/SKILL.md.tmpl', 'setup-browser-cookies/SKILL.md', 'BROWSER.md', 'test/helpers/cookie-workflow-judge-input.ts', 'test/cookie-workflow-judge-input.test.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'test/cookie-workflow-manual-review.test.ts', 'test/helpers/manual-judge-review-fixture.ts', '.github/cookie-workflow-manual-review.json']) {
+    for (const file of ['setup-browser-cookies/SKILL.md.tmpl', 'setup-browser-cookies/SKILL.md', 'BROWSER.md', 'test/helpers/cookie-workflow-judge-input.ts', 'test/helpers/cookie-workflow-manual-review.ts', 'test/helpers/manual-judge-review-fixture.ts', '.github/cookie-workflow-manual-review.json']) {
       const selectedJudges = selectTests([file], LLM_JUDGE_TOUCHFILES).selected;
-      expect(selectedJudges).toEqual([NAME]);
+      // Helpers the judge file imports select every judge that file registers (derived closure).
+      const exact = !file.startsWith('test/helpers/') || file === 'test/helpers/manual-judge-review-fixture.ts';
+      if (exact) expect(selectedJudges).toEqual([NAME]); else expect(selectedJudges).toContain(NAME);
       const selectedE2E = selectTests([file], E2E_TOUCHFILES).selected;
       const profile = selectPrProfile({ changedFiles: [file], selectedJudges, selectedE2E });
-      expect(profile.judges).toEqual([NAME]);
+      if (exact) expect(profile.judges).toEqual([NAME]); else expect(profile.judges).toContain(NAME);
       expect(profile.deferredPromptFiles).toEqual([]);
       expect(profile.missingCoverage).toEqual([]);
       expect(profile.needsFullValidation).toBe(false);

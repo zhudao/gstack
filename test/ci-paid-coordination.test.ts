@@ -121,8 +121,17 @@ describe('paid CI coordination stays off the eval image', () => {
         '/home/runner/.cache/gstack-paid-shard-*.log',
         '/tmp/gstack-paid-shard-*.log',
       ]);
-      expect(Object.values(jobs).flatMap(job => job.steps).filter(step => step.with?.['include-hidden-files']))
-        .toEqual([logs]);
+      const hiddenUploads = Object.values(jobs).flatMap(job => job.steps).filter(step => step.with?.['include-hidden-files']);
+      const captures = hiddenUploads.filter(step => step.with?.name === 'native-captures-${{ env.EVALS_RUN_ID }}');
+      expect(captures).toHaveLength(name === 'evals.yml' ? 1 : 2);
+      for (const capture of captures) {
+        expect(capture.if).toBe('always()');
+        expect(String(capture.with?.path).trim().split('\n')).toEqual([
+          '~/.gstack/projects/*/e2e-runs', '~/.gstack/projects/*/evals/qa-callers',
+          '~/.gstack-dev/e2e-runs', '~/.gstack-dev/evals/qa-callers',
+        ]);
+      }
+      expect(hiddenUploads.filter(step => !captures.includes(step))).toEqual([logs]);
     });
   }
 
@@ -189,18 +198,14 @@ describe('dependency-free CI planner and report execution', () => {
   for (const tier of ['gate', 'periodic'] as const) {
     test(`${tier}: host planner preserves the complete manifest and report fails closed`, () => {
       const sliceCount = tier === 'gate' ? 6 : 7;
-      const dedicatedAutoplanSlice = tier === 'periodic';
       const reportDir = path.join(fixture, tier);
       const manifestPath = path.join(reportDir, 'manifest.json');
-      const planned = run([
-        '--emit-plan', manifestPath, '--slices', String(sliceCount),
-        ...(dedicatedAutoplanSlice ? ['--autoplan-slice'] : []),
-      ], tier);
+      const planned = run(['--emit-plan', manifestPath, '--slices', String(sliceCount)], tier);
       expect(planned.error).toBeUndefined();
       expect(planned.status, planned.stderr).toBe(0);
       const manifest: PaidRunManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
       expect(manifest).toEqual(buildRunManifest({
-        tier, sliceCount, dedicatedAutoplanSlice, evalsAll: true, env: { EVALS_ALL: '1' },
+        tier, sliceCount, evalsAll: true, env: { EVALS_ALL: '1' },
       }));
       expect(manifest.entries.filter(entry => entry.status === 'planned').length).toBeGreaterThan(0);
       expect(fs.existsSync(path.join(fixture, 'node_modules'))).toBe(false);

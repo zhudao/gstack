@@ -171,6 +171,22 @@ Bun auto-loads `.env` — no extra config. Conductor workspaces inherit `.env` f
 
 ### Test tiers
 
+Functional QA changes need native fixture proof as well as prompt checks. Add declared
+CLI or loopback API/worker contracts in isolated temporary repositories, outside this
+checkout. Exercise success and adverse paths, durable effects, and setup failure.
+Report-only evaluations must leave mutation-capable tools available and independently
+detect forbidden writes, including an edit later restored; a clean final diff is not
+enough. Validate the observer with deliberately bad controls before a paid run.
+
+For exploratory regressions, retain the actual pre-repair failure, post-repair pass,
+original probe and adjacent happy path. Automatic caller tests must enter through
+review/ship, not tell the agent to run the component being tested. Documentation tests
+must prove the real child completed and the parent used its result before publication;
+the existing dispatch-only test is narrower evidence. Register new cases and all
+consumed section/resolver inputs in touchfiles, tiers and the PR profile so they run.
+Share sanitized reproduction commands and fixture evidence when reporting a problem,
+never credentials, private payloads or an entire unreviewed agent transcript.
+
 | Tier | Command | Cost | What it tests |
 |------|---------|------|---------------|
 | 1 — Static | `bun run test` | Free | Command validation, snapshot flags, Aside contract pins, render-wrapper option mapping, SKILL.md correctness, TODOS-format.md refs, observability unit tests |
@@ -196,10 +212,10 @@ gate and periodic censuses run fresh weekly and on manual
 dispatch of `evals-periodic.yml`; `bun run eval:bg:release` runs both locally.
 Some broad behavioral failures will therefore be found after the PR gate.
 
-CI enables verified first-attempt reuse for the 14 workflow quality judges for
-24 hours within the same PR. The other 11 quality cases and all dynamic agent
-cases stay fresh. Local runs stay fresh unless the complete scoped cache and
-runtime configuration is supplied. The key includes complete prompt bytes, generated inputs,
+CI enables verified first-attempt reuse for 16 workflow quality judges for
+24 hours within the same PR. The cookie workflow's custom input, the other 11
+quality cases and all dynamic agent cases stay fresh. Local runs stay fresh unless
+the complete scoped cache and runtime configuration is supplied. The key includes complete prompt bytes, generated inputs,
 fixtures, runner/rubric code, installed dependencies, model settings and runtime.
 The current assertions validate a reused score again. Records retain the original
 run, revision and time; reuse never renews that time. Failed, retried, partial or
@@ -218,6 +234,11 @@ historical six-worker result below and the
 [four-CPU portfolio comparison](docs/TEST_PORTFOLIO.md#measurement-contract)
 are machine-specific measurements. CI setup, build and queue time are reported
 separately. Refresh measurements with `bun run test:ubicloud --record-durations`;
+before publication, classify new regressions for quick feedback using that seed
+and the existing `QUICK_CORE` list. Do not classify unknown files as fast or use
+quick results as release acceptance. The runner retains full logs in
+`.context/free-test-logs/` and explains the next repair step on failure; see
+[free-runner recovery](docs/TESTING_INTERNALS.md) for details. For full acceptance,
 the required free CI lane packs the complete inventory across isolated runners,
 then checks every shard's receipt before reporting success. Local worker counts
 remain bounded to avoid browser/process contention.
@@ -230,6 +251,12 @@ Historical measurements from 2026-09-21:
 | Local complete free suite | All 993 files, six workers | 4m 35s |
 | Complete Linux CI | All 993 files, 20 isolated runners | 1m 40s across test steps; 3m 7s including setup and aggregation |
 
+After the 2026-09-29 test audit ([evidence](docs/test-audit-2026-09.md)):
+
+| Run | Coverage | Elapsed |
+|---|---|---|
+| Complete free suite, `bun run test:ubicloud` (standard-16) | All 857 files, 20,302 passing tests | 136 seconds on the VM; 1,738 seconds of recorded serial test time |
+
 The [Linux CI run](https://github.com/garrytan/gstack/actions/runs/35642667809)
 on `25030d68` included one recorded successful retry. Its slowest test step was 77 seconds;
 staggered starts made the complete test span longer. Typical PR paid-gate timing
@@ -237,6 +264,15 @@ still needs measurement on a small change. Explicitly exempt free-only runner
 changes do not select paid work; mapped dependencies take precedence, and unknown
 dependencies retain the broad fallback. See the
 [coverage boundaries](docs/TEST_PORTFOLIO.md#repeated-work-removed).
+
+When a paid eval fails, fix the product or the harness and add the captured case as one row in
+the detector's owner test (the detector → owner table is in
+[TEST_PORTFOLIO.md](docs/TEST_PORTFOLIO.md#detector-owner-tests)); never add a new per-incident file.
+A row is one `describe` block or table entry next to the others, for example a new
+`describe('eng-cache-writes-at', …)` in `test/eng-first-review.test.ts` that loads its fixture and asserts
+`engFirstReviewAUQ` on the captured call. Run `bun test <owner-test>`, then
+`bun test test/test-of-test-ratchet.test.ts`: the ratchet fails on any new test file that imports only
+`test/` code and names the owner test to use instead.
 
 Follow [Validation discipline in AGENTS.md](AGENTS.md#validation-discipline):
 reproduce known failures with focused checks, verify adjacent source and
@@ -282,7 +318,7 @@ Spawns `claude -p` as a subprocess with `--output-format stream-json --verbose`,
 
 ```bash
 # Must run from a plain terminal — can't nest inside Claude Code or Conductor
-EVALS=1 bun test test/skill-e2e-*.test.ts
+EVALS_RUN_ID="local-$(bun -e 'console.log(crypto.randomUUID())')" EVALS=1 bun test test/skill-e2e-*.test.ts
 ```
 
 - Gated by `EVALS=1` env var (prevents accidental expensive runs)
@@ -291,6 +327,11 @@ EVALS=1 bun test test/skill-e2e-*.test.ts
 - Real-time progress to stderr: `[Ns] turn T tool #C: Name(...)`
 - Saves full NDJSON transcripts and failure JSON for debugging
 - Tests live in `test/skill-e2e-*.test.ts` (split by category), runner logic in `test/helpers/session-runner.ts`
+
+Supply a fresh `EVALS_RUN_ID` for each invocation, including detached runs below.
+Functional QA and documentation cases refuse acceptance without it. CI supplies
+its own run/attempt/job/slice identity; see [Testing internals](docs/TESTING_INTERNALS.md)
+for the retained native-capture artifacts.
 
 **Hermetic by default.** Every E2E runner (claude -p, the real-PTY plan-mode
 runner, the Agent SDK runner, plus the codex and gemini runners) spawns its child
@@ -392,6 +433,16 @@ Each dimension is scored 1-5. Threshold: every dimension must score **≥ 4**. T
 - Resolves the judge model through `lib/eval-model.ts`, using the override order above
 - Tests live in `test/skill-llm-eval.test.ts`
 - Calls the Anthropic API directly (not `claude -p`), so it works from anywhere including inside Claude Code
+
+### Paid-test touchfiles
+
+`test/helpers/touchfiles-data.ts` maps each paid case to the files whose edits select it. Free
+`*.test.ts` files are never listed: editing a free test does not run paid evals. `test/touchfiles.test.ts`
+derives each paid file's static `test/helpers` / `test/fixtures` import closure, plus the fixture and helper
+paths it names in string literals, and fails when that closure is not covered by the case's key. When it
+fails, add the named path to the named key and check selection with
+`bun run scripts/test-paid-shards.ts --tier gate --profile pr --list`. The rule is a lower bound: a fixture
+path the test builds at runtime is not visible to it, so add such paths to the key by hand.
 
 ### CI
 

@@ -54,6 +54,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createBootstrapRetentionScope } from '../test/helpers/bootstrap-retention';
 import {
   BunTestOutputClassifier,
   exactTestFileSelectors,
@@ -62,10 +63,11 @@ import {
   normalizeRelativePath,
   runShardChild,
   strictTestExitCode,
+  type ShardChildResult,
 } from './test-strict-output';
 import { PAID_TEST_GLOBS, isPaidTestFile } from '../test/helpers/paid-test-set';
 import { PERIODIC_CI_EXCLUDE } from '../test/helpers/periodic-exclude-data';
-import { AUTOPLAN_CHAIN_BUDGET, FILE_RETRY_BUDGETS, STRICT_RETRY_CASE_BUDGETS } from '../test/helpers/eval-budgets';
+import { FILE_RETRY_BUDGETS, STRICT_RETRY_CASE_BUDGETS } from '../test/helpers/eval-budgets';
 import { getProjectEvalDir, getClaudeCliVersion, isFinalizedEvalResultFile, evalEntryOutcome } from '../test/helpers/eval-store';
 import { manualReviewProblem } from '../test/helpers/cookie-workflow-manual-review';
 import { preflightAnthropicApi } from '../test/helpers/anthropic-preflight';
@@ -165,6 +167,39 @@ export function classifyPaidTestFile(source: string, tier: PaidTier): TierClassi
   return { included: true, reason: 'no whole-file tier guard — runtime E2E_TIERS filter decides' };
 }
 
+/**
+ * A file is skipped for a tier lane only when its registered E2E ids are fully
+ * known and none of them has that tier. Ids are the touchfile registrations that
+ * list the file plus literal registration arguments (testName, *IfSelected);
+ * quoted strings elsewhere (comments, skill paths) never count. Any computed
+ * registration, an id missing from the file's touchfile registration, or no id at
+ * all keeps today's scheduling (the child's runtime filter decides).
+ */
+export function tierSkipReason(
+  file: string, source: string, tier: PaidTier,
+  touchfiles: Record<string, string[]> = E2E_TOUCHFILES,
+  tiers: Record<string, string> = E2E_TIERS,
+): string | null {
+  const rel = normalizeRelativePath(file);
+  const registered = Object.keys(touchfiles).filter(key => touchfiles[key]!.includes(rel));
+  if (!registered.length) return null;
+  const computed = /testName\s*:\s*(?:`[^`]*\$\{|[A-Za-z_$])/.test(source)
+    || /\btest(?:Concurrent)?IfSelected\s*\(\s*(?:`[^`]*\$\{|[A-Za-z_$])/.test(source)
+    || /\bdescribeIfSelected\s*\([^,]*,(?!\s*\[)/.test(source)
+    || [...source.matchAll(/\bdescribeIfSelected\s*\([^,]*,\s*\[([^\]]*)\]/g)].some(m => m[1]!.split(',')
+      .map(item => item.trim()).some(item => item && !/^(['"`])[^'"`$]*\1$/.test(item)));
+  if (computed) return null;
+  const literal = [
+    ...[...source.matchAll(/testName\s*:\s*(['"`])([^'"`]+)\1/g)].map(m => m[2]!),
+    ...[...source.matchAll(/\btest(?:Concurrent)?IfSelected\s*\(\s*(['"`])([^'"`]+)\1/g)].map(m => m[2]!),
+    ...[...source.matchAll(/\bdescribeIfSelected\s*\([^,]*,\s*\[([^\]]*)\]/g)]
+      .flatMap(m => [...m[1]!.matchAll(/(['"`])([^'"`]+)\1/g)].map(n => n[2]!)),
+  ].filter(id => id in tiers);
+  if (literal.some(id => !registered.includes(id))) return null;
+  if (registered.some(id => tiers[id] === tier)) return null;
+  return `skipped: no E2E_TIERS id has tier ${tier}`;
+}
+
 export interface TierSelection {
   selected: string[];
   excluded: Array<{ file: string; reason: string }>;
@@ -198,8 +233,9 @@ export function selectPaidTestFiles(files: string[], tier: PaidTier, rootDir = R
     }
     const source = fs.readFileSync(path.join(rootDir, file), 'utf8');
     const classification = classifyPaidTestFile(source, tier);
-    if (classification.included) selected.push(file);
-    else excluded.push({ file, reason: classification.reason });
+    const skip = classification.included ? tierSkipReason(file, source, tier) : null;
+    if (classification.included && !skip) selected.push(file);
+    else excluded.push({ file, reason: skip ?? classification.reason });
   }
   return { selected, excluded };
 }
@@ -393,7 +429,7 @@ export interface DiffSkipOptions {
  *     than literal.
  *
  * FAIL-OPEN by construction: run-all selection, non-skill-e2e paid files
- * (llm-judge / codex-e2e / gemini-e2e / routing, keyed off other maps),
+ * (llm-judge / codex-e2e / routing, keyed off other maps),
  * unreadable sources, and files with zero mapped names all KEEP their shard —
  * the child's self-skip stays authoritative. A parent bug may only run
  * extra work, never drop it.
@@ -464,7 +500,7 @@ export function planPaidShards(
   const shards: string[][] = [];
   let pending: string[] = [];
   for (const file of unique) {
-    if (isOverlayTestFile(file) || file === AUTOPLAN_CHAIN_BUDGET.file || FILE_RETRY_BUDGETS.some(budget => budget.file === file)) {
+    if (isOverlayTestFile(file) || FILE_RETRY_BUDGETS.some(budget => budget.file === file)) {
       if (pending.length) shards.push(pending);
       pending = [];
       shards.push([file]);
@@ -485,8 +521,6 @@ export interface PaidShardBudget {
 
 /** Explicit caller limits win; registered supervision preserves existing attempts. */
 export function resolvePaidShardBudget(files: string[], overrideMs?: number): PaidShardBudget {
-  const autoplan = files.map(normalizeRelativePath).includes(AUTOPLAN_CHAIN_BUDGET.file);
-  if (autoplan && files.length !== 1) throw new Error('Autoplan budget requires its own shard');
   const finding = FILE_RETRY_BUDGETS.find(budget => files.map(normalizeRelativePath).includes(budget.file));
   if (finding && files.length !== 1) throw new Error('Registered retry budget requires its own shard');
   if (overrideMs !== undefined && (!Number.isSafeInteger(overrideMs) || overrideMs <= 0 || overrideMs > 2_147_483_647)) {
@@ -498,9 +532,9 @@ export function resolvePaidShardBudget(files: string[], overrideMs?: number): Pa
     throw new Error(`Overlay shard requires at least ${OVERLAY_MIN_FILE_WALL_MS}ms; explicit wall ${overrideMs}ms cannot preserve its work and finalization budget`);
   }
   return {
-    timeoutMs: overrideMs ?? (autoplan ? AUTOPLAN_CHAIN_BUDGET.shardMs : finding ? finding.shardMs : overlay ? OVERLAY_MIN_FILE_WALL_MS : DEFAULT_SHARD_TIMEOUT_MS),
-    source: overrideMs !== undefined ? 'explicit' : autoplan || finding ? 'registered' : 'default',
-    policyId: autoplan ? AUTOPLAN_CHAIN_BUDGET.id : finding?.id ?? null,
+    timeoutMs: overrideMs ?? (finding ? finding.shardMs : overlay ? OVERLAY_MIN_FILE_WALL_MS : DEFAULT_SHARD_TIMEOUT_MS),
+    source: overrideMs !== undefined ? 'explicit' : finding ? 'registered' : 'default',
+    policyId: finding?.id ?? null,
   };
 }
 
@@ -602,8 +636,6 @@ export function paidShardWallUpperBoundMs(files: string[], jobs: number, overrid
 
 export interface RunShardsOptions {
   timeoutMs?: number;
-  /** Legacy Autoplan allocation; callers may supply registered per-file allocations. */
-  autoplanBudget?: PaidShardBudget;
   registeredBudgets?: Record<string, PaidShardBudget>;
   jobs?: number;
   /** bun --max-concurrency inside each shard (EVALS_CONCURRENCY). */
@@ -660,8 +692,7 @@ export async function runPaidShard(
 ): Promise<ShardOutcome> {
   if (files.length === 0) throw new Error('Cannot run an empty paid-test shard.');
   const rootDir = options.rootDir ?? ROOT;
-  const planned = options.registeredBudgets?.[normalizeRelativePath(files[0]!)] ??
-    (files.map(normalizeRelativePath).includes(AUTOPLAN_CHAIN_BUDGET.file) ? options.autoplanBudget : undefined);
+  const planned = options.registeredBudgets?.[normalizeRelativePath(files[0]!)];
   const budget = resolvePaidShardBudget(files, options.timeoutMs ??
     (planned?.source === 'explicit' ? planned.timeoutMs : undefined));
   const timeoutMs = budget.timeoutMs;
@@ -707,6 +738,14 @@ export async function runPaidShard(
   env.TEMP = childTmp;
   env.TMP = childTmp;
   env.CHROMIUM_PROFILE = path.join(stateDir, 'chromium-profile');
+  const bootstrapFile = files.some(file => normalizeRelativePath(file) === 'test/skill-e2e-qa-workflow.test.ts');
+  delete env.GSTACK_BOOTSTRAP_RETENTION;
+  if (bootstrapFile && process.platform !== 'linux') log(`${label} bootstrap dependency retention unavailable on ${process.platform}; native behavior still runs without retained-dependency qualification`);
+  const bootstrapRetention = bootstrapFile && process.platform === 'linux'
+    ? createBootstrapRetentionScope(childTmp, path.join(env.GSTACK_EVAL_DIR || getProjectEvalDir(), 'bootstrap-retention'), env.EVALS_RUN_ID ||= `bootstrap-${Date.now()}-${process.pid}`)
+    : undefined;
+  if (bootstrapRetention) Object.assign(env, bootstrapRetention.env);
+  let retentionFailed = false;
 
   const startedAt = Date.now();
   log(`${label} START ${files.join(' ')} (timeout ${Math.round(timeoutMs / 1000)}s, ${budget.source}${budget.policyId ? `: ${budget.policyId}` : ''})`);
@@ -740,6 +779,8 @@ export async function runPaidShard(
   let exitCode: number | null = null;
   let timedOut = false;
   let groupPid: number | null = null;
+  let incompleteCapture: ShardChildResult['incompleteCapture'];
+  const shardDeadline = Date.now() + timeoutMs;
   try {
     // Shared spawn/detached/group-kill/wall-timer/reap lifecycle.
     const result = await runShardChild({
@@ -748,6 +789,7 @@ export async function runPaidShard(
       cwd: rootDir,
       env,
       timeoutMs,
+      deadlineMs: shardDeadline,
       hookStreams: (child) => {
         const streams: Array<Promise<void>> = [];
         if (child.stdout) streams.push(forwardAndClassify(child.stdout, sink(process.stdout), classifier, 'stdout'));
@@ -758,15 +800,64 @@ export async function runPaidShard(
     exitCode = result.exitCode;
     timedOut = result.timedOut;
     groupPid = result.groupPid;
+    incompleteCapture = result.incompleteCapture;
+  } catch (error) {
+    const result = (error as { shardResult?: ShardChildResult } | null)?.shardResult;
+    if (result) {
+      exitCode = result.exitCode;
+      timedOut = result.timedOut;
+      groupPid = result.groupPid;
+      incompleteCapture = result.incompleteCapture;
+    }
+    throw error;
   } finally {
-    // Close the spool even when the spawn itself failed.
-    await new Promise<void>((resolve) => logStream.end(() => resolve()));
+    if (incompleteCapture) log(`${label} incomplete child capture: ${JSON.stringify(incompleteCapture)}; retained log prefix: ${logPath}`);
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (complete: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        logStream.off('error', onError);
+        logStream.off('close', onClose);
+        if (!complete) {
+          logWriteFailed = true;
+          logStream.destroy();
+          log(`${label} incomplete log capture; retained prefix: ${logPath}`);
+        }
+        resolve();
+      };
+      const onError = () => finish(false);
+      const onClose = () => finish(logStream.writableFinished && !logWriteFailed);
+      const expire = () => { timedOut = true; finish(false); };
+      logStream.once('error', onError);
+      logStream.once('close', onClose);
+      if (Date.now() >= shardDeadline) { expire(); return; }
+      if (logWriteFailed || logStream.destroyed) { finish(false); return; }
+      timer = setTimeout(expire, shardDeadline - Date.now());
+      try { logStream.end(() => finish(logStream.writableFinished && !logWriteFailed)); }
+      catch { finish(false); }
+    });
+    let retentionRemovable = true;
+    if (bootstrapRetention) {
+      try {
+        const retained = await bootstrapRetention.cleanup(shardDeadline);
+        retentionFailed = !retained.complete;
+        retentionRemovable = retained.removable;
+        if (retentionFailed) log(`${label} bootstrap retention incomplete; qualification failed`);
+      } catch {
+        retentionFailed = true;
+        retentionRemovable = false;
+        log(`${label} bootstrap retention acknowledgment failed; preserving shard state`);
+      }
+    }
     try {
       // async rm: a SIGKILLed shard can leave a full git workspace + Chromium
       // profile here; a synchronous recursive delete on the parent's event
       // loop would stall every sibling shard's stream classification and
       // wall timers for seconds (review finding).
-      await fs.promises.rm(stateDir, { recursive: true, force: true });
+      if (retentionRemovable) await fs.promises.rm(stateDir, { recursive: true, force: true });
     } catch {
       // Best-effort: a locked file must not turn a real verdict into an
       // exception (same posture as the free runner's cleanup).
@@ -786,7 +877,7 @@ export async function runPaidShard(
   const expectedFiles = files.length;
   let status: ShardStatus = timedOut
     ? 'timed-out'
-    : strictTestExitCode(exitCode ?? 1, summary, expectedFiles) === 0 ? 'passed' : 'failed';
+    : !retentionFailed && !logWriteFailed && !incompleteCapture && strictTestExitCode(exitCode ?? 1, summary, expectedFiles) === 0 ? 'passed' : 'failed';
   if (status === 'passed' && options.expectedCases) {
     const expected = files.reduce((count, file) => count + (options.expectedCases![file] ?? 0), 0);
     const actual = summary.terminalTestCounts.reduce((count, value) => count + value, 0) - summary.skippedTests;
@@ -981,7 +1072,7 @@ export interface ManifestEntry {
   slice: number;
   status: 'planned' | 'skipped-by-diff' | 'excluded';
   reason?: string;
-  /** Required when the registered Autoplan workflow is planned. */
+  /** Required when a registered retry-budget file is planned. */
   budget?: PaidShardBudget;
 }
 
@@ -995,8 +1086,6 @@ export interface PaidRunManifest {
   profile?: PaidProfile;
   selection?: PaidCaseSelection;
   prCoverage?: PrProfileSelection;
-  /** Dedicated last slice; preceding slices retain ordinary round-robin work. */
-  autoplanSlice?: number;
   entries: ManifestEntry[];
 }
 
@@ -1063,7 +1152,6 @@ export function buildRunManifest(opts: {
   profile?: PaidProfile;
   sliceCount: number;
   evalsAll: boolean;
-  dedicatedAutoplanSlice?: boolean;
   timeoutMs?: number;
   discovered?: string[];
   env?: NodeJS.ProcessEnv;
@@ -1071,19 +1159,22 @@ export function buildRunManifest(opts: {
   changedFiles?: string[];
   /** Recorded per-file durations; defaults to the committed seed under rootDir. */
   durations?: Record<string, number>;
+  /** Weekly gate census only: LLM judges already run in the periodic census and PR gate lanes. */
+  skipJudges?: boolean;
 }): PaidRunManifest {
   if (!Number.isInteger(opts.sliceCount) || opts.sliceCount <= 0) {
     throw new Error(`--slices needs a positive integer. Received: ${opts.sliceCount}`);
-  }
-  if (opts.dedicatedAutoplanSlice && (opts.tier !== 'periodic' || opts.sliceCount < 2)) {
-    throw new Error('Dedicated Autoplan slice requires periodic tier and at least two total slices');
   }
   const rootDir = opts.rootDir ?? ROOT;
   const env = opts.env ?? process.env;
   const profile = opts.profile ?? validatedProfile(env.EVALS_PROFILE, 'EVALS_PROFILE');
   if (profile === 'pr' && opts.tier !== 'gate') throw new Error('PR profile requires gate tier; use --profile full for periodic coverage');
   const discovered = opts.discovered ?? collectPaidTestFiles(rootDir);
-  const { selected, excluded } = selectPaidTestFiles(discovered, opts.tier, rootDir, env);
+  const tierSelection = selectPaidTestFiles(discovered, opts.tier, rootDir, env);
+  const judge = (file: string) => /^test\/skill-llm-eval[^/]*\.test\.ts$/.test(normalizeRelativePath(file));
+  const selected = opts.skipJudges ? tierSelection.selected.filter(file => !judge(file)) : tierSelection.selected;
+  const excluded = [...tierSelection.excluded, ...(opts.skipJudges ? tierSelection.selected.filter(judge)
+    .map(file => ({ file, reason: 'skipped: LLM judges run in the periodic census and PR gate lanes' })) : [])];
   const shards = planPaidShards(selected, { maxFilesPerShard: 1 });
   const cases = computePaidCaseSelection({ profile, env, rootDir, changedFiles: opts.changedFiles });
   const fast = cases.coverage?.mode === 'pr';
@@ -1095,16 +1186,14 @@ export function buildRunManifest(opts: {
   }
 
   const entries: ManifestEntry[] = [];
-  const overlaySlice = opts.sliceCount - (opts.dedicatedAutoplanSlice ? 1 : 0);
+  const overlaySlice = opts.sliceCount;
   const reserveOverlaySlice = overlaySlice > 1 && runnable.some(files => files.some(isOverlayTestFile));
   const ordinarySlices = overlaySlice - Number(reserveOverlaySlice);
   // Spread registered long files by supervised load. Keep one ordinary-only
   // lane when possible, so every lane does not inherit a long-workflow tail.
-  // Reserved overlay and dedicated Autoplan slices retain their ownership.
-  const ordinary = runnable.filter(files => !files.some(isOverlayTestFile) &&
-    !(opts.dedicatedAutoplanSlice && files[0] === AUTOPLAN_CHAIN_BUDGET.file));
-  const registered = ordinary.filter(files => files[0] === AUTOPLAN_CHAIN_BUDGET.file ||
-    FILE_RETRY_BUDGETS.some(budget => budget.file === files[0]));
+  // The reserved overlay slice retains its ownership.
+  const ordinary = runnable.filter(files => !files.some(isOverlayTestFile));
+  const registered = ordinary.filter(files => FILE_RETRY_BUDGETS.some(budget => budget.file === files[0]));
   const allocations = new Map<string, number>();
   if (registered.length && ordinarySlices > 1) {
     const loads = Array<number>(ordinarySlices).fill(0);
@@ -1173,12 +1262,9 @@ export function buildRunManifest(opts: {
     return new Map(lanes.flatMap((files, lane) => files.map(file => [file, lane + 1] as const)));
   }
   runnable.forEach((files) => {
-    const autoplan = files[0] === AUTOPLAN_CHAIN_BUDGET.file;
-    const slice = opts.dedicatedAutoplanSlice && autoplan ? opts.sliceCount
-      : files.some(isOverlayTestFile) ? overlaySlice
-        : (packed ?? allocations).get(files[0])!;
+    const slice = files.some(isOverlayTestFile) ? overlaySlice : (packed ?? allocations).get(files[0])!;
     entries.push({ file: files[0], slice, status: 'planned',
-      ...(autoplan || FILE_RETRY_BUDGETS.some(budget => budget.file === files[0])
+      ...(FILE_RETRY_BUDGETS.some(budget => budget.file === files[0])
         ? { budget: resolvePaidShardBudget(files, opts.timeoutMs) } : {}) });
   });
   for (const s of skipped) entries.push({ file: s.files[0], slice: 0, status: 'skipped-by-diff', reason: s.reason });
@@ -1194,7 +1280,6 @@ export function buildRunManifest(opts: {
     profile,
     selection: cases.selection,
     ...(cases.coverage ? { prCoverage: cases.coverage } : {}),
-    ...(opts.dedicatedAutoplanSlice ? { autoplanSlice: opts.sliceCount } : {}),
     entries,
   };
   return parseRunManifest(JSON.stringify(manifest));
@@ -1254,7 +1339,7 @@ export function parseRunManifest(raw: string): PaidRunManifest {
       }
     }
   }
-  const overlaySlice = parsed.sliceCount - (parsed.autoplanSlice !== undefined ? 1 : 0);
+  const overlaySlice = parsed.sliceCount;
   const plannedOverlays = parsed.entries.filter(entry => entry.status === 'planned' && isOverlayTestFile(entry.file));
   if (plannedOverlays.some(entry => entry.slice !== overlaySlice)) {
     throw new Error('Overlay manifest entries must share the final ordinary slice to preserve one-process API admission');
@@ -1262,23 +1347,6 @@ export function parseRunManifest(raw: string): PaidRunManifest {
   if (plannedOverlays.length && overlaySlice > 1 && parsed.entries.some(entry =>
       entry.status === 'planned' && !isOverlayTestFile(entry.file) && entry.slice === overlaySlice)) {
     throw new Error('The final ordinary manifest slice is reserved for overlay files');
-  }
-  const autoplan = parsed.entries.filter(entry => normalizeRelativePath(entry.file) === AUTOPLAN_CHAIN_BUDGET.file);
-  if (autoplan.length > 1) throw new Error('Duplicate Autoplan manifest entry');
-  if (parsed.autoplanSlice !== undefined) {
-    if (parsed.tier !== 'periodic' || parsed.autoplanSlice !== parsed.sliceCount || parsed.sliceCount < 2 || autoplan.length !== 1 || autoplan[0].status !== 'planned') {
-      throw new Error('Dedicated Autoplan slice is missing or malformed');
-    }
-    for (const entry of parsed.entries.filter(entry => entry.status === 'planned')) {
-      if ((entry.file === AUTOPLAN_CHAIN_BUDGET.file) !== (entry.slice === parsed.autoplanSlice)) {
-        throw new Error('Dedicated Autoplan slice contains missing or unrelated work');
-      }
-    }
-  }
-  for (const entry of autoplan.filter(entry => entry.status === 'planned')) {
-    if (!entry.budget) throw new Error('Autoplan manifest needs an explicit budget record; emit a fresh plan');
-    const expected = resolvePaidShardBudget([entry.file], entry.budget.source === 'explicit' ? entry.budget.timeoutMs : undefined);
-    if (!sameBudget(entry.budget, expected)) throw new Error('Autoplan manifest budget differs from declared policy');
   }
   for (const budget of FILE_RETRY_BUDGETS) {
     const entries = parsed.entries.filter(entry => normalizeRelativePath(entry.file) === budget.file);
@@ -1334,9 +1402,6 @@ export function verifySliceResults(
   const reported = new Map<string, { slice: number; status: ShardStatus }>();
   for (const result of results) {
     for (const outcome of result.outcomes) {
-      if (outcome.files.map(normalizeRelativePath).includes(AUTOPLAN_CHAIN_BUDGET.file) && outcome.files.length !== 1) {
-        problems.push('Autoplan result must report its own shard');
-      }
       if (outcome.files.some(file => FILE_RETRY_BUDGETS.some(budget => budget.file === normalizeRelativePath(file))) && outcome.files.length !== 1) {
         problems.push('Registered result must report its own shard');
       }
@@ -1369,17 +1434,6 @@ export function verifySliceResults(
             (planned?.source === 'explicit' ? planned.timeoutMs : undefined));
           if (!sameBudget(outcome.budget, expected)) problems.push(`Registered effective result budget differs from its planned/explicit allocation: ${file}`);
         } catch { problems.push(`Invalid registered effective result budget: ${file}`); }
-      }
-      if (file === AUTOPLAN_CHAIN_BUDGET.file) {
-        if (outcome.exitCode !== 0 || outcome.executedTests !== 1 || outcome.skippedTests !== 0) {
-          problems.push('Autoplan must execute exactly one unskipped case with exit zero');
-        }
-        try {
-          const planned = manifest.entries.find(entry => entry.file === file)?.budget;
-          const expected = resolvePaidShardBudget([file], result.timeoutOverrideMs ??
-            (planned?.source === 'explicit' ? planned.timeoutMs : undefined));
-          if (!sameBudget(outcome.budget, expected)) problems.push('Autoplan effective result budget differs from its planned/explicit allocation');
-        } catch { problems.push('Invalid Autoplan effective result budget'); }
       }
     }
   }
@@ -1430,9 +1484,9 @@ type CliOptions = {
   profile: PaidProfile;
   profileExplicit: boolean;
   listOnly: boolean;
+  skipJudges: boolean;
   timeoutMs: number;
   timeoutExplicit: boolean;
-  dedicatedAutoplanSlice: boolean;
   jobs: number;
   withinShardConcurrency: number;
   maxFilesPerShard: number;
@@ -1480,8 +1534,8 @@ export function parseCliOptions(argv: string[], env: NodeJS.ProcessEnv = process
     profile: validatedProfile(env.EVALS_PROFILE, 'EVALS_PROFILE'),
     profileExplicit: !!env.EVALS_PROFILE,
     listOnly: false,
+    skipJudges: false,
     timeoutExplicit: !!env.EVALS_SHARD_TIMEOUT_MS,
-    dedicatedAutoplanSlice: false,
     timeoutMs: env.EVALS_SHARD_TIMEOUT_MS
       ? parsePositiveInt(env.EVALS_SHARD_TIMEOUT_MS, 'EVALS_SHARD_TIMEOUT_MS')
       : DEFAULT_SHARD_TIMEOUT_MS,
@@ -1517,7 +1571,6 @@ export function parseCliOptions(argv: string[], env: NodeJS.ProcessEnv = process
       options.profile = validatedProfile(value, '--profile'); options.profileExplicit = true; continue;
     }
     if (arg === '--timeout') { options.timeoutMs = parsePositiveInt(argv[index += 1], '--timeout') * 1000; options.timeoutExplicit = true; continue; }
-    if (arg === '--autoplan-slice') { options.dedicatedAutoplanSlice = true; continue; }
     if (arg === '--jobs') { options.jobs = parsePositiveInt(argv[index += 1], '--jobs'); continue; }
     if (arg === '--files-per-shard') { options.maxFilesPerShard = parsePositiveInt(argv[index += 1], '--files-per-shard'); continue; }
     if (arg === '--emit-plan') {
@@ -1525,6 +1578,7 @@ export function parseCliOptions(argv: string[], env: NodeJS.ProcessEnv = process
       if (!value) throw new Error('--emit-plan needs a file path');
       options.emitPlanPath = value; continue;
     }
+    if (arg === '--skip-judges') { options.skipJudges = true; continue; }
     if (arg === '--slices') { options.slices = parsePositiveInt(argv[index += 1], '--slices'); continue; }
     if (arg === '--plan') {
       const value = argv[index += 1];
@@ -1541,7 +1595,7 @@ export function parseCliOptions(argv: string[], env: NodeJS.ProcessEnv = process
     throw new Error(`Unknown argument: ${arg}`);
   }
   if (options.writeDurations && !options.reportDir) throw new Error('--write-durations requires --report');
-  if (options.dedicatedAutoplanSlice && !options.emitPlanPath) throw new Error('--autoplan-slice requires --emit-plan');
+  if (options.skipJudges && (!options.emitPlanPath || options.tier !== 'gate')) throw new Error('--skip-judges applies only to an emitted gate census plan');
   if (options.profile === 'pr' && options.tier !== 'gate') throw new Error('PR profile requires gate tier');
   if (options.profile === 'pr' && options.maxFilesPerShard !== 1) throw new Error('PR profile requires one file per shard to preserve case accounting');
   return options;
@@ -1557,9 +1611,9 @@ async function main(): Promise<number> {
       tier: options.tier,
       profile: options.profile,
       sliceCount: options.slices,
-      dedicatedAutoplanSlice: options.dedicatedAutoplanSlice,
       timeoutMs: options.timeoutExplicit ? options.timeoutMs : undefined,
       evalsAll: process.env.EVALS_ALL === '1',
+      skipJudges: options.skipJudges,
     });
     fs.mkdirSync(path.dirname(path.resolve(options.emitPlanPath)), { recursive: true });
     fs.writeFileSync(options.emitPlanPath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -1714,6 +1768,14 @@ async function main(): Promise<number> {
     for (const files of shards) resolvePaidShardTimeoutMs(files, timeoutOverride);
     console.log(`[test:paid] slice ${options.sliceIndex}/${manifest.sliceCount}: ${shards.length} shard(s), tier=${manifest.tier}, evalsAll=${manifest.evalsAll}`);
 
+    if (options.listOnly) {
+      for (const [index, files] of shards.entries()) {
+        const budget = resolvePaidShardBudget(files, timeoutOverride);
+        console.log(`  shard ${index + 1}/${shards.length}: ${files.join(' ')} wall=${budget.timeoutMs}ms source=${budget.source} policy=${budget.policyId ?? 'none'}`);
+      }
+      return 0;
+    }
+
     const evalDirBase = process.env.GSTACK_EVAL_DIR || getProjectEvalDir();
     let summary: RunSummary;
     if (shards.length === 0) {
@@ -1724,7 +1786,6 @@ async function main(): Promise<number> {
         timeoutMs: options.timeoutExplicit ? options.timeoutMs : undefined,
         jobs: options.jobs,
         withinShardConcurrency: options.withinShardConcurrency,
-        autoplanBudget: mine.find(entry => entry.file === AUTOPLAN_CHAIN_BUDGET.file)?.budget,
         registeredBudgets: Object.fromEntries(mine.filter(entry => entry.budget).map(entry => [normalizeRelativePath(entry.file), entry.budget!])),
         ...(manifest.prCoverage?.mode === 'pr' ? {
           expectedCases: Object.fromEntries(mine.map(entry => [entry.file, expectedPrCaseCount(entry.file, manifest.selection!)])),

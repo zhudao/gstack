@@ -6,7 +6,6 @@ import {HOST_PATHS, type TemplateContext} from '../scripts/resolvers/types';
 import {generatePreamble} from '../scripts/resolvers/preamble';
 import {generateAskUserFormat} from '../scripts/resolvers/preamble/generate-ask-user-format';
 import {generateGBrainContextLoad} from '../scripts/resolvers/gbrain';
-import {E2E_TOUCHFILES, LLM_JUDGE_TOUCHFILES, selectTests} from './helpers/touchfiles';
 import {readWorkflowJudgeInput} from './helpers/workflow-judge-input';
 
 const template = fs.readFileSync(path.join(import.meta.dir, '../plan-eng-review/SKILL.md.tmpl'), 'utf8');
@@ -41,7 +40,7 @@ test('every host expands its real bootstrap after the mandatory entry gate', () 
 });
 
 test('entry binds a current target and delays bootstrap until scope resolves', () => {
-  expect(scope).toContain('Before tools or preamble, resolve from provided messages, listed tools and explicit host metadata only');
+  expect(scope).toContain('Before discovery tools or preamble, check provided messages, listed tools and explicit host metadata for a target');
   expect(scope).toContain('Do not probe for session state');
   expect(scope).toContain('When no exception above applied:');
   expect(scope).toContain('First tool call = AskUserQuestion (tool_use). Send this exact menu and wait');
@@ -108,18 +107,6 @@ test('Eng alone defers canonical question rules until scope and keeps one counte
     }
   }
 });
-
-test('the regression selects the same paid owners as the Eng template', () => {
-  for (const map of [E2E_TOUCHFILES, LLM_JUDGE_TOUCHFILES]) {
-    expect(selectTests(['test/eng-scope-entry-ap.test.ts'], map, []).selected)
-      .toEqual(selectTests(['plan-eng-review/SKILL.md.tmpl'], map, []).selected);
-    for (const paths of Object.values(map)) for (let i = 0; i < paths.length; i++) {
-      expect(Object.hasOwn(paths, i)).toBe(true);
-      expect(typeof paths[i]).toBe('string');
-    }
-  }
-});
-
 test('the full evaluated bundle routes startup into ordered preparation before scope analysis', () => {
   const input = readWorkflowJudgeInput({root:path.join(import.meta.dir, '..'), skillPath:'plan-eng-review/SKILL.md',
     startMarker:'# Plan Review Mode', endMarker:null});
@@ -129,11 +116,11 @@ test('the full evaluated bundle routes startup into ordered preparation before s
   expect(startup).toContain('Defer Operational Self-Improvement, Telemetry and Plan Status Footer to finish');
   expect(startup).toContain('format/transport rules apply throughout');
   expect(startup).toContain('full section Read → **Review preparation** → **Scope Challenge**');
-  const preparation = section.slice(section.indexOf('## Review preparation'), section.indexOf('## Review record'));
-  const stages = ['1. Select the report file and permissions under **Review record and write policy**',
-    '2. Run **Prior Learnings**', '3. Run **Retrospective learning**',
-    '4. Read **Confidence Calibration**', '**Decision procedure**',
-    '**Scope Challenge A → B → C**', 'Sections 1–4 in order'];
+  const preparation = section.slice(section.indexOf('## Review preparation'));
+  expect(preparation).toContain('Follow the blocks below in order after startup');
+  const stages = ['## Review record and write policy', '## Prior Learnings',
+    '## Retrospective learning', '## Confidence Calibration', '## Decision procedure',
+    '## Scope Challenge', '## Review Sections'];
   const positions = stages.map(stage=>preparation.indexOf(stage));
   expect(positions.every(position=>position>=0)).toBe(true);
   expect(positions).toEqual([...positions].sort((a,b)=>a-b));
@@ -163,7 +150,7 @@ test('both complexity paths join findings without bypassing answers or persisten
   expect(positions.every(position => position >= 0)).toBe(true);
   expect(positions).toEqual([...positions].sort((a, b) => a - b));
   expect(challenge).toContain('Complete these checks before the complexity decision in B');
-  expect(challenge).toContain("Below both thresholds, skip B's questions and go directly to **C. Resolve findings**");
+  expect(challenge.replace(/\s+/g, ' ')).toContain("With fewer than 8 files AND fewer than 2 new classes/services, skip B's questions and go directly to **C. Resolve findings**");
   expect(challenge).toContain('At 8+ files or 2+ new classes/services, STOP before Section 1');
   expect(challenge).toContain('After verification, apply only accepted scope changes');
   expect(challenge).toContain('Run C whether B was completed or skipped');
@@ -173,12 +160,13 @@ test('both complexity paths join findings without bypassing answers or persisten
   expect(challenge).toContain('A failed save or Read blocks advancement');
   expect(challenge).toContain('Findings and scope answers approve no remedies');
   expect(challenge).toContain('Continue to Section 1 only when no answer is pending');
-  expect(section).toContain('One question for one choice per AskUserQuestion call');
-  expect(section).toContain('Compare every native field with `currentDecision` and the whole grid with step 3');
+  expect(section.replace(/\s+/g, ' ')).toContain('Send one question object for one choice; other IDs wait');
+  expect(section.replace(/\s+/g, ' ')).toContain('Compare every native field with `currentDecision` and the whole saved grid with the prepared comparison');
   expect(section).toContain('Repair any difference and repeat the complete Read before asking');
   expect(section).toContain('Read the selected saved label, full description and grid column together');
   expect(section).toContain('Check the save result, then Read the entire resolution block, including State');
-  expect(section).toContain('Entrypoint: **Paused question** for pending answers; **Blocked outcome** for missing work or failed recovery');
+  expect(section).toContain('**STOP until the actual answer arrives.**');
+  expect(section.replace(/\s+/g, ' ')).toContain('unreadable or unverifiable records use **Recovery routing**');
   expect(template).toContain('**Paused question:** Wait for its actual answer without completion telemetry or ExitPlanMode');
   expect(template).toContain('**Blocked outcome:** Stop the review and report `BLOCKED`');
 });

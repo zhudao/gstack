@@ -12,17 +12,17 @@
 
 import { afterAll, expect } from 'bun:test';
 import { JUDGE_MS } from './helpers/eval-budgets';
-import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs';
 import * as path from 'path';
 import { callJudge, judge, JudgeRefusalError, DEFAULT_JUDGE_MAX_TOKENS } from './helpers/llm-judge';
 import { ENG_REVIEW_EXCERPT } from './helpers/workflow-excerpt';
 import type { JudgeScore } from './helpers/llm-judge';
-import { readWorkflowJudgeInput, buildWorkflowJudgePrompt, type WorkflowJudgeInput } from './helpers/workflow-judge-input';
-import { prepareWorkflowJudgeCache } from './helpers/workflow-judge-cache';
+import { readWorkflowJudgeInput, buildWorkflowJudgePrompt, QA_DISCOVERY_REFERENCES, WORKFLOW_JUDGE_RESPONSE_SCHEMA, type WorkflowJudgeInput } from './helpers/workflow-judge-input';
+import { prepareWorkflowJudgeCache, validWorkflowJudgeScore } from './helpers/workflow-judge-cache';
 import { buildCookieWorkflowJudgeInput, COOKIE_WORKFLOW_JUDGE } from './helpers/cookie-workflow-judge-input';
 import { getCookieWorkflowManualReview, type ManualJudgeReview } from './helpers/cookie-workflow-manual-review';
 import { resolveEvalModel } from '../lib/eval-model';
+import type { EvalCacheValue } from '../scripts/eval-input-cache';
 import { LLM_JUDGE_TOUCHFILES } from './helpers/touchfiles';
 // Runs when EVALS=1 is set (requires ANTHROPIC_API_KEY in env) — the EVALS
 // gate lives in the shared describeIfSelected. Selection machinery is shared
@@ -62,12 +62,11 @@ function readBrowseCommandSection(): string {
 }
 
 /** Slice a section out of the command-list section file, guarded non-empty. */
-function sliceBrowseSection(startHeader: string, endHeader?: string): string {
+function sliceBrowseSection(startHeader: string): string {
   const content = readBrowseCommandSection();
   const start = content.indexOf(startHeader);
   if (start < 0) throw new Error(`browse/sections/command-list.md: "${startHeader}" not found`);
-  const end = endHeader ? content.indexOf(endHeader) : -1;
-  const section = end > start ? content.slice(start, end) : content.slice(start);
+  const section = content.slice(start);
   if (section.trim().length < 200) {
     throw new Error(`browse/sections/command-list.md slice at "${startHeader}" is empty/stub — regenerate with: bun run gen:skill-docs`);
   }
@@ -91,85 +90,45 @@ function testIfSelected(testName: string, fn: () => Promise<void>, timeout: numb
 }
 
 describeIfSelected('LLM-as-judge quality evals', [
-  'command reference table', 'snapshot flags reference',
-  'browse/SKILL.md reference', 'setup block', 'regression vs baseline',
+  'browse/SKILL.md reference', 'setup block',
 ], () => {
-  testIfSelected('command reference table', async () => {
-    const t0 = Date.now();
-    // Browse carve: the command reference lives in the generated on-demand
-    // section browse/sections/command-list.md now (read via non-empty guard).
-    const section = sliceBrowseSection('## Full Command List');
-
-    const scores = await judge('command reference table', section);
-    console.log('Command reference scores:', JSON.stringify(scores, null, 2));
-
-    // Completeness threshold is 3 (not 4) — the command reference table is
-    // intentionally terse (quick-reference format). The judge consistently scores
-    // completeness=3 because detailed argument docs live in per-command sections.
-    evalCollector?.addTest({
-      name: 'command reference table',
-      suite: 'LLM-as-judge quality evals',
-      tier: 'llm-judge',
-      passed: scores.clarity >= 3 && scores.completeness >= 3 && scores.actionability >= 4,
-      duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
-      judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: scores.reasoning,
-    });
-
-    expect(scores.clarity).toBeGreaterThanOrEqual(3);
-    expect(scores.completeness).toBeGreaterThanOrEqual(3);
-    expect(scores.actionability).toBeGreaterThanOrEqual(4);
-  }, JUDGE_MS);
-
-  testIfSelected('snapshot flags reference', async () => {
-    const t0 = Date.now();
-    // Browse carve: snapshot flags live in browse/sections/command-list.md now,
-    // ordered before '## Full Command List' (the '## CSS Inspector' end boundary
-    // stayed in the skeleton).
-    const section = sliceBrowseSection('## Snapshot Flags', '## Full Command List');
-
-    const scores = await judge('snapshot flags reference', section);
-    console.log('Snapshot flags scores:', JSON.stringify(scores, null, 2));
-
-    evalCollector?.addTest({
-      name: 'snapshot flags reference',
-      suite: 'LLM-as-judge quality evals',
-      tier: 'llm-judge',
-      passed: scores.clarity >= 3 && scores.completeness >= 4 && scores.actionability >= 4,
-      duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
-      judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: scores.reasoning,
-    });
-
-    expect(scores.clarity).toBeGreaterThanOrEqual(3);
-    expect(scores.completeness).toBeGreaterThanOrEqual(4);
-    expect(scores.actionability).toBeGreaterThanOrEqual(4);
-  }, JUDGE_MS);
-
   testIfSelected('browse/SKILL.md reference', async () => {
     const t0 = Date.now();
-    // Browse carve: flags + commands are the whole generated section file.
+    // Browse carve: snapshot flags + the full command list are the whole
+    // generated section file; one judge grades the union. Scores are also
+    // pinned against test/fixtures/eval-baselines.json (UPDATE_BASELINES=1
+    // rewrites the pin).
     const section = sliceBrowseSection('## Snapshot Flags');
 
     const scores = await judge('browse skill reference (flags + commands)', section);
     console.log('Browse SKILL.md scores:', JSON.stringify(scores, null, 2));
 
+    const baselinesPath = path.join(ROOT, 'test', 'fixtures', 'eval-baselines.json');
+    const baselines = JSON.parse(fs.readFileSync(baselinesPath, 'utf-8'));
+    const regressions = (['clarity', 'completeness', 'actionability'] as const)
+      .filter(dim => scores[dim] < baselines.browse_skill[dim])
+      .map(dim => `browse_skill.${dim}: ${scores[dim]} < baseline ${baselines.browse_skill[dim]}`);
+    if (process.env.UPDATE_BASELINES) {
+      baselines.browse_skill = { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability };
+      fs.writeFileSync(baselinesPath, JSON.stringify(baselines, null, 2) + '\n');
+      console.log('Updated eval baselines');
+    }
+
     evalCollector?.addTest({
       name: 'browse/SKILL.md reference',
       suite: 'LLM-as-judge quality evals',
       tier: 'llm-judge',
-      passed: scores.clarity >= 3 && scores.completeness >= 4 && scores.actionability >= 4,
+      passed: scores.clarity >= 3 && scores.completeness >= 4 && scores.actionability >= 4 && regressions.length === 0,
       duration_ms: Date.now() - t0,
       cost_usd: 0.02,
       judge_scores: { clarity: scores.clarity, completeness: scores.completeness, actionability: scores.actionability },
-      judge_reasoning: scores.reasoning,
+      judge_reasoning: regressions.length ? `${scores.reasoning} | ${regressions.join('; ')}` : scores.reasoning,
     });
 
     expect(scores.clarity).toBeGreaterThanOrEqual(3);
     expect(scores.completeness).toBeGreaterThanOrEqual(4);
     expect(scores.actionability).toBeGreaterThanOrEqual(4);
+    expect(regressions).toEqual([]);
   }, JUDGE_MS);
 
   testIfSelected('setup block', async () => {
@@ -205,89 +164,6 @@ describeIfSelected('LLM-as-judge quality evals', [
     expect(scores.clarity).toBeGreaterThanOrEqual(3);
   }, JUDGE_MS);
 
-  testIfSelected('regression vs baseline', async () => {
-    const t0 = Date.now();
-    // Browse carve: the command reference lives in browse/sections/command-list.md.
-    const genSection = sliceBrowseSection('## Full Command List');
-
-    const baseline = `## Command Reference
-
-### Navigation
-| Command | Description |
-|---------|-------------|
-| \`goto <url>\` | Navigate to URL |
-| \`back\` / \`forward\` | History navigation |
-| \`reload\` | Reload page |
-| \`url\` | Print current URL |
-
-### Interaction
-| Command | Description |
-|---------|-------------|
-| \`click <sel>\` | Click element |
-| \`fill <sel> <val>\` | Fill input |
-| \`select <sel> <val>\` | Select dropdown |
-| \`hover <sel>\` | Hover element |
-| \`type <text>\` | Type into focused element |
-| \`press <key>\` | Press key (Enter, Tab, Escape) |
-| \`scroll [sel]\` | Scroll element into view |
-| \`wait <sel>\` | Wait for element (max 10s) |
-| \`wait --networkidle\` | Wait for network to be idle |
-| \`wait --load\` | Wait for page load event |
-
-### Inspection
-| Command | Description |
-|---------|-------------|
-| \`js <expr>\` | Run JavaScript |
-| \`css <sel> <prop>\` | Computed CSS |
-| \`attrs <sel>\` | Element attributes |
-| \`is <prop> <sel>\` | State check (visible/hidden/enabled/disabled/checked/editable/focused) |
-| \`console [--clear\\|--errors]\` | Console messages (--errors filters to error/warning) |`;
-
-    const client = new Anthropic();
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      messages: [{
-        role: 'user',
-        content: `You are comparing two versions of CLI documentation for an AI coding agent.
-
-VERSION A (baseline — hand-maintained):
-${baseline}
-
-VERSION B (auto-generated from source):
-${genSection}
-
-Which version is better for an AI agent trying to use these commands? Consider:
-- Completeness (more commands documented? all args shown?)
-- Clarity (descriptions helpful?)
-- Coverage (missing commands in either version?)
-
-Respond with ONLY valid JSON:
-{"winner": "A" or "B" or "tie", "reasoning": "brief explanation", "a_score": N, "b_score": N}
-
-Scores are 1-5 overall quality.`,
-      }],
-    });
-
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error(`Judge returned non-JSON: ${text.slice(0, 200)}`);
-    const result = JSON.parse(jsonMatch[0]);
-    console.log('Regression comparison:', JSON.stringify(result, null, 2));
-
-    evalCollector?.addTest({
-      name: 'regression vs baseline',
-      suite: 'LLM-as-judge quality evals',
-      tier: 'llm-judge',
-      passed: result.b_score >= result.a_score,
-      duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
-      judge_scores: { a_score: result.a_score, b_score: result.b_score },
-      judge_reasoning: result.reasoning,
-    });
-
-    expect(result.b_score).toBeGreaterThanOrEqual(result.a_score);
-  }, JUDGE_MS);
 });
 
 // --- Part 7: QA skill quality evals (C6) ---
@@ -323,14 +199,18 @@ function sliceQaPatterns(startHeader: string, endHeader?: string): string {
 describeIfSelected('QA skill quality evals', ['qa/SKILL.md workflow', 'qa/SKILL.md health rubric', 'qa/SKILL.md anti-refusal'], () => {
   testIfSelected('qa/SKILL.md workflow', async () => {
     const t0 = Date.now();
-    const section = sliceQaPatterns('## Workflow', '## Health Score Rubric');
+    const section = readWorkflowJudgeInput({ root: ROOT, skillPath: 'qa/SKILL.md',
+      startMarker: '# /qa: Test', endMarker: null,
+      references: ['qa/templates/functional-report-template.md'] }).text;
 
     const scores = await callJudge<JudgeScore>(`You are evaluating the quality of a QA testing workflow document for an AI coding agent.
 
-The agent reads this document to learn how to systematically QA test a web application. The workflow references
-a browser driver (Aside 'aside repl' scripts, with the headless browse CLI's $B commands as fallback) that is documented
-separately in the skill's BROWSER SETUP section — do NOT penalize for missing driver definitions.
-Instead, evaluate whether the workflow itself is clear, complete, and actionable.
+The agent reads this source-file bundle to select browser, native functional or mixed
+surfaces, explore with bounded probes, reproduce and diagnose defects, add a regression
+before repair, recheck behavior and report evidence/coverage. Sections are separate
+files loaded only at their stated conditions; bundle order is not execution order.
+Evaluate the complete workflow, including authority, isolation, native contracts,
+conditional browser/DX loading and blocked paths, for clarity and executable decisions.
 
 Rate on three dimensions (1-5 scale):
 - **clarity** (1-5): Can an agent follow the step-by-step phases without ambiguity?
@@ -523,59 +403,6 @@ score (1-5): 5 = perfectly consistent, 1 = contradictory`);
   }, JUDGE_MS);
 });
 
-// --- Part 7: Baseline score pinning (C9) ---
-
-describeIfSelected('Baseline score pinning', ['baseline score pinning'], () => {
-  const baselinesPath = path.join(ROOT, 'test', 'fixtures', 'eval-baselines.json');
-
-  testIfSelected('baseline score pinning', async () => {
-    const t0 = Date.now();
-    if (!fs.existsSync(baselinesPath)) {
-      console.log('No baseline file found — skipping pinning check');
-      return;
-    }
-
-    const baselines = JSON.parse(fs.readFileSync(baselinesPath, 'utf-8'));
-    const regressions: string[] = [];
-
-    // Browse carve: the command reference lives in browse/sections/command-list.md.
-    const cmdSection = sliceBrowseSection('## Full Command List');
-    const cmdScores = await judge('command reference table', cmdSection);
-
-    for (const dim of ['clarity', 'completeness', 'actionability'] as const) {
-      if (cmdScores[dim] < baselines.command_reference[dim]) {
-        regressions.push(`command_reference.${dim}: ${cmdScores[dim]} < baseline ${baselines.command_reference[dim]}`);
-      }
-    }
-
-    if (process.env.UPDATE_BASELINES) {
-      baselines.command_reference = {
-        clarity: cmdScores.clarity,
-        completeness: cmdScores.completeness,
-        actionability: cmdScores.actionability,
-      };
-      fs.writeFileSync(baselinesPath, JSON.stringify(baselines, null, 2) + '\n');
-      console.log('Updated eval baselines');
-    }
-
-    const passed = regressions.length === 0;
-    evalCollector?.addTest({
-      name: 'baseline score pinning',
-      suite: 'Baseline score pinning',
-      tier: 'llm-judge',
-      passed,
-      duration_ms: Date.now() - t0,
-      cost_usd: 0.02,
-      judge_scores: { clarity: cmdScores.clarity, completeness: cmdScores.completeness, actionability: cmdScores.actionability },
-      judge_reasoning: passed ? 'All scores at or above baseline' : regressions.join('; '),
-    });
-
-    if (!passed) {
-      throw new Error(`Score regressions detected:\n${regressions.join('\n')}`);
-    }
-  }, JUDGE_MS);
-});
-
 // --- Workflow SKILL.md quality evals (10 new tests for 100% coverage) ---
 
 /**
@@ -593,8 +420,13 @@ async function runWorkflowJudge(opts: {
   skillPath: string;
   startMarker: string;
   endMarker: string | null;
+  references?: readonly string[];
   judgeContext: string;
   judgeGoal: string;
+  agentCapability?: 'frontier';
+  structuredResponse?: boolean;
+  maxTokens?: number;
+  stream?: boolean;
   model?: string;
   thresholds?: { clarity: number; completeness: number; actionability: number };
   readInput?: () => WorkflowJudgeInput;
@@ -666,7 +498,7 @@ async function runWorkflowJudge(opts: {
     checkActive();
     const thresholds = { clarity: 3, completeness: 3, actionability: 4, ...opts.thresholds };
     const input = opts.readInput ? opts.readInput() : readWorkflowJudgeInput({ root: ROOT, skillPath: opts.skillPath,
-      startMarker: opts.startMarker, endMarker: opts.endMarker });
+      startMarker: opts.startMarker, endMarker: opts.endMarker, references: opts.references });
     checkActive();
     const prompt = buildWorkflowJudgePrompt(opts, input);
     if (opts.readInput) customInputMetadata = { prompt, model: resolveEvalModel('judge', opts.model) };
@@ -675,10 +507,12 @@ async function runWorkflowJudge(opts: {
     reused = cache.lookup();
     checkActive();
     stage = 'judge';
-    const maxTokens = DEFAULT_JUDGE_MAX_TOKENS;
+    const maxTokens = opts.maxTokens ?? DEFAULT_JUDGE_MAX_TOKENS;
     let result: JudgeScore;
     try {
-      result = reused?.scores ?? await callJudge<JudgeScore>(prompt, opts.model, { signal: controller.signal, max_tokens: maxTokens });
+      result = reused?.scores ?? await callJudge<JudgeScore>(prompt, opts.model, { signal: controller.signal, max_tokens: maxTokens,
+        ...(opts.stream ? { stream: true } : {}),
+        ...(opts.structuredResponse ? { jsonSchema: WORKFLOW_JUDGE_RESPONSE_SCHEMA } : {}) });
     } catch (error) {
       checkActive();
       if (error instanceof JudgeRefusalError && customInputMetadata) {
@@ -699,6 +533,9 @@ async function runWorkflowJudge(opts: {
     console.log(`[workflow-judge] ${opts.testName}: ${reused ? `reused ${reused.reuse.source.runId} @ ${reused.reuse.source.revision} (${new Date(reused.reuse.source.completedAt).toISOString()})` : 'executed'}`);
     console.log(`${opts.testName} scores:`, JSON.stringify(scores, null, 2));
     stage = 'validation';
+    if (opts.structuredResponse && !validWorkflowJudgeScore(scores as unknown as EvalCacheValue, { clarity: 1, completeness: 1, actionability: 1 }, true)) {
+      throw new Error('Structured workflow judge violated the response schema');
+    }
     expect(scores.clarity).toBeGreaterThanOrEqual(thresholds.clarity);
     expect(scores.completeness).toBeGreaterThanOrEqual(thresholds.completeness);
     expect(scores.actionability).toBeGreaterThanOrEqual(thresholds.actionability);
@@ -723,13 +560,18 @@ describeIfSelected('Ship & Release skill evals', ['ship/SKILL.md workflow', 'doc
   testIfSelected('ship/SKILL.md workflow', async () => {
     await runWorkflowJudge({
       testName: 'ship/SKILL.md workflow',
+      structuredResponse: true,
+      maxTokens: 65_536,
+      stream: true,
       suite: 'Ship & Release skill evals',
+      agentCapability: 'frontier',
       // The contract now precedes platform detection; keep the complete workflow.
       skillPath: 'ship/SKILL.md',
       startMarker: '# Ship:',
       endMarker: '## Important Rules',
+      references: QA_DISCOVERY_REFERENCES,
       judgeContext: 'a ship/release workflow document',
-      judgeGoal: 'how to create a PR: merge base branch, run tests, review diff, bump version, update changelog, push, and open PR',
+      judgeGoal: 'how to create a PR: merge base, test, review and explore changed behavior, handle required blocked checks, bump metadata, finish and vet every-ship documentation, then verify stable inputs, push and create/update the PR with visible QA and docs outcomes',
     });
   }, WORKFLOW_JUDGE_TEST_MS);
 
@@ -740,8 +582,8 @@ describeIfSelected('Ship & Release skill evals', ['ship/SKILL.md workflow', 'doc
       skillPath: 'document-release/SKILL.md',
       startMarker: '# Document Release:',
       endMarker: '## Important Rules',
-      judgeContext: 'a post-ship documentation update workflow',
-      judgeGoal: 'how to audit and update project documentation after code ships: README, ARCHITECTURE, CONTRIBUTING, CLAUDE.md, CHANGELOG, TODOS',
+      judgeContext: 'a release documentation audit workflow',
+      judgeGoal: 'how to audit relevant nested docs and authored sources; in ship-owned mode complete a bounded docs-only audit and return a typed result without Git/metadata authority, while standalone mode retains its approval and publication protections',
     });
   }, WORKFLOW_JUDGE_TEST_MS);
 });
@@ -870,9 +712,23 @@ describeIfSelected('Deploy skill evals', [
 
 // Block 5: Other skills
 describeIfSelected('Other skill evals', [
-  'retro/SKILL.md instructions', 'qa-only/SKILL.md workflow', 'gstack-upgrade/SKILL.md upgrade flow',
+  'retro/SKILL.md instructions', 'qa-only/SKILL.md workflow', 'review/SKILL.md workflow', 'gstack-upgrade/SKILL.md upgrade flow',
   'sync-gbrain/SKILL.md read-only readiness',
 ], () => {
+  testIfSelected('review/SKILL.md workflow', async () => {
+    await runWorkflowJudge({
+      testName: 'review/SKILL.md workflow',
+      suite: 'Other skill evals',
+      skillPath: 'review/SKILL.md',
+      startMarker: '## Step 0: Detect platform and base branch',
+      endMarker: null,
+      references: [...QA_DISCOVERY_REFERENCES, 'review/checklist.md', 'review/specialists/testing.md'],
+      judgeContext: 'a pre-landing review with bounded exploratory QA',
+      judgeGoal: 'how to review and explore changed behavior even for small diffs without a plan or server, preserve report-only discovery and the test_stub ASK gate, handle incomplete probes honestly, and rerun affected evidence after approved repairs',
+      agentCapability: 'frontier',
+    });
+  }, WORKFLOW_JUDGE_TEST_MS);
+
   testIfSelected('sync-gbrain/SKILL.md read-only readiness', async () => {
     await runWorkflowJudge({
       testName: 'sync-gbrain/SKILL.md read-only readiness',
@@ -902,10 +758,11 @@ describeIfSelected('Other skill evals', [
       testName: 'qa-only/SKILL.md workflow',
       suite: 'Other skill evals',
       skillPath: 'qa-only/SKILL.md',
-      startMarker: '## Workflow',
-      endMarker: '## Important Rules',
+      startMarker: '# /qa-only:',
+      endMarker: null,
+      references: QA_DISCOVERY_REFERENCES.filter(file => file !== 'qa/sections/exploratory.md'),
       judgeContext: 'a report-only QA testing workflow',
-      judgeGoal: 'how to systematically QA test a web application and produce a structured report with health score, screenshots, and repro steps — without fixing anything',
+      judgeGoal: 'how to select browser/native functional/mixed targets, explore safely with repository tools, report exact contract evidence and coverage limits, conditionally load browser/DX instructions and never mutate product/tests/Git through any tool',
     });
   }, WORKFLOW_JUDGE_TEST_MS);
 

@@ -4,8 +4,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { buildPaidShardArgs, retriesForFiles, resolvePaidShardTimeoutMs } from '../scripts/test-paid-shards';
-import { E2E_TOUCHFILES, selectTests } from './helpers/touchfiles';
-
 const ROOT = path.resolve(import.meta.dir, '..');
 const PAID_FILE = 'test/skill-e2e-review.test.ts';
 const CASES = [
@@ -13,12 +11,6 @@ const CASES = [
   ['review-enum-completeness', 300, 15],
   ['review-design-lite', 400, 35],
 ] as const;
-
-test('review finalization regressions select all three owning cases', () => {
-  expect(selectTests(['test/review-finalization-budget.test.ts'], E2E_TOUCHFILES).selected?.sort())
-    .toEqual(CASES.map(([id]) => id).sort());
-});
-
 for (const [id, workMs, maxTurns] of CASES) {
   test.each(['recover', 'both-timeout'])(`${id} records late results before retry or finalization: %s`, scenario => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-finalization-'));
@@ -54,8 +46,13 @@ mock.module(path.join(root, 'test/helpers/session-runner.ts'), () => ({
     // constants are scaled. The actual registered Bun outer deadline stays.
     await new Promise(resolve => setTimeout(resolve, timeout ? opts.timeout + 50 : 80));
     event({ kind: 'ready', id, fixtureExists: fs.existsSync(opts.workingDirectory) });
-    if (!timeout) fs.writeFileSync(path.join(opts.workingDirectory, 'review-output.md'),
-      'SQL injection. Returned enum status critical. Papyrus font family;14px font-size;outline focus;!important;purple gradient;generic hero copy;3-column feature grid;impeccable detector [ai-color-palette].');
+    if (!timeout) {
+      const target = selected === 'review-enum-completeness'
+        ? opts.prompt.match(/Write your review findings once to (\\S+)/)[1]
+        : path.join(opts.workingDirectory, 'review-output.md');
+      fs.writeFileSync(target,
+        'SQL injection. Returned enum status critical. Papyrus font family;14px font-size;outline focus;!important;purple gradient;generic hero copy;3-column feature grid;impeccable detector [ai-color-palette].');
+    }
     return { attemptId: id, exitReason: timeout ? 'timeout' : 'success', duration: opts.timeout,
       model: 'free-fixture-model', toolCalls: [], browseErrors: [], output: '', transcript: [],
       costEstimate: { estimatedCost: 0, estimatedTokens: 0, turnsUsed: 0 } };

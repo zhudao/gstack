@@ -41,8 +41,14 @@ test('the existing quality and behavior phases retain their complete separate sh
   const behaviorFiles = behavior.entries.filter(entry => entry.status === 'planned').map(entry => entry.file);
   expect(quality.evalsAll).toBe(true);
   expect(behavior.evalsAll).toBe(true);
-  expect(qualityFiles).toHaveLength(2);
-  expect(behaviorFiles).toHaveLength(56);
+  expect(qualityFiles).toHaveLength(1);
+  expect(behaviorFiles).toHaveLength(46);
+  expect(behaviorFiles).toEqual(expect.arrayContaining([
+    'test/skill-e2e-qa-callers.test.ts',
+    'test/skill-e2e-qa-functional-fix.test.ts',
+    'test/skill-e2e-qa-functional.test.ts',
+    'test/skill-e2e-ship-skip.test.ts',
+  ]));
   expect(qualityFiles.every(file => file.startsWith('test/skill-llm-eval'))).toBe(true);
   expect(behaviorFiles.every(file => !qualityFiles.includes(file))).toBe(true);
 });
@@ -60,7 +66,11 @@ test('Windows retains complete shard logs on successful and failed runs', () => 
   const windows = Bun.YAML.parse(readFileSync(path.join(root, '.github/workflows/windows-free-tests.yml'), 'utf8')) as any;
   const upload = windows.jobs['windows-free-tests'].steps.find((step: any) => step.with?.name === 'windows-free-test-shard-logs');
   expect(upload.if).toBe('always()');
-  expect(upload.with.path).toBe('${{ runner.temp }}/gstack-free-test-*.log');
+  expect(upload.with.path.trim().split('\n')).toEqual([
+    '.context/free-test-logs/gstack-free-test-*.log',
+    '${{ runner.temp }}/gstack-free-test-*.log',
+  ]);
+  expect(upload.with['include-hidden-files']).toBe(true);
 });
 
 test('focused Windows diagnostics include the repaired lock and close cases without default-profile qualification', () => {
