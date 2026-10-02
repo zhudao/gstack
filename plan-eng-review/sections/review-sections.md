@@ -585,7 +585,7 @@ Test step 2 adds user flows. Future paths remain proposals, not runnable code.
 
 Read the plan document. For each new feature, service, endpoint, or component described, trace how data will flow through the code — don't just list planned functions, actually follow the planned execution:
 
-1. **Read the plan.** For each planned component, understand what it does and how it connects to existing code. When grounded in concrete source and test files, read them in a dedicated tool call before drawing the diagram. Do not mix diff, grep, package/config, git, or commentary into that read; use separate calls for context. Base the diagram on that read.
+1. **Read the plan.** For each planned component, see how it connects to existing code. When grounded in concrete source and test files, read them in a dedicated tool call before drawing the diagram (`cat -n src/f && echo -- && cat -n test/f`). Do not mix diff, grep, config, git or commentary into that read; use separate calls for context. Base the diagram on that read.
 2. **Trace data flow.** Starting from each entry point (route handler, exported function, event listener, component render), follow the data through every branch:
    - Where does input come from? (request params, props, database, API call)
    - What transforms it? (validation, mapping, computation)
@@ -735,14 +735,15 @@ When these test and eval choices are resolved, write the Test Plan Artifact belo
 After resolving the Test review decisions, record the approved test requirements in an artifact for `/qa` and `/qa-only`. List any unresolved choices separately as pending, not required implementation. Update this artifact if later approved decisions change the tests. Use the Review record and write policy above.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG  # sets SLUG and BRANCH
+eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"  # sets SLUG and BRANCH
 TEST_PLAN_USER=$(whoami)
 DATETIME=$(date +%Y%m%d-%H%M%S)
 ```
 
 Use `SLUG` and the sanitized `BRANCH` from gstack-slug, `TEST_PLAN_USER` for {user}, and `DATETIME` for {datetime}. Set {date} to today. Read the local origin URL with `git remote get-url origin` and use its owner/repo; without an origin, write `local-only`. No network request is needed.
 
-Write to `~/.gstack/projects/{slug}/{user}-{branch}-eng-review-test-plan-{datetime}.md`:
+Write to `<PROJECT_DIR>/{user}-{branch}-eng-review-test-plan-{datetime}.md` (`PROJECT_DIR` printed above):
 
 ```markdown
 # Test Plan
@@ -1170,8 +1171,9 @@ Rules:
 backslashes serialize cleanly — never use hand-rolled `echo` / `printf`.
 
 ```bash
+eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-TASKS_DIR="${HOME}/.gstack/projects/${SLUG:-unknown}"
+TASKS_DIR="$GSTACK_STATE_ROOT/projects/${SLUG:-unknown}"
 mkdir -p "$TASKS_DIR"
 TASKS_FILE="$TASKS_DIR/tasks-eng-review-$(date +%Y%m%d-%H%M%S).jsonl"
 COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)

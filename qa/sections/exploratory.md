@@ -5,7 +5,7 @@
 The **caller** (/qa, /qa-only, /review or /ship) owns decisions, tests, fixes and publication. Discovery writes only reports/evidence
 and owned fixture state; no workflows, framework installs or publication.
 
-Complete these Reads in order before writing charters or probing. Do not repeat a Read already completed in this invocation.
+Complete these Reads in order before writing charters or probing. Await their results before the first probe, never in the same response. Do not repeat a Read already completed in this invocation.
 1. Read `sections/scope.md` relative to the installed `qa`/`gstack-qa` SKILL.md directory in full and select the surfaces.
 2. Read the selected surface methods below in full.
 
@@ -24,7 +24,7 @@ Write a **charter** per behavior: contract, risk, entrypoint, isolation, exit co
 
 For /review and /ship, no plan/server is required.
 Stop after 5 minutes or 12 probes, whichever comes first (SECONDS=300 across surfaces).
-Explicit plan checks remain required beyond this smoke budget.
+Explicit plan checks and revalidation remain required beyond this smoke budget.
 For /qa and /qa-only:
 - Browser Quick: SECONDS=30. Browser Full/Regression: SECONDS=900.
 - Functional Full, Quick and Regression have no default total timer.
@@ -57,7 +57,7 @@ Never batch probes.
    Preserve every safe program-JSON key/value and identity hash unchanged.
    Withhold unsafe values, disclose limits and stop that chain.
    Check fields before publication. No drafts/placeholders or invented safe-path redactions; corrections cannot repair published notes.
-   Functional: `bun Q checkpoint R NNN CAPTURE_ID 'observationCommand' 'hypothesis' 'nextCommand'` with literal arguments. Q supplies observed; never transcribe it.
+   Functional: the next capture publishes it: `... --after PREV --hypothesis 'why' -- CMD` (PREV: last complete capture). Q supplies observed; never transcribe it.
    Browser checkpoints use Write.
    Wait for successful checkpoint publication before dispatch.
    Never backfill or overwrite notes.
@@ -66,7 +66,7 @@ Never batch probes.
 4. Replay the exact failing command/request from the same initial fixture state via steps 2–3 (same native command, fresh capture ID)
    before repair, then minimize via those gates. Expiry leaves confirmation/minimization incomplete.
    Another input or a regression test is not that replay.
-5. After source/commands/fixtures change, repeat affected review and return to step 2 for each affected revalidation. Keep limits/notes; status requires fresh evidence.
+5. After source/commands/fixtures change, re-review and return to step 2 for each affected revalidation (unproven=affected). Keep limits/notes; status requires fresh evidence.
 
 ## 3. Parent handoff
 
@@ -81,8 +81,7 @@ Never freeze buggy output, weaken tests or delete valid red tests.
 ## 4. Final report
 
 Use the surface report template; link each checkpoint. Separate browser scores, functional outcomes and proposed/executed tests.
-For evidence.json, Write R/annotations.json: {revision, runtime, cwd, evidence: [{capture, command, contract, expected, classification}], learning: [checkpoint IDs], limits}.
-Run `bun Q materialize R annotations.json` before Markdown; Q fills observed/learning, not classifications. Retain all safe probes, including failures/replays; disclose withheld/incomplete evidence.
+Write R/annotations.json {evidence: [{capture, command, contract, expected, classification}], limits} (browser-only: evidence [], checkpoints in limits); before Markdown `bun Q materialize R annotations.json` (fills observed/metadata; prints reportLinks); you classify. Retain all safe probes, including failures/replays; disclose withheld/incomplete evidence.
 Evidence is invocation-local; /ship reruns once per invocation.
 Missing prerequisites/expectations/observations, timeouts and refusal never pass.
 Pass requires all required current-input contracts to pass with no required remainder.

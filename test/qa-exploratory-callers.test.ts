@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import {
-  callerExcerpt, callerSnapshot, callerTools, createQaCallerFixture, qaCallerInstructions,
+  callerExcerpt, callerReviewRecordTemplate, callerSnapshot, callerTools, createQaCallerFixture, qaCallerInstructions,
   QA_CALLER_CASES, QA_CALLER_TEST_MS,
   qaCallerSessionOptions, qaCallerCommandAllowed, readCallerReceipt, retainQaCallerEvidence, runQaCaller, validateCallerEvidence,
   type CallerProbe, type CallerReceipt, type QaCallerFixture,
@@ -116,6 +116,71 @@ describe('caller native-event observer controls', () => {
       (complete[0].message as any).id = 'shared-finalization-turn';
     }
     expect(validateCallerEvidence(observed)).toContain('review completion preceded handoff freshness decision');
+  });
+
+  test('captured gate-census-5 review record: bun-wrapped helper and receipt status are outside the interface', () => {
+    // ci-36629958451-1-gate-census-5 review-exploratory-small-cli, native events 68 and 70 (fixture paths shortened).
+    const record = (status: string) => `/runtime/bin/gstack-review-log '{"skill":"review","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":"'"$(git rev-parse --short HEAD)"'","branch":"caller-change","status":"${status}","completed":false,"converged":false,"critical":1,"informational":0,"findings":[{"path":"scale.ts","line":3,"category":"functional-contract","severity":"CRITICAL","fingerprint":"scale.ts:3:functional-contract","action":"ask-pending"}]}' --finish d45404cf-ba19-4bc6-a505-9801e9322f54`;
+    const errorsFor = (command: string, caller: 'review' | 'ship' = 'review') => {
+      const observed = { ...evidence(), caller };
+      observed.result.transcript.push(...nativeCall('record', 'Bash', { command }, 'Saved'));
+      return validateCallerEvidence(observed);
+    };
+    expect(errorsFor(`bun ${record('blocked')}`)).toContain('command outside declared caller observation interface');
+    expect(errorsFor(record('blocked'))).toEqual(['review record status outside the review vocabulary: blocked']);
+    expect(errorsFor(record('issues_found'))).toEqual([]);
+    expect(errorsFor(record('unavailable'))).toEqual(['review record status outside the review vocabulary: unavailable']);
+    // ci-36907899270-1-eval-slices-6: an accepted record whose finding cites checkpoints as evidence.
+    const cited = record('issues_found').replace('"action":"ask-pending"}', '"action":"ask-pending","evidence":["reports/exploration-002.json","reports/exploration-003.json"]}');
+    expect(cited).not.toBe(record('issues_found'));
+    expect(errorsFor(cited)).toEqual([]);
+    expect(errorsFor(`bun ${cited}`)).toEqual(['command outside declared caller observation interface', 'QA checkpoint: Unsupported checkpoint Bash interaction']);
+    expect(errorsFor(record('unavailable'), 'ship').filter(error => error.includes('vocabulary'))).toEqual([]);
+    expect(errorsFor(generatedReviewRecord('/runtime/bin/gstack-review-log', 'native-token').replace('"status":"clean"', '"status":"blocked"'))).toEqual([]);
+    const prompt = (id: 'review-exploratory-small-cli' | 'ship-exploratory-small-cli') => {
+      const fixture = createQaCallerFixture(id, { installRuntime: false });
+      try { return qaCallerSessionOptions(fixture, 'free-control').prompt; } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+    };
+    expect(prompt('review-exploratory-small-cli')).toContain('never through bun or another interpreter. A review record fills this installed template, keeping its keys and adding none: `');
+    expect(prompt('review-exploratory-small-cli')).toContain('otherwise issues_found; a review stopped at a gate records completed:false');
+    expect(prompt('ship-exploratory-small-cli')).toContain('otherwise issues_found (unavailable for missing dispatched reviewer output)');
+  });
+
+  test('captured PR-lane review record: an invented shape without the installed template is rejected; the template is quoted', () => {
+    // ci-36641824710-1-eval-slices-6 review-exploratory-small-cli, native event 8jewsM (fixture paths shortened).
+    const invented = `/runtime/bin/gstack-review-log '{"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","commit":"'"$(git rev-parse --short HEAD)"'","branch":"caller-change","status":"issues_found","completed":false,"gate":"fix-first-ask","findings":[{"path":"scale.ts","line":3,"category":"functional-contract","severity":"CRITICAL","fingerprint":"scale.ts:3:functional-contract","confidence":10,"action":"ask","summary":"new !n guard rejects documented lower bound 0 (exit 2 instead of 0)"}],"qa":{"probes":["probe-167de79c-2645-4b60-b06b-3d0d6eebf13f"],"checkpoints":["exploration-001.json","exploration-002.json"],"suite":"bun run test 1 pass 0 fail"},"remaining":["fix-first-ask-approval"]}' --finish 37b567b3-c4bf-4469-9bad-29096740c234`;
+    const errorsFor = (command: string) => {
+      const observed = evidence();
+      observed.result.transcript.push(...nativeCall('record', 'Bash', { command }, ''));
+      return validateCallerEvidence(observed);
+    };
+    expect(errorsFor(invented)).toEqual(['command outside declared caller observation interface', 'QA checkpoint: Unsupported checkpoint Bash interaction']);
+    for (const caller of ['review', 'ship'] as const) {
+      const template = callerReviewRecordTemplate({ caller, runtime: '/runtime' });
+      expect(template.startsWith(`/runtime/bin/gstack-review-log '{"skill":"review","timestamp":`)).toBe(true);
+      expect(template).toEndWith(`}' --finish REVIEW_START`);
+      const filled = template.replace('"timestamp":"TIMESTAMP"', `"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"`)
+        .replace('"commit":"COMMIT"', `"commit":"'"$(git rev-parse --short HEAD)"'"`)
+        .replace('"STATUS"', '"issues_found"').replace(/"issues_found":N/, '"issues_found":1').replace('"critical":N', '"critical":1').replace('"informational":N', '"informational":0')
+        .replace('SCORE', '10.0').replace('SPECIALISTS_JSON', '{}').replace('FINDINGS_JSON', '[{"fingerprint":"scale.ts:3:functional-contract","severity":"CRITICAL","action":"ask-pending"}]')
+        .replace('COMPLETED', 'false').replace('CONVERGED', 'false').replace('CYCLES', '0').replace('REVIEW_START', 'native-token');
+      expect(errorsFor(filled)).toEqual([]);
+      const fixture = createQaCallerFixture(caller === 'review' ? 'review-exploratory-small-cli' : 'ship-exploratory-small-cli', { installRuntime: false });
+      try { expect(qaCallerSessionOptions(fixture, 'free-control').prompt).toContain(callerReviewRecordTemplate(fixture)); } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+    }
+  });
+
+  test('captured PR-lane plan-completion git log is in the caller interface; other log forms stay outside', () => {
+    // ci-36641824710-1-eval-slices-7 ship-exploratory-plan-checks, native event 3Pvdmu: ship/sections/plan-completion.md requires this read.
+    expect(fs.readFileSync(path.join(import.meta.dir, '../ship/sections/plan-completion.md'), 'utf8')).toContain('`git log origin/<base>..HEAD --oneline`');
+    expect(qaCallerCommandAllowed('git log origin/main..HEAD --oneline')).toBe(true);
+    for (const command of ['git log', 'git log --oneline', 'git log origin/main..HEAD', 'git log origin/main..HEAD --oneline -p',
+      'git log origin/main..HEAD --oneline --output=/tmp/x', 'git log --all --oneline', 'git log origin/main..HEAD --oneline; git push',
+      'git log origin/main..HEAD --oneline && git commit -am x', 'git -c core.pager=x log origin/main..HEAD --oneline', 'git log origin/main...HEAD --oneline']) {
+      expect(qaCallerCommandAllowed(command)).toBe(false);
+    }
+    const fixture = createQaCallerFixture('ship-exploratory-plan-checks', { installRuntime: false });
+    try { expect(qaCallerSessionOptions(fixture, 'free-control').prompt).toContain("git log origin/main..HEAD --oneline, git diff"); } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
   });
 
   test('a later unchanged handoff reread does not invalidate an already completed freshness decision', () => {
@@ -608,8 +673,8 @@ describe('generated actual parent paths', () => {
       expect(load).toContain('Templates cannot replace them');
       const flat = parent.replace(/\s+/g, ' ');
       expect(flat).toContain('Only the parent runs report-only discovery');
-      expect(flat).toContain('Follow the shared Probe loop for smoke checks, replays and revalidation until the smoke limit');
-      expect(flat).toContain('Then run required plan checks, even after smoke expires');
+      expect(flat).toContain('Follow the shared Probe loop for smoke checks and replays until the smoke limit');
+      expect(flat).toContain('Then run required plan checks and revalidation, even after smoke expires');
       expect(flat).toContain('using the same procedure but no smoke guard; never reset the clock');
       expect(flat).toContain("Use finite command timeouts, capped at the caller\'s remaining time if it has a deadline");
       expect(flat).toContain('When the caller\'s deadline expires, mark unfinished checks not-run');
@@ -640,7 +705,7 @@ describe('generated actual parent paths', () => {
     expect(body).toContain('Stop after 5 minutes or 12 probes, whichever comes first');
     expect(body).toContain('G enforces the deadline');
     expect(body).toContain('Never reset D/bypass G');
-    expect(body).toContain('Explicit plan checks remain required beyond this smoke budget');
+    expect(body).toContain('Explicit plan checks and revalidation remain required beyond this smoke budget');
     expect(body).toContain('leaves /review incomplete');
     expect(body).toContain('/ship blocked unless the user explicitly accepts that named risk');
   });
@@ -1305,7 +1370,7 @@ describe('real caller-specific native fixture and capture boundary', () => {
         expect(options.appendSystemPrompt).not.toMatch(/bun scripts\/probe\.ts \d|invalid input|highest.risk/i);
         expect(options.prompt).toContain('Keep normal parent decision gates.');
         expect(options.prompt).toContain("use the section clock's Hard deadline UTC, never its Runner entry UTC, reserve-start time or a clock-read time");
-        expect(options.prompt).toContain('Before every completion report or bookkeeping log, read HANDOFF.md');
+        expect(options.prompt).toContain('Before the completion report and each completed:true review record, read HANDOFF.md');
         expect(options.prompt).toContain('a later handoff read cannot validate an earlier completion');
         expect(options.prompt).toContain('If you defer an optional idea or stop exploration, do not publish a checkpoint for it');
         expect(options.prompt).toContain('An unused checkpoint requires an actual authenticated expired-capture result; nearing the deadline or choosing to stop is not enough');

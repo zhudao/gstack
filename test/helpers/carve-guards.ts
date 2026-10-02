@@ -166,7 +166,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // wave's headline capability) grows the union to 1.195x. Deliberate:
     // the section is on-demand (loads only for Apple store targets), so
     // per-invocation cost for non-iOS ships is one manifest line.
-    maxSizeRatio: 1.397, // Shared advisory identity/dedup + critical-severity validation: 248,065 union bytes / 187,706 baseline = 1.3216 (2026-09-17). + test value bar in the lazy Step 7 section (value cards, weak paths, gate table, base control, machine checks; ~13.6KB): measured 1.396 (2026-09-29).
+    maxSizeRatio: 1.404, // Shared advisory identity/dedup + critical-severity validation: 248,065 union bytes / 187,706 baseline = 1.3216 (2026-09-17). + test value bar in the lazy Step 7 section (value cards, weak paths, gate table, base control, machine checks; ~13.6KB): measured 1.396 (2026-09-29). + W1 guarded state-root resolution (`eval gstack-paths; : "${GSTACK_STATE_ROOT:?…}"`) in the Context Recovery preamble, the eureka log and each state-writing bash block; measured 1.401 (2026-09-30). + the shared QA review step's plan-check timing rule (plan checks and their revalidation run on --timeout-ms after smoke expiry); measured 1.4022 (2026-09-30).
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
@@ -184,7 +184,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // v1.65 merge: provisional larger-of-both-waves budget; re-measured below.
         // Fork port wave 2 (#703): the repo-doc-preference block in the design
     // check grew every plan-review skeleton ~0.7KB. Measured values noted.
-    maxSkeletonBytes: 80_150, // + depth-specific output and 0H/0I feasibility boundary clarity + the Aside probe's failure reason; measured 80,111.
+    maxSkeletonBytes: 80_850, // + depth-specific output and 0H/0I feasibility boundary clarity + the Aside probe's failure reason; measured 80,111. + W1 guarded state-root resolution (`eval gstack-paths; : "${GSTACK_STATE_ROOT:?…}"`) in the Context Recovery preamble, the eureka log and each state-writing bash block; measured 80,649 (2026-09-30); + the same guard in the CEO spec-review metrics block; measured 80,812 (2026-09-30).
     minUnionBytes: 123_600, // token-reduction Phases 1-2 (v1.69.x branch): preamble bash -> bin/gstack-skill-start, onboarding -> gated emission; measured union 137,346
     mustContain: ['SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'HOLD SCOPE', 'SCOPE REDUCTION'],
     // Default-on Codex outside-voice (codexPreflight block + CODEX_MODE branch
@@ -221,7 +221,7 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // 1.08 → 1.10: the scope-gate exceptions block (+ its adversarial-review
     // hardening: host-anchored mode signal, precedence, passing-mention
     // guards) and the plan-mode preamble reword land the union at 1.092.
-    maxSizeRatio: 1.169, // + clarity rules for saved decisions/setup gates + the Aside probe's failure reason; measured 1.1504. + test value bar and Tests to Retire in the lazy Test review section (~2.6KB); measured 1.168
+    maxSizeRatio: 1.175, // + clarity rules for saved decisions/setup gates + the Aside probe's failure reason; measured 1.1504. + test value bar and Tests to Retire in the lazy Test review section (~2.6KB); measured 1.168 + W1 guarded state-root resolution (`eval gstack-paths; : "${GSTACK_STATE_ROOT:?…}"`) in the Context Recovery preamble, the eureka log and each state-writing bash block; measured 1.173 (2026-09-30). + v1.91.12.0 merge of #2999 (headless rule: a disallowed question tool never qualifies) with #3002; measured 1.1741 (2026-10-01).
   },
   'plan-design-review': {
     skill: 'plan-design-review',
@@ -387,7 +387,7 @@ do not launch the downstream skill or open a browser.`,
     expectedSections: ['proposal-and-preview.md'],
     requiredReads: ['proposal-and-preview.md'],
     scenario:
-      'The user gave product context (a B2B analytics dashboard for ops teams) and declined the research phase. Skip browser/design tool setup. Proceed to build the complete design-system proposal, then write DESIGN.md. Produce the proposal and the DESIGN.md content.',
+      'The user gave product context (a B2B analytics dashboard for ops teams), declined the research phase and declined the optional outside design voices. Skip browser/design tool setup. Proceed to build the complete design-system proposal, then write DESIGN.md and its CLAUDE.md guidance.',
     staticInvariants: {
       mustStayInSkeleton: ['## Phase 0: Pre-checks', '## Phase 1: Product Context', '## Phase 2: Research'],
       mustMoveToSection: ['## Phase 3: The Complete Proposal', '## Phase 6: Write DESIGN.md'],
@@ -407,7 +407,10 @@ do not launch the downstream skill or open a browser.`,
     // the cross-session decision-memory nudge) lands this carved skeleton just over
     // the strict 1.05; headroom for the shared preamble additions.
     // v1.64+v1.65 merge sums both waves' preamble growth; measured 1.073.
-    maxSizeRatio: 1.08,
+    // + W1 guarded state-root resolution in the Context Recovery preamble, the
+    // eureka log, the office-hours lookup and the taste-profile read; measured
+    // 1.0834 (2026-09-30).
+    maxSizeRatio: 1.085,
   },
   cso: {
     skill: 'cso',
@@ -478,10 +481,10 @@ do not launch the downstream skill or open a browser.`,
       gateAfterStop: undefined, // operational multi-STOP skill, like ship
     },
     behavioral: 'plan',
-    maxSkeletonBytes: 74_600, // Shared-code identity/skip/action rules + critical-severity validation; measured 74,493 (2026-09-17).
+    maxSkeletonBytes: 74_881, // Shared-code identity/skip/action rules + critical-severity validation; measured 74,493 (2026-09-17). + v1.91.12.0 merge of #2999 (review clarity repairs: await reads, research alongside dispatch, /review deadline and setup authority, findings sources) with #3002 (guarded state-root lines, plan-check checkpoints); each fit alone; measured 74,881 (2026-10-01).
     minUnionBytes: 89_000, // Phase 4 wave 1; measured union 93,357
     mustContain: ['confidence', 'P1', 'P2', 'Review Army', 'adversarial'],
-    maxSizeRatio: 1.18, // Shared-code feature + critical-severity validation: 128,042 union bytes / 108,523 baseline = 1.1799; preserves content floors.
+    maxSizeRatio: 1.185, // Shared-code feature + critical-severity validation: 128,042 union bytes / 108,523 baseline = 1.1799; preserves content floors. + v1.91.12.0 merge of #2999 (above, plus plan-completion fallback intent and specialist checklist-by-path) with #3002; measured 1.1843 (2026-10-01).
   },
   codex: {
     skill: 'codex',
@@ -664,7 +667,7 @@ do not launch the downstream skill or open a browser.`,
     },
     behavioral: 'prompt',
     maxSkeletonBytes: 63_500, // + v2.0 {{ASIDE_SETUP}}/{{BROWSE_FALLBACK}} (replaces the browse setup block); measured 61_253
-    maxSizeRatio: 1.095, // + v1.81 Aside contract + gstack-browser fallback block (1.080 on v1.91.7.0) + the shared test value bar at 8a.5 ({{TEST_VALUE_BAR:qa}}); measured 1.094
+    maxSizeRatio: 1.103, // + v1.81 Aside contract + gstack-browser fallback block (1.080 on v1.91.7.0) + the shared test value bar at 8a.5 ({{TEST_VALUE_BAR:qa}}); measured 1.094 + W1 guarded state-root resolution (`eval gstack-paths; : "${GSTACK_STATE_ROOT:?…}"`) in the Context Recovery preamble, the eureka log and each state-writing bash block; measured 1.101 (2026-09-30) + v1.91.12.0 merge of #2999 (await scope/method Reads, capture --after checkpoints, browser-only empty evidence list) with #3002; measured 1.1028 (2026-10-01).
     minUnionBytes: 69_500, // measured union 70,385
     // 'aside repl' pins the Aside contract; '$B goto' pins the fallback block in the always-loaded skeleton.
     mustContain: ['bug', 'aside repl', '$B goto', 'fix', 'Health Score Rubric', 'regression'],

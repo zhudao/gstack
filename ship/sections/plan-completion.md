@@ -14,9 +14,9 @@ The child reads the plan and every referenced
 code file; the parent validates its report and applies the gates below.
 
 **Subagent prompt:** Substitute `<base>` and supply the active plan's absolute path
-or complete text, including relevant user-approved scope changes. If none exists,
-say so explicitly and let the child use the fallback search below. The child does
-not inherit the parent's conversation.
+or complete text, including user-approved scope changes. If none is known, say
+so; the child runs the fallback search below. If discovery found no plan, skip
+dispatch. The child does not inherit the parent's conversation.
 
 ````text
 You are running a ship-workflow plan completion audit. The base branch is `<base>`. Use `git diff origin/<base>` and inspect untracked files from `git status` to see the full proposed change. Do not commit or push. Report only: classify every item, but do not execute Gate Logic, ask the user, or advance the workflow. The parent applies those gates to your report.
@@ -33,7 +33,8 @@ BRANCH=$(git branch --show-current 2>/dev/null | tr '/' '-' | tr -cd 'a-zA-Z0-9.
 REPO=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")
 _PLAN_SLUG=$(git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-' | tr -cd 'a-zA-Z0-9._-') || true
 _PLAN_SLUG="${_PLAN_SLUG:-$(basename "$PWD" | tr -cd 'a-zA-Z0-9._-')}"
-for PLAN_DIR in "$HOME/.gstack/projects/$_PLAN_SLUG" "$HOME/.claude/plans" "$HOME/.codex/plans" ".gstack/plans"; do
+eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+for PLAN_DIR in "$GSTACK_STATE_ROOT/projects/$_PLAN_SLUG" "$HOME/.claude/plans" "$HOME/.codex/plans" ".gstack/plans"; do
   [ -d "$PLAN_DIR" ] || continue
   PLAN=$(ls -t "$PLAN_DIR"/*.md 2>/dev/null | xargs grep -l "$BRANCH" 2>/dev/null | head -1)
   [ -z "$PLAN" ] && PLAN=$(ls -t "$PLAN_DIR"/*.md 2>/dev/null | xargs grep -l "$REPO" 2>/dev/null | head -1)

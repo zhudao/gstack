@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -467,7 +467,7 @@ describe('test-free-shards: exclusive host-state phase', () => {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
-      for (const file of ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts',
+      for (const file of ['scripts/test-free-shards.ts', 'scripts/test-strict-output.ts', 'scripts/lib/shard-engine.ts', 'lib/state-root.ts',
         'test/helpers/paid-test-set.ts', 'test/helpers/touchfiles.ts', 'test/helpers/touchfiles-data.ts', 'test/helpers/test-selection.ts']) {
         const target = path.join(directory, file);
         fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -1283,16 +1283,23 @@ describe('test-free-shards: duration-aware packing (full-suite LPT)', () => {
     fs.writeFileSync(seedPath, '{ definitely not json');
     const prev = process.env.GSTACK_FREE_TEST_DURATIONS;
     process.env.GSTACK_FREE_TEST_DURATIONS = seedPath;
+    // The corrupt seed's warning is the expected output; keep it off the console.
+    const warn = spyOn(console, 'error').mockImplementation(() => {});
     try {
       expect(loadFreeTestDurations()).toBeNull();
+      expect(warn.mock.calls.map(call => String(call[0]))).toEqual([
+        expect.stringContaining(`[test:free] WARNING: corrupt durations seed ${seedPath}`),
+      ]);
       // Missing file: silent null (fresh checkouts are normal).
       process.env.GSTACK_FREE_TEST_DURATIONS = path.join(dir, 'missing.json');
       expect(loadFreeTestDurations()).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
       // Valid seed round-trips, non-numeric entries dropped.
       fs.writeFileSync(seedPath, JSON.stringify({ version: 1, durations: { 'test/a.test.ts': 42, bad: 'nope' } }));
       process.env.GSTACK_FREE_TEST_DURATIONS = seedPath;
       expect(loadFreeTestDurations()).toEqual({ 'test/a.test.ts': 42 });
     } finally {
+      warn.mockRestore();
       if (prev === undefined) delete process.env.GSTACK_FREE_TEST_DURATIONS;
       else process.env.GSTACK_FREE_TEST_DURATIONS = prev;
       fs.rmSync(dir, { recursive: true, force: true });

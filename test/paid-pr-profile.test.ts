@@ -150,7 +150,8 @@ describe('PR profile paid-runner integration', () => {
     expect(() => parseRunManifest(JSON.stringify(injected))).toThrow('outside its PR case selection');
     for (const action of ['remove', 'skip', 'duplicate'] as const) {
       const missing = structuredClone(manifest);
-      const file = 'test/skill-e2e-plan.test.ts';
+      // plan.test is case-sharded: its PR case runs as `<file>#<case id>`.
+      const file = manifest.entries.find(entry => entry.status === 'planned' && entry.file.startsWith('test/skill-e2e-plan.test.ts#'))!.file;
       if (action === 'remove') missing.entries = missing.entries.filter(entry => entry.file !== file);
       if (action === 'skip') missing.entries.find(entry => entry.file === file)!.status = 'skipped-by-diff';
       if (action === 'duplicate') missing.entries.push({ ...missing.entries.find(entry => entry.file === file)! });
@@ -240,7 +241,7 @@ describe('PR profile paid-runner integration', () => {
     expect(guarded[0].status).toBe('passed-empty');
   });
 
-  test('report distinguishes retained/deferred coverage and final executed/reused outcomes from attempts', () => {
+  test('report distinguishes retained/deferred coverage and counts every executed/reused record', () => {
     const manifest = ceoManifest();
     const lines = formatProfileCoverage(manifest).join('\n');
     expect(lines).toContain('profile=pr mode=pr');
@@ -251,6 +252,7 @@ describe('PR profile paid-runner integration', () => {
       { name: 'retry', suite: 'judge', passed: true, execution: 'executed' },
       { name: 'cached', suite: 'judge', passed: true, execution: 'reused' },
       { name: 'failed', suite: 'native', passed: false },
-    ] }])).toEqual({ executed: 2, reused: 1, passed: 2, failed: 1, manual_accepted: 0, attempts: 4 });
+      // Paid evals never retry: a later pass never replaces an earlier failed record.
+    ] }])).toEqual({ executed: 3, reused: 1, passed: 2, failed: 2, manual_accepted: 0, attempts: 4 });
   });
 });

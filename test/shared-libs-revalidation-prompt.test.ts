@@ -103,7 +103,8 @@ describe('bounded shared-code revalidation prompt', () => {
       'All prior receipts are preserved', 'Source-changing cycles invalidate earlier results',
       'invoke the actor again on the new zero-edit pass', "Never refresh an old receipt's hashes",
       'Missing, failed, stale or wrong-state results require noncompletion', 'cannot complete core/checklist review',
-      'no actual native coverage credit']) expect(prompt).toContain(rule);
+      'only a current settled:true actor result from the final pass supplies the replaced Step 4.7 QA and Step 4.8 native adversarial prerequisites',
+      'a reporting label, not a missing stage', 'no actual native coverage credit']) expect(prompt).toContain(rule);
     expect(prompt).not.toContain('Required reviewer coverage for this scoped replay');
     expect(prompt).not.toContain('Do not edit target source');
   });
@@ -118,7 +119,9 @@ describe('bounded shared-code revalidation prompt', () => {
     for (const requirement of ['not evidence that this model executed those stages', 'never actual native coverage credit',
       'Missing, failed, blocked, malformed or stale prerequisites require noncompletion', 'unchanged COMPLETED and CONVERGED rules',
       'Any source, branch, base, index or configuration change invalidates', 'do not regenerate them',
-      'A finding that requires edits blocks this bounded replay', resumed.input, resumed.checkCommand]) expect(prompt).toContain(requirement);
+      'A finding that requires edits blocks this bounded replay', resumed.input, resumed.checkCommand,
+      "replace Step 4's early QA selection and method-loading prerequisites", 'read no QA scope or method assets']) expect(prompt).toContain(requirement);
+    expect(original).not.toContain('read no QA scope or method assets');
     expect(prompt.slice(prompt.indexOf('Revalidation fixture execution contract:')))
       .toBe(original.slice(original.indexOf('Revalidation fixture execution contract:')));
     const production = fs.readFileSync(path.join(SHARED_LIBS_ROOT, 'review/SKILL.md.tmpl'), 'utf8');
@@ -140,6 +143,10 @@ describe('bounded shared-code revalidation prompt', () => {
     expect(contract).toContain('Do not read the diff until step 2 verifies the start record');
     expect(contract.indexOf('Read that token\'s record')).toBeLessThan(contract.indexOf('Then read the diff in a subsequent call'));
     expect(contract).not.toMatch(/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/);
+    expect(prompt).toContain(`${SHARED_LIBS_ROOT}/review/sections/shared-code-reuse.md (Step 5.0 requires it for the supplied prior Skip)`);
+    expect(prompt.indexOf('Your first response holds')).toBeLessThan(prompt.indexOf("gstack-review-log' --start review"));
+    expect(prompt).toContain('Keep the final review summary to at most twelve lines');
+    expect(base).not.toContain('Keep the final review summary');
     expect(contract).toContain('Batch independent required source reads');
     expect(contract).toContain('Preserve every required evidence check and dependency');
     expect(contract).toContain('complete, untruncated read-back');
@@ -237,7 +244,7 @@ describe('bounded shared-code revalidation prompt', () => {
     expect(await invoke()).toBe(result);
     expect(calls).toEqual([[f, 'shared-libs-review-revalidation', reviewRevalidationPrompt(f, instructions, input, resumed), 'skip', { attempt, prerequisiteSource: 'synthetic-fixture-input' }]]);
     const lifecycle = source.slice(source.indexOf("test('shared-libs-review-lifecycle'"), source.indexOf("test('shared-libs-review-revalidation'"));
-    expect(lifecycle).toContain('reviewPrompt(f, instructions, input, stageActor)');
+    expect(lifecycle).toContain('reviewPrompt(f, instructions, input, stageActor, seed)');
     expect(lifecycle).not.toContain('reviewRevalidationPrompt(');
   });
 

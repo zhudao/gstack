@@ -74,7 +74,7 @@ Never batch probes.
    Preserve every safe program-JSON key/value and identity hash unchanged.
    Withhold unsafe values, disclose limits and stop that chain.
    Check fields before publication. No drafts/placeholders or invented safe-path redactions; corrections cannot repair published notes.
-   Functional: `bun Q checkpoint R NNN CAPTURE_ID 'observationCommand' 'hypothesis' 'nextCommand'` with literal arguments. Q supplies observed; never transcribe it.
+   Functional: the next capture publishes it: `... --after PREV --hypothesis 'why' -- CMD` (PREV: last complete capture). Q supplies observed; never transcribe it.
    Browser checkpoints use Write.
    Wait for successful checkpoint publication before dispatch.
    Never backfill or overwrite notes.
@@ -84,7 +84,7 @@ Never batch probes.
    to confirm it, then minimize via those gates. Expiry leaves confirmation/minimization incomplete.
    Another input or a regression test is not that replay.
 5. If the user or another process changes source, commands or fixtures, review the affected
-   contracts and return to step 2 for each affected revalidation. Do not make product changes yourself.
+   contracts and return to step 2 for each affected revalidation (unproven=affected). Do not make product changes yourself.
    Keep the original limits/notes; update outcomes only from fresh evidence.
 
 ## 3. Parent handoff
@@ -96,8 +96,7 @@ with their failing contract and expected assertion; never create tests or freeze
 ## 4. Final report
 
 Use the surface report template; link each checkpoint. Separate browser scores, functional outcomes and proposed/executed tests.
-For evidence.json, Write R/annotations.json: {revision, runtime, cwd, evidence: [{capture, command, contract, expected, classification}], learning: [checkpoint IDs], limits}.
-Run `bun Q materialize R annotations.json` before Markdown; Q fills observed/learning, not classifications. Retain all safe probes, including failures/replays; disclose withheld/incomplete evidence.
+Write R/annotations.json {evidence: [{capture, command, contract, expected, classification}], limits} (browser-only: evidence [], checkpoints in limits); before Markdown `bun Q materialize R annotations.json` (fills observed/metadata; prints reportLinks); you classify. Retain all safe probes, including failures/replays; disclose withheld/incomplete evidence.
 Evidence is invocation-local.
 Missing prerequisites/expectations/observations, timeouts and refusal never pass.
 Pass requires all required current-input contracts to pass with no required remainder.

@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { ALL_HOST_CONFIGS } from '../hosts';
-import { generateAdversarialStep, generatePlanCompletionGateShip } from '../scripts/resolvers/review';
+import { generateAdversarialStep } from '../scripts/resolvers/outside-voice-steps';
+import { generatePlanCompletionGateShip } from '../scripts/resolvers/plan-gates';
 import { generateQAReview } from '../scripts/resolvers/qa';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { readWorkflowExcerpt } from './helpers/workflow-excerpt';
@@ -14,7 +15,7 @@ test('Ship initializes and applies its smoke guard independently of required pla
     expect(body).toContain('Run the shared preflight; start its smoke guard once. Guard every smoke probe.');
     expect(body.indexOf('start its smoke guard once')).toBeLessThan(body.indexOf('**3. Run smoke and plan checks.**'));
     expect(body).toContain('Required even for small diffs or missing plans/servers');
-    expect(body).toContain('Then run required plan checks, even after smoke expires');
+    expect(body).toContain('Then run required plan checks and revalidation, even after smoke expires');
     expect(body).toContain('using the same procedure but no smoke guard; never reset the clock');
   }
 });

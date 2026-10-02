@@ -16,7 +16,7 @@ export const PR_PROFILE_CASE_IDS = [
   'auq-format-gate', 'plan-design-review-no-ui-scope', 'office-hours-spec-review',
   'tpa-present', 'tpa-absent-linux',
   'ship-local-workflow', 'ship-coverage-audit', 'docsync-spawned',
-  'ship-docsync', 'ship-docsync-completion', 'ship-docsync-current', 'ship-docsync-failure', 'ship-docsync-store',
+  'ship-docsync-completion', 'ship-docsync-current', 'ship-docsync-failure', 'ship-docsync-store',
   'ship-docsync-missing-marker', 'ship-docsync-missing-asset', 'ship-docsync-launch-failure',
   'ship-docsync-timeout-unsettled', 'ship-docsync-late-result', 'ship-docsync-stale-before',
   'ship-docsync-stale-after', 'ship-docsync-recovery',
@@ -49,7 +49,7 @@ export const PR_PROFILE_FILES: Record<string, readonly string[]> = {
   'test/skill-e2e-ship-hook-refresh.test.ts': ['ship-managed-hook-refresh'],
   'test/skill-e2e-ship-hook-consent.test.ts': ['ship-unmanaged-hook-consent', 'ship-local-hook-preservation'],
   'test/skill-e2e-docsync-spawned.test.ts': ['docsync-spawned'],
-  'test/skill-e2e-ship-docsync.test.ts': ['ship-docsync', 'ship-docsync-completion', 'ship-docsync-current', 'ship-docsync-failure', 'ship-docsync-store', 'ship-docsync-missing-marker', 'ship-docsync-missing-asset', 'ship-docsync-launch-failure', 'ship-docsync-timeout-unsettled', 'ship-docsync-late-result', 'ship-docsync-stale-before', 'ship-docsync-stale-after', 'ship-docsync-recovery'],
+  'test/skill-e2e-ship-docsync.test.ts': ['ship-docsync-completion', 'ship-docsync-current', 'ship-docsync-failure', 'ship-docsync-store', 'ship-docsync-missing-marker', 'ship-docsync-missing-asset', 'ship-docsync-launch-failure', 'ship-docsync-timeout-unsettled', 'ship-docsync-late-result', 'ship-docsync-stale-before', 'ship-docsync-stale-after', 'ship-docsync-recovery'],
   'test/skill-e2e-deploy.test.ts': ['setup-deploy-workflow'],
   'test/skill-e2e-session-intelligence.test.ts': ['context-restore-loads-latest'],
   'test/skill-e2e-plan-tune.test.ts': ['plan-tune-inspect'],
@@ -61,7 +61,7 @@ export const PR_PROFILE_FILES: Record<string, readonly string[]> = {
 export interface PrProfileMaps {
   e2eTouchfiles: Record<string, string[]>;
   judgeTouchfiles: Record<string, string[]>;
-  tiers: Record<string, 'gate' | 'periodic'>;
+  tiers: Record<string, 'gate' | 'periodic' | 'marathon'>;
   globalTouchfiles: readonly string[];
 }
 
@@ -74,7 +74,7 @@ export interface PrProfileSelection {
   mode: 'pr' | 'full-fallback';
   e2e: string[];
   judges: string[];
-  deferred: Array<{ id: string; tier: 'gate' | 'periodic'; reason: string }>;
+  deferred: Array<{ id: string; tier: 'gate' | 'periodic' | 'marathon'; reason: string }>;
   unknownFiles: string[];
   deferredPromptFiles: string[];
   missingCoverage: string[];
@@ -94,8 +94,8 @@ export function validatePrProfileInventory(
     }
   }
   for (const id of Object.keys(maps.e2eTouchfiles)) {
-    if (maps.tiers[id] !== 'gate' && maps.tiers[id] !== 'periodic') {
-      throw new Error(`E2E case has no broad gate/periodic census: ${id}`);
+    if (maps.tiers[id] !== 'gate' && maps.tiers[id] !== 'periodic' && maps.tiers[id] !== 'marathon') {
+      throw new Error(`E2E case has no broad gate/periodic/marathon census: ${id}`);
     }
   }
 }
@@ -189,9 +189,11 @@ export function selectPrProfile(options: {
   const kept = new Set(e2e);
   const deferred = candidates.filter(id => !kept.has(id)).map(id => ({
     id, tier: maps.tiers[id],
-    reason: maps.tiers[id] === 'periodic'
-      ? 'Broad periodic/release coverage; not executed by the PR gate'
-      : 'Broad gate census/release coverage; outside the fast PR profile',
+    reason: maps.tiers[id] === 'marathon'
+      ? 'Full end-to-end marathon coverage; non-blocking lane, not executed by the PR gate'
+      : maps.tiers[id] === 'periodic'
+        ? 'Broad periodic/release coverage; not executed by the PR gate'
+        : 'Broad gate census/release coverage; outside the fast PR profile',
   }));
   const noQuickCoverage = files.filter(file => isPromptFile(file)
     && !(depends(file, maps.globalTouchfiles) && (e2e.length > 0 || judges.length > 0))

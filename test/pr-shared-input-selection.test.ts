@@ -9,20 +9,26 @@ const sharedInputs = [
 ];
 const skipId = 'ship-skipped-queued-finding';
 const gateIds = Object.keys(E2E_TOUCHFILES).filter(id => E2E_TIERS[id] === 'gate').sort();
-const periodicIds = Object.keys(E2E_TOUCHFILES).filter(id => E2E_TIERS[id] === 'periodic').sort();
+// Periodic and marathon cases are both deferred by the PR gate; only their lanes run them.
+const deferredIds = Object.keys(E2E_TOUCHFILES).filter(id => E2E_TIERS[id] === 'periodic' || E2E_TIERS[id] === 'marathon').sort();
 const judgeIds = Object.keys(LLM_JUDGE_TOUCHFILES).sort();
 
 test.each(sharedInputs)('%s retains the full gate after native dependency registration', file => {
-  // An unresolvable base keeps this independent of the checkout: a local
-  // package.json identical to its merge-base would otherwise count as a
-  // version-only change and be dropped before the shared-input rule.
-  const result = computePaidCaseSelection({ profile: 'pr', env: { EVALS_BASE: 'refs/heads/no-such-base' }, changedFiles: [file] });
+  // A package.json change beyond its version; the version-only exemption is
+  // decided from git history and would otherwise depend on the checkout.
+  const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: [file], packageVersionOnly: false });
   expect(result.coverage?.mode).toBe('full-fallback');
   expect(result.selection.e2e).toEqual(gateIds);
   expect(result.selection.judges).toEqual(judgeIds);
-  expect(result.coverage?.deferred.map(({ id }) => id).sort()).toEqual(periodicIds);
+  expect(result.coverage?.deferred.map(({ id }) => id).sort()).toEqual(deferredIds);
   expect(result.coverage?.reasons).toContain(`Shared runtime/build inputs restore every gate case and judge: ${file}`);
   expect(result.coverage?.needsFullValidation).toBe(false);
+});
+
+test('a version-only package.json change does not restore the full gate', () => {
+  const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: ['package.json'], packageVersionOnly: true });
+  expect(result.coverage?.mode).not.toBe('full-fallback');
+  expect(result.coverage?.reasons.join('\n')).not.toContain('Shared runtime/build inputs restore every gate case and judge: package.json');
 });
 
 test.each(sharedInputs)('%s broad policy is independent of native, judge and global maps', file => {
@@ -66,6 +72,6 @@ test('cumulative shared, native and prompt edits retain every gate case and judg
   expect(result.coverage?.mode).toBe('full-fallback');
   expect(result.selection.e2e).toEqual(gateIds);
   expect(result.selection.judges).toEqual(judgeIds);
-  expect(result.coverage?.deferred.map(({ id }) => id).sort()).toEqual(periodicIds);
+  expect(result.coverage?.deferred.map(({ id }) => id).sort()).toEqual(deferredIds);
   expect(result.coverage?.needsFullValidation).toBe(false);
 });

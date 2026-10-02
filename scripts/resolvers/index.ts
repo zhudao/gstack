@@ -22,7 +22,11 @@ import { generatePreamble } from './preamble';
 import { generateTestFailureTriage } from './preamble';
 import { generateDesignMethodology, generateDesignHardRules, generateDesignOutsideVoices, generateDesignReviewLite, generateDesignSketch, generateDesignSetup, generateDesignMockup, generateDesignShotgunLoop, generateTasteProfile, generateUXPrinciples, generateOverusedFonts, generateDesignSlopBullets, generateDesignDetector, generateDesignMdCheck } from './design';
 import { generateTestBootstrap, generateTestCoverageAuditPlan, generateTestCoverageAuditShip, generateTestCoverageGateShip } from './testing';
-import { generateReviewDashboard, generatePlanFileReviewReport, generatePlanReviewApprovalCheck, generateExitPlanModeGate, generateAntiShortcutClause, generateSpecReviewLoop, generateBenefitsFrom, generateCodexSecondOpinion, generateAdversarialStep, generateCodexPlanReview, generateCodexDocReview, generatePlanCompletionAuditShip, generatePlanCompletionGateShip, generatePlanCompletionAuditReview, generatePlanVerificationExec, generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse } from './review';
+import { generateReviewDashboard, generatePlanFileReviewReport } from './review-dashboard';
+import { generatePlanReviewApprovalCheck, generateExitPlanModeGate, generatePlanCompletionAuditShip, generatePlanCompletionGateShip, generatePlanCompletionAuditReview, generatePlanVerificationExec } from './plan-gates';
+import { generateAntiShortcutClause, generateSpecReviewLoop, generateBenefitsFrom } from './spec-review';
+import { generateCodexSecondOpinion, generateAdversarialStep, generateCodexPlanReview, generateCodexDocReview } from './outside-voice-steps';
+import { generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse } from './review-scope';
 import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand } from './utility';
 import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
@@ -38,7 +42,7 @@ import { generateThirdPartyActions } from './third-party-actions';
 import { generateAsideSetup, generateAsideCookbook, generateAsideResearch, generateUntrustedContentWarning, asideExecPrelude } from './aside';
 import { generateCommandReference, generateSnapshotFlags, generateBrowseSetup, generateBrowseFallback } from './browse';
 import { generateDesignDocDiscovery } from './design-doc-discovery';
-import { generateSharedLibsRubric } from './shared-libs';
+import { generateSharedLibsRubric, generateSafeGitPath } from './shared-libs';
 import { generateTestValueBar, generateTestValueMessage } from './test-value';
 import { generateQAScope, generateQAExploratory, generateQAFunctional, generateQAResource, generateQAReview, generateQAReviewPreflight, generateQAMethodReads } from './qa';
 
@@ -63,6 +67,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   THIRD_PARTY_ACTIONS: generateThirdPartyActions,
   DESIGN_DOC_DISCOVERY: generateDesignDocDiscovery,
   SHARED_LIBS_RUBRIC: generateSharedLibsRubric,
+  SAFE_GIT: generateSafeGitPath,
   SHARED_CODE_REUSE: generateSharedCodeReuse,
   UNTRUSTED_CONTENT_WARNING: generateUntrustedContentWarning,
   COMMAND_REFERENCE: generateCommandReference,

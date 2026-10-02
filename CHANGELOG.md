@@ -1,5 +1,106 @@
 # Changelog
 
+## [1.91.12.0] - 2026-10-01
+
+**Weekly evals finish in minutes, not hours, and a red now means something.**
+**Two real crash bugs fixed, and product code typechecks clean in CI.**
+
+The weekly paid eval run took 2 hours 45 minutes on Sept 28, almost all of it one timed-out test retried. It now runs every test on its own machine within a 9-minute budget, and a single long case runs one case per process. Automatic retries are gone. Tests that grade a live model's choice run three trials at once and pass on two; promises users rely on (asks before deciding, leaves git alone, no writes in plan mode) fail on any single bad trial. `$B connect --supervise` finally restarts a crashed browser, compiled `/cso` installs can witness runtime-tested assertions again, and a required `typecheck` job keeps that class of bug out.
+
+### The numbers that matter
+
+Source: the Sept 28 weekly census (run 36385945043) and the final proof census on this branch (run 36633323521). `bun run scripts/test-paid-shards.ts --tier periodic --slice-budget 540 --jobs 2 --list` prints the current plan.
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| Weekly periodic census wall clock | 2h 45m | 11m 42s (gate census alongside: 10m 22s) |
+| Longest planned slice | 160 min (one test, twice) | ~10 min |
+| Automatic retries on paid evals | up to 2 per file | 0 |
+| Product-code type errors | 103 on v1.91.8.0 (no check) | 0, required in `free-tests` |
+| `lib/cso` longest source line | 2,159 chars | 785 (a string literal) |
+
+The biggest change is honesty. With about 240 live cases, a retry used to hide a failing test; now every trial is recorded, `bun run eval:pass-rates` shows each case's pass rate with a confidence range, and a case that slides gets flagged by its history instead of passing on a lucky rerun.
+
+### Fewer rotating reds
+
+Across 11 lanes the PR eval lane failed 6-8 of its 125 records per run, a different handful each time. A census of 1,827 attempts traced most of it to two sources, and this release attacks both instead of retrying:
+
+- **Runs that ran out of time.** Passing runs used 80-92% of their budgets, and the ones that timed out took 20-50% more steps, not slower steps. The heaviest cases now start at the gate they test, from recorded setup and recorded subagent results (docsync faults, shared-libs review, QA callers, Review Army), and land at roughly 35-60% of unchanged budgets.
+- **Bookkeeping the model forgot.** `gstack-qa-evidence` now enforces the checkpoint before every next probe, fills revision/runtime/cwd/learning itself, rejects placeholders, replay-only learning, missing evidence rows and evidence observed on an older input snapshot, prints report links, timing and any declared-but-unrun probes, and answers `--help`. `/deslop-shared-libs` runs every git read through `bin/gstack-safe-git`, which always applies the safety flags.
+
+### What this means for contributors
+
+Run `bun run typecheck` and `bun run typecheck:test` before you push; both are free and take seconds. A red paid run now prints a headline and one line per failure with its cause and a rerun command. New paid evals need a kind in `E2E_KINDS`: see "Add a paid eval" in CONTRIBUTING.md.
+
+### Itemized changes
+
+#### Fixed
+- `$B connect --supervise` respawned with a block-scoped env that no longer existed, so every restart threw and the supervisor gave up after five tries. The headed env is one helper used by connect and respawn, and the loop has behavioral tests.
+- Compiled `/cso` installs called an unimported `join` when launching the assertion-witness child, breaking runtime-tested witnessing for every installed user.
+- Browser-only `/qa` runs had no stated way to build the evidence file, whose rows only accept functional captures; the shared rule now says to materialize an empty evidence list with the checkpoints named in limits, matching `/qa-only`. The fix loop had spent its last minute on it and timed out.
+- `/office-hours` asks its goal question unless the user already chose a mode, then reads that mode's section before its first question; skipping both produced forcing questions with an empty recommendation. `/design-consultation` asks the memorable-thing question on its own after Q1 instead of packing it into Q1's call.
+- Free-form eval judges (docs, outcome, posture) could return JSON broken by an unescaped quote in their reasoning; they now use structured output.
+- `/qa` checkpoint receipts now print the report link for their `exploration-NNN.json` file; reports had been linking `.qa-evidence/NNN` capture folders as checkpoints instead.
+- `/review` Review Army passes checklists to specialists by path and runs web research alongside dispatch (a 12-line N+1 review went from 300 s to 212 s), and the design-lite pass always runs its detector probe; reviews had reported the detector absent without probing in 5 of 6 captured trials.
+- `/design-consultation` opens with one decision (confirm the context and choose research), not a confirm-only question; `/document-release` defines its /ship-owned inputs, exact steps and JSON result.
+- `/review` workflow ambiguities (smoke clock vs required revalidation, setup authority, plan-completion gate, findings record), `/office-hours` builder mode not loading its brainstorm section, `/sync-gbrain` Step 4 helper arguments and write path, `/plan-ceo-review` expansion framing and pacing menus, `/plan-design-review` with no designer API key, and `/deslop-shared-libs` one-file-per-turn reads.
+- Eval detectors that graded wording or step order now grade outcomes: eng batching, CEO split-overflow, mode routing, section-loading stale-fill, outside-voice-disabled attribution, design focus menus, and PTY permission dialogs with cropped titles.
+- Harness races and adapter gaps found by the proof runs: plan seeding accepted a stale empty input box when the CLI repainted after recording its reply, the third-party-actions recorder fixture lost every failure record, the autoplan dual-voice check could not read framed subagent reports from newer Claude Code, and the HOLD SCOPE routing check judged the skill's own defer/keep menu as its rigor decision, the outside-disabled check missed a correctly attributed quote of the pre-existing review record, and the plan-review judge was not told its reason length bound on the field it writes.
+
+#### Changed
+- Paid evals: one test file or case per machine within a 540-second slice budget, planned from recorded per-tier and per-case durations; case sharding for plan, design, review-army, shared-libs, shared-libs-paths, ship-docsync and qa-callers.
+- Verdict policy: no retries; `rule` cases fail on any failed trial, `behavior` cases pass on 2 of 3 parallel trials with contract assertions still strict, `judge` entries average 3 samples against unchanged thresholds. One panel-verdict function feeds the report, PR comment, weekly issue and pass-rate history. A census whose every red is infrastructure is re-dispatched once, and both runs are reported.
+- New non-blocking weekly `evals-marathon.yml` lane for full start-to-finish flows: the full `/office-hours` workflow (a focused design-draft case replaces it in the weekly lane) and the full `/plan-ceo-review` split-overflow run, which took 8 to 20 minutes on its own.
+- The CI image pins Claude Code 2.1.284, the first version that recognizes the eval model `claude-fable-5-1` and runs it with the same profile users get. Both versions send effort "high"; a census that looked slower on 2.1.284 was mostly slower API responses (its SDK-only judges, which never start the CLI, were 25% slower too), and nine previously slow cases pass on 2.1.284 within unchanged budgets.
+- `lib/cso/*.ts` is formatted with pinned Prettier; minified transpile output is byte-identical except three canonicalized regex flag orders.
+- The duplicate dispatch-only `ship-docsync` case is removed; `ship-docsync-completion` asserts the same on the same fixture.
+
+#### Added
+- `tsconfig.json`, `bun run typecheck` (strict, zero product errors) and `bun run typecheck:test` (test-code diagnostic ratchet), both in the required `free-tests` check, plus `format:cso:check`.
+- `E2E_KINDS`, `BEHAVIOR_WHY`, `EVAL_POLICY` and a data-driven `CASE_QUARANTINE` (entry below 95% per trial over 10 trials, exit at 97%, 10% cap, 8-week expiry, never for product defects), and `CASE_CI_EXCLUDE` for CI-unrunnable cases.
+- `bun run eval:pass-rates` with Wilson intervals, per-input-identity series and a weekly drift gate; `--case <id> --trials N` for local diagnosis.
+
+#### For contributors
+- Open PRs touching `lib/cso` should run `bun run format:cso` before rebasing.
+- Builds on the typecheck work in #2447, contributed by @laddtnov.
+- Coordinated with #2994 (v1.91.8.0), which retired the never-green finding-count evals this wave had been repairing.
+## [1.91.11.0] - 2026-09-30
+
+gstack now looks up its state folder one way everywhere, and the five most copy-pasted or oversized parts of the codebase each have a single owner. Before, about 50 scripts, hooks and libraries each resolved the state folder with their own rule, and the rules disagreed. If you set `GSTACK_HOME`, `GSTACK_STATE_DIR` or `GSTACK_STATE_ROOT`, telemetry, analytics, update-check snoozes, the egress ledger and hook logs now all land in the folder you chose. Nothing is moved for you. Run `~/.claude/skills/gstack/bin/gstack-paths --explain` to see the active folder and whether `~/.gstack` still holds older state; [docs/state-root.md](docs/state-root.md) has the move recipe.
+
+| Hotspot | Before | After |
+| --- | ---: | ---: |
+| Code files with a hand-rolled `${GSTACK_*:-…}` chain | 48 | 2 (the bash owner and one allowlisted partial-upgrade fallback) |
+| `browse/src/server.ts` lines (`buildFetchHandler` alone) | 3,464 (1,560) | 2,224 (~350) |
+| `test/helpers/claude-pty-runner.ts` lines | 5,047 | 30 (barrel over `test/helpers/pty/*`) |
+| `scripts/resolvers/review.ts` lines | 1,921 | removed (5 modules, largest 771) |
+| Shard spawn/kill/sandbox implementations | 2 | 1 (`scripts/lib/shard-engine.ts`) |
+
+### Changed
+
+- **One state-root rule.** Every script, hook and skill resolves state as `GSTACK_STATE_ROOT` → `GSTACK_HOME` → `GSTACK_STATE_DIR` → `CLAUDE_PLUGIN_DATA` (only for the gstack plugin) → `~/.gstack`. Skill bash blocks stop with a reinstall message if the resolver is missing, instead of writing under `/`.
+- **Privacy opt-outs never get looser.** `telemetry`, `memorable_recall`, `codex_reviews`, `update_check` and trust-policy denies take the most restrictive value across the active folder and `~/.gstack`. `gstack-config set` says when another folder still overrides you and prints the command that fixes it, and `gstack-config list` shows which folder each merged key came from.
+- **Uninstall deletes state only at `~/.gstack`.** `gstack-uninstall` refuses (exit 2) when that path resolves to `/`, your home, the gstack checkout or the current repository. For a relocated folder it leaves the folder in place and prints the exact removal command.
+- **Outside-voice fallbacks read the same in every skill.** `/plan-devex-review` now also treats an "API key" error as an authentication failure, `/office-hours` names its fallback subagent like the other skills, and the `/review` and `/ship` adversarial pass says "timed out after 9 minutes" (a timed-out pass is still missing coverage).
+- `/review` and `/ship` exploratory QA now say how required plan checks behave once the 5-minute smoke clock expires: they and their revalidation keep running on a per-command `--timeout-ms` and still publish checkpoints, while a smoke recheck after expiry is reported not-run. In `/review`, skipping a finding that carries a proposed test skips both the test and the fix, and the defect stays unresolved.
+- After a revert of this release, state written to a non-default folder while it was live stays in that folder.
+
+### Fixed
+
+- A pair-agent setup key that had not been exchanged yet was accepted as a bearer token on the browse daemon's `/command`, `/batch` and `/file`. A setup key now authenticates only the `/connect` exchange.
+
+### For contributors
+
+- **State root:** `lib/state-root.ts` (`resolveStateRoot`, `readConfigKey`) and its bash twin `bin/gstack-state-root.sh` (builtins only) own the chain. A parity table runs every row through both with `PATH` empty, Windows rows included. `test/state-root-ratchet.test.ts` rejects new hand-rolled chains, and `test-setup.ts` strips inherited `GSTACK_STATE_ROOT` / `GSTACK_STATE_DIR` so ambient variables cannot leak into tests. `hosts/claude/hooks/hook-log.ts` is the five hooks' one error-log writer (0600).
+- **Browse routes:** the daemon's HTTP routes are one declared table (`browse/src/routes/table.ts`: method, path, auth kind, listener surface), with one auth gate, one denial per auth kind, and handlers in `browse/src/routes/*.ts`. A black-box matrix over every route, both listeners and five credential types passed on the old server and passes unchanged on the new one. The route tests now send real requests instead of grepping `server.ts`, and `browse/test/server-route-dispatch-ratchet.test.ts` keeps dispatch inside the table.
+- **Shard engine:** `scripts/test-strict-output.ts` grew into `scripts/lib/shard-engine.ts` (process-group spawn, wall timeout and group kill, strict Bun verdicts, per-shard tmp and Chromium sandbox, logs, duration seeds, flag loop), and both runners use it. Lane policy stays per lane. A seven-outcome fixture corpus recorded from the old runners pins identical verdicts, and paid `--list` output is byte-identical. A timed-out free shard now stops reading at its deadline, as the paid lane already did.
+- **PTY harness:** `test/helpers/claude-pty-runner.ts` is a barrel over `test/helpers/pty/*` (screen, launch, classify, auq, plan-native, boundaries, judge). One `runPtySession` loop drives the observation, counting and floor runners. A scripted fake PTY driver (`pty/fake-session.ts`) with an injectable clock runs each runner deterministically, and the unit test is split along the same modules. Tests keep importing the barrel.
+- **Review resolvers:** `scripts/resolvers/review.ts` is split into `review-dashboard.ts`, `plan-gates.ts`, `spec-review.ts`, `outside-voice-steps.ts` and `review-scope.ts`. Generated output is byte-identical except the fallback wording above, which now comes from `outsideVoiceFailurePolicy()` in `outside-voice.ts`; `test/outside-voice-failure-policy.test.ts` rejects hand-written copies.
+- **Ratchets:** `test/module-size-ratchet.test.ts` keeps the new owner modules at or under 800 lines and 150 lines per function, and stops the residual files (`server.ts`, both runners) from growing. `test/touchfiles.test.ts` checks that every moved module still selects the paid evals its source file selected (goldens in `test/fixtures/touchfile-moved-code/`, recorded before the move).
+- **Budgets:** the guarded `gstack-paths` line in always-loaded preambles moved a few budgets to their measured values, each with its derivation recorded: carve-guards for ship (1.397 → 1.404), plan-ceo-review skeleton (80,150 → 80,850 bytes), plan-eng-review (1.169 → 1.174), design-consultation (1.08 → 1.085) and qa (1.095 → 1.102), and the `unfreeze` eager ceiling (393 → 448 tokens).
+- **Webhook fix eval:** `qa-functional-webhook-fix` no longer asks the model to rerun all eight webhook scenarios after its repair; the harness already reruns all eight on the repaired source, and the report-only webhook eval still requires eight-scenario coverage. The fix eval now asks for the same post-repair probes as the CLI fix eval, which brings a passing run from about 244s to 133-214s of its 285s budget (3/3 local passes).
+- **Deferred:** `TODOS.md` "P3: next refactor wave" lists the hotspots this wave did not touch and the behavior bugs it found and left alone.
+
 ## [1.91.9.0] - 2026-09-29
 
 Every gstack workflow that proposes, writes, reviews or ships tests now applies one test value bar: a test earns its place by protecting behavior a real regression would break, and test count is not a goal. `/ship`'s coverage gate counts only tests that clear that bar, and the new `/test-audit` sweeps existing tests for ones that cost more than they protect.
