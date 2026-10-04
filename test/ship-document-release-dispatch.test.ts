@@ -161,8 +161,10 @@ describe('pre-publication documentation lifecycle', () => {
       'Ship-owned documentation mode', 'standalone branch gate']) expect(skill).toContain(text);
     const body = read('document-release/sections/release-body.md.tmpl');
     for (const text of ['never `git add -A`', 'Never regenerate a CHANGELOG entry',
-      'body-original.md', 'UNTRUSTED TRACKER CONTENT', 'gstack-redact --from-file',
-      'NEVER BUMP VERSION WITHOUT ASKING']) expect(body).toContain(text);
+      'body-original.md', 'UNTRUSTED TRACKER CONTENT', 'gstack-redact --from-file']) expect(body).toContain(text);
+    const versionStep = body.slice(body.indexOf('## Step 8'), body.indexOf('\n## ', body.indexOf('## Step 8') + 1));
+    expect(versionStep).toMatch(/ask[^\n]*before[^\n]*VERSION/i);
+    expect(body).toMatch(/does not rewrite, replace, or regenerate CHANGELOG/i);
   });
 });
 
@@ -289,6 +291,7 @@ describe('native docs fixture preflight', () => {
 
   test('the real preamble marker and private fixture evidence survive cleanup', () => {
     const fixture = fixtureDocs('risky', generated);
+    const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-evidence-'));
     let retained: string | undefined;
     try {
       const result = spawnSync('bash', [path.join(fixture.skills, 'bin/gstack-skill-start'), '--skill', 'document-release'], {
@@ -298,14 +301,14 @@ describe('native docs fixture preflight', () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('SESSION_KIND: spawned');
       retained = preserveDocsEvidence(fixture, { output: 'preflight', toolCalls: [] } as unknown as SkillTestResult,
-        `docs-free-${path.basename(fixture.home)}`, 'fixture');
+        `docs-free-${path.basename(fixture.home)}`, 'fixture', {}, evidenceRoot);
       fixture.clean();
       expect(fs.existsSync(retained)).toBe(true);
       expect(fs.statSync(retained).mode & 0o777).toBe(0o600);
       expect(JSON.parse(fs.readFileSync(retained, 'utf8')).before.contents['SECURITY.md']).toBeDefined();
     } finally {
       fixture.clean();
-      if (retained) fs.rmSync(path.dirname(path.dirname(retained)), { recursive: true, force: true });
+      fs.rmSync(evidenceRoot, { recursive: true, force: true });
     }
   });
 });
@@ -382,6 +385,7 @@ describe('native docs fixture preflight', () => {
   test('kernel evidence remains private and readable after fixture cleanup', async () => {
     const fixture = fixtureDocs('current', generated);
     const observer = await observeDocsWrites(fixture);
+    const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-evidence-'));
     let evidence: string | undefined;
     try {
       const file = path.join(fixture.repo, 'app.ts');
@@ -390,7 +394,7 @@ describe('native docs fixture preflight', () => {
       fs.writeFileSync(file, original);
       const observation = observer.stop();
       evidence = preserveDocsEvidence(fixture, { output: 'observer preflight', toolCalls: [] },
-        `docs-observer-${path.basename(fixture.home)}`, 'transient', { observation });
+        `docs-observer-${path.basename(fixture.home)}`, 'transient', { observation }, evidenceRoot);
       fixture.clean();
       expect(fs.statSync(evidence).mode & 0o777).toBe(0o600);
       const retained = JSON.parse(fs.readFileSync(evidence, 'utf8')).observation;
@@ -398,7 +402,7 @@ describe('native docs fixture preflight', () => {
       expect(docsWriteFailures(retained, [])).toContain('forbidden docs write: app.ts');
     } finally {
       fixture.clean();
-      if (evidence) fs.rmSync(path.dirname(path.dirname(evidence)), { recursive: true, force: true });
+      fs.rmSync(evidenceRoot, { recursive: true, force: true });
     }
   });
 

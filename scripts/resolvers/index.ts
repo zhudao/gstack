@@ -15,6 +15,7 @@
  */
 
 import type { TemplateContext, ResolverFn } from './types';
+import { getHostConfig } from '../../hosts/index';
 import { outsideVoiceFor, outsideVoiceGuard, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, generateOutsideVoiceRouting } from './outside-voice';
 
 // Domain modules
@@ -55,7 +56,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   OUTSIDE_PROVIDER: (ctx) => outsideVoiceFor(ctx).id,
   HOST_ID: (ctx) => ctx.host,
   OUTSIDE_PREFLIGHT: (ctx, args) => outsideVoicePreflight(ctx, { disabledBehavior: args?.[0] === 'opt-in' ? 'opt-in' : 'codex-only' }),
-  OUTSIDE_INVOCATION: (ctx, args) => outsideVoiceInvocation(ctx, { timeoutMs: args?.[0] === 'spec' ? 120000 : 600000, gate: args?.[0] === 'spec' ? 'spec' : 'review', reasoningEffort: args?.[0] === 'spec' ? 'medium' : 'high' }),
+  OUTSIDE_INVOCATION: (ctx, args) => outsideVoiceInvocation(ctx, { timeoutMs: args?.[0] === 'spec' ? 120000 : 540000, gate: args?.[0] === 'spec' ? 'spec' : 'review', reasoningEffort: args?.[0] === 'spec' ? 'medium' : 'high' }),
   OUTSIDE_PROVENANCE: (ctx, args) => outsideVoiceProvenance(ctx, args?.[0] ?? ctx.skillName),
   SLUG_EVAL: generateSlugEval,
   SLUG_SETUP: generateSlugSetup,
@@ -139,6 +140,10 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   DX_FRAMEWORK: generateDxFramework,
   TASTE_PROFILE: generateTasteProfile,
   BIN_DIR: (ctx) => ctx.paths.binDir,
+  // Literal bin dir for skills that skip the shared preamble, where
+  // $GSTACK_BIN is never set (#2906): the per-install root when rendering for
+  // one, else the host's default global root.
+  INSTALLED_BIN_DIR: (ctx) => ctx.installRoot ? `${ctx.installRoot.replace(/\/+$/, '')}/bin` : `~/${getHostConfig(ctx.host).globalRoot}/bin`,
   FOREGROUND_DISPATCH_NOTE: () => FOREGROUND_DISPATCH_NOTE,
   GBRAIN_CONTEXT_LOAD: generateGBrainContextLoad,
   GBRAIN_SAVE_RESULTS: generateGBrainSaveResults,

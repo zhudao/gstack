@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fixtureDocs, gitAt, repoSnapshot } from './helpers/docsync-fixture';
@@ -44,6 +45,21 @@ test('captured parent tree read is accepted without granting the captured child 
   expect(docsToolFailures(remote, fixture, [], true)).toEqual(['command outside declared docs observation interface']);
 });
 
+// ci-37165022930 eval-slices-2 ship-docsync-store: the docs child listed tracked files with git ls-tree -r HEAD.
+test('captured tracked-file listing is a declared read and leaves the repository unchanged', () => {
+  expect(docsNativeInterface(fixture)).toContain('ls-files, ls-tree, rev-parse');
+  const before = repoSnapshot(fixture.repo);
+  const command = 'git ls-tree -r HEAD';
+  expect(docsCommandAllowed(command, fixture)).toBe(true);
+  const result = spawnSync('bash', ['-c', command], { cwd: fixture.repo, encoding: 'utf8', timeout: 10000 });
+  expect(result.status).toBe(0);
+  expect(docsToolFailures(nativeResult(command, result.stdout), fixture, [], true)).toEqual([]);
+  expect(repoSnapshot(fixture.repo)).toEqual(before);
+  for (const rejected of ['git ls-tree -r HEAD > tree.txt', 'git ls-tree -r HEAD | head', 'git -c core.pager=less ls-tree HEAD']) {
+    expect(docsCommandAllowed(rejected, fixture)).toBe(false);
+  }
+});
+
 test('permitted peel reads execute as single literal Bash arguments without changing the repository', () => {
   const before = repoSnapshot(fixture.repo);
   for (const revision of ['HEAD^{tree}', 'HEAD^{}', 'HEAD^{commit}', 'HEAD^{object}', 'HEAD@{0}']) {
@@ -64,13 +80,13 @@ test.each([
   'git rev-parse HEAD^{tree}{,x}', 'git rev-parse HEAD^{tree', 'git rev-parse HEAD^{tree}}',
   'git rev-parse {HEAD}', 'git rev-parse HEAD$(pwd)', 'git rev-parse "HEAD$(pwd)"',
   'git rev-parse `pwd`', 'git rev-parse ${HEAD}', 'git rev-parse HEAD; git status',
-  'git rev-parse HEAD && git status', 'git rev-parse HEAD || true', 'git rev-parse HEAD | cat',
-  'git rev-parse HEAD > out.md', 'git rev-parse HEAD 2>/dev/null', 'git rev-parse HEAD < in.md',
+  'git rev-parse HEAD && git status', 'git rev-parse HEAD | cat',
+  'git rev-parse HEAD > out.md', 'git rev-parse HEAD 2>/tmp/leak', 'git rev-parse HEAD < in.md',
   'git rev-parse HEAD\ngit status', 'git rev-parse HEAD &', 'git rev-parse HEAD\\^{tree}',
   'git rev-parse "HEAD^{tree}', "git rev-parse 'HEAD^{tree}", 'git rev-parse HEAD*',
   'git status "unfinished', "git status 'unfinished", "git hash-object '-w'app.ts", 'git status\u0000',
   'git rev-parse HEAD?', 'git rev-parse HEAD[12]', 'git rev-parse ~', 'git rev-parse HEAD # comment',
-  'git -C /owned/repo rev-parse HEAD', 'git -c core.pager=cat show HEAD',
+  'git -C /owned/repo rev-parse HEAD', "git -c core.pager='sh -c id' show HEAD",
   'git --git-dir /owned/repo/.git status', 'git --work-tree /owned/repo status',
   'git remote get-url origin', 'git remote add origin /outside', 'git config --global user.name attacker',
   'git hash-object -w app.ts', 'git hash-object "-w" app.ts', 'git hash-object -wt blob app.ts',
@@ -81,6 +97,12 @@ test.each([
 ])('native docs validator retains the closed interface for %s', command => {
   expect(docsToolFailures(nativeResult(command, 'successful tool acknowledgment', 'docs-dispatch'), fixture, [], true))
     .toEqual(['command outside declared docs observation interface']);
+});
+
+test('harmless read wrappers do not fail a docs run', () => {
+  for (const command of ['git rev-parse HEAD || true', 'git rev-parse HEAD 2>/dev/null', 'git -c core.pager=cat show HEAD']) {
+    expect(docsToolFailures(nativeResult(command, 'successful tool acknowledgment', 'docs-dispatch'), fixture, [], true)).toEqual([]);
+  }
 });
 
 test('quoted revision search and reflog arguments remain literal single arguments', () => {
@@ -104,4 +126,54 @@ test('parent and child receive resolved local platform and base without new prob
     report: path.join(fixture.home, 'report.md'), publish: path.join(fixture.home, 'publish.ts'),
     scenario: 'current', testName: 'docsync-command-grammar', runId: 'free-control', timeout: 10000 });
   expect(options.prompt).toContain('Platform: local/git-native. Base: main.');
+});
+
+// The observer polices bash commands from the POSIX-only paid ship evals and refuses backslashes
+// outright, so a Windows fixture path can never form an allowed insert; the refusals below still run.
+test.skipIf(process.platform === 'win32')('declared section insert appends one private Markdown artifact to another byte-for-byte', () => {
+  const source = path.join(fixture.home, 'audit-1-documentation.md');
+  const target = path.join(fixture.home, 'ship-report.md');
+  const section = '**Status:** current — no edits.\n\n- Diagram drift: none.';
+  fs.writeFileSync(source, section);
+  fs.writeFileSync(target, '# Report\n\n## Documentation\n\n');
+  const before = repoSnapshot(fixture.repo);
+  for (const command of [`cat ${source} >> ${target}`, `cat '${source}' >> '${target}'`, `cat "${source}" >> "${target}"`]) {
+    expect(docsCommandAllowed(command, fixture)).toBe(true);
+    expect(docsToolFailures(nativeResult(command), fixture, [], true)).toEqual([]);
+  }
+  const result = spawnSync('bash', ['-c', `cat ${source} >> ${target}`], { cwd: fixture.repo, encoding: 'utf8', timeout: 10000 });
+  expect(result.status).toBe(0);
+  expect(fs.readFileSync(target, 'utf8')).toBe(`# Report\n\n## Documentation\n\n${section}`);
+  expect(repoSnapshot(fixture.repo)).toEqual(before);
+});
+
+test('section insert grants no write or source outside private fixture Markdown', () => {
+  const home = fixture.home;
+  const source = path.join(home, 'audit-1-documentation.md');
+  const target = path.join(home, 'ship-report.md');
+  fs.writeFileSync(source, 'section');
+  const link = path.join(home, 'linked-report.md');
+  fs.rmSync(link, { force: true });
+  fs.symlinkSync(path.join(fixture.repo, 'README.md'), link);
+  for (const command of [
+    `cat ${source} > ${target}`, `cat ${source} >> ${path.join(fixture.repo, 'README.md')}`,
+    `cat ${path.join(fixture.repo, 'README.md')} >> ${target}`, `cat ${source} >> ${link}`,
+    `cat ${source} >> ${path.join(home, 'report.txt')}`, `cat ${source} >> ${path.join(home, 'publication.json')}`,
+    `cat ${source} >> ${path.join(fixture.skills, 'ship/SKILL.md')}`, `cat ${source} >> ship-report.md`,
+    `cat ${source} ${source} >> ${target}`, `cat ${source} >> ${target}; ls`, `cat ${source} 2>> ${target}`,
+    `cat ${source} >> ${target} >> ${target}`, `cat ${path.join(home, '*.md')} >> ${target}`,
+    `cat ${path.join(home, '$x.md')} >> ${target}`, `cat ${source} >> ${path.join(home, '..', 'outside.md')}`, `cat ${source} >> ${home}/../outside.md`,
+  ]) {
+    expect(docsCommandAllowed(command, fixture)).toBe(false);
+    expect(docsToolFailures(nativeResult(command), fixture, [], true)).toEqual(['command outside declared docs observation interface']);
+  }
+});
+
+test('only the native ship parent interface declares the section insert', () => {
+  const options = docsSessionOptions({ fixture, phase: path.join(fixture.home, 'phase.md'),
+    report: path.join(fixture.home, 'report.md'), publish: path.join(fixture.home, 'publish.ts'),
+    scenario: 'current', testName: 'docsync-command-grammar', runId: 'free-control', timeout: 10000 });
+  expect(options.prompt).toContain('cat SOURCE.md >> TARGET.md');
+  expect(options.prompt).toContain('.qa-state/ directory is the fixture owner');
+  for (const transport of [false, true]) expect(docsNativeInterface(fixture, [], transport)).not.toContain('>> TARGET.md');
 });

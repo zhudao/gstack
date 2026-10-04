@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { prepareWorkflowJudgeCache, validWorkflowJudgePanel, validWorkflowJudgeScore, workflowJudgeDependencies, type WorkflowCacheOptions } from './helpers/workflow-judge-cache';
+import { browseJudgeFloorsMet, prepareWorkflowJudgeCache, validWorkflowJudgePanel, validWorkflowJudgeScore, workflowJudgeDependencies, type WorkflowCacheOptions } from './helpers/workflow-judge-cache';
 import { readWorkflowJudgeInput, buildWorkflowJudgePrompt, QA_DISCOVERY_REFERENCES, WORKFLOW_JUDGE_RESPONSE_SCHEMA } from './helpers/workflow-judge-input';
 
 const roots: string[] = [];
@@ -177,13 +177,12 @@ test('workflow registration preserves model work and reserves only terminal-reco
     .map(stage => body.indexOf(stage));
   expect(stages.every(position => position >= 0)).toBe(true);
   expect(stages).toEqual([...stages].sort((a, b) => a - b));
-  expect(body).toContain("execution: reused ? 'reused' : 'executed'");
-  expect(body).toContain('const workDeadline = started + JUDGE_MS;');
-  expect(source).toContain('const WORKFLOW_JUDGE_RECORD_MS = 5_000;');
-  expect(source).toContain('const WORKFLOW_JUDGE_TEST_MS = JUDGE_MS + 10_000;');
-  expect(source.match(/\}, WORKFLOW_JUDGE_TEST_MS\);/g)).toHaveLength(17);
-  expect(source).toContain("testName: 'review/SKILL.md workflow'");
-  expect(source.match(/\}, JUDGE_MS\);/g)).toHaveLength(7);
+  const calls = [...source.matchAll(/await runWorkflowJudge\(/g)].map(match => match.index!);
+  expect(calls.length).toBeGreaterThan(0);
+  for (const call of calls) {
+    const timeout = /\n\s*\}, (\w+)\);/.exec(source.slice(call))?.[1];
+    expect(timeout, `runWorkflowJudge registration at offset ${call} must use WORKFLOW_JUDGE_TEST_MS`).toBe('WORKFLOW_JUDGE_TEST_MS');
+  }
 });
 
 function actualCallback(f: ReturnType<typeof fixture>, overrides: {
@@ -395,21 +394,22 @@ test('Ship sends its authorized 64k cap and compact response contract through th
   const registration = source.match(/testIfSelected\('ship\/SKILL\.md workflow',[\s\S]*?await runWorkflowJudge\(\{([\s\S]*?)\n    \}\);/);
   expect(registration).not.toBeNull();
   const options = new Function('QA_DISCOVERY_REFERENCES', `return ({${registration![1]}});`)(QA_DISCOVERY_REFERENCES);
-  expect(options.structuredResponse).toBe(true);
+  expect(options.schemaTransport).toBe(true);
+  expect(options.compactReasoning).toBe(true);
   expect(options.maxTokens).toBe(65_536);
   expect(options.stream).toBe(true);
   expect(options.effort).toBe('medium');
   expect(source.match(/^\s+effort: '/gm)).toHaveLength(1);
   expect(WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning).not.toHaveProperty('pattern');
   expect(WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning).not.toHaveProperty('maxLength');
-  expect(source.match(/structuredResponse: true/g)).toHaveLength(1);
+  expect(source.match(/compactReasoning: true/g)).toHaveLength(1);
   const f = fixture();
   const stream = spyOn(Messages.prototype, 'stream').mockReturnValue({ finalMessage: async () => ({
     stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(scores) }],
   }) } as any);
   try {
     const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
-    await h.run({ ...h.options, structuredResponse: options.structuredResponse, maxTokens: options.maxTokens, stream: options.stream, effort: options.effort });
+    await h.run({ ...h.options, schemaTransport: options.schemaTransport, compactReasoning: options.compactReasoning, maxTokens: options.maxTokens, stream: options.stream, effort: options.effort });
     expect(stream.mock.calls[0]).toEqual([{
       model: resolveEvalModel('judge'), max_tokens: 65_536,
       output_config: { format: { type: 'json_schema', schema: WORKFLOW_JUDGE_RESPONSE_SCHEMA }, effort: 'medium' },
@@ -418,7 +418,8 @@ test('Ship sends its authorized 64k cap and compact response contract through th
     expect(h.records[0]).toMatchObject({ passed: true, judge_scores: { clarity: 4, completeness: 5, actionability: 4 } });
     expect(f.entries()).toHaveLength(1);
     expect(f.cache().lookup()).toBeNull();
-    f.opts.structuredResponse = true;
+    f.opts.schemaTransport = true;
+    f.opts.compactReasoning = true;
     f.opts.maxTokens = 65_536;
     f.opts.stream = true;
     expect(f.cache().lookup()).toBeNull();
@@ -429,7 +430,7 @@ test('Ship sends its authorized 64k cap and compact response contract through th
 
 test('changing response serialization misses the cache even when prompt and model match', () => {
   const f = fixture(); f.cache().publish(panel);
-  f.opts.structuredResponse = true;
+  f.opts.schemaTransport = true;
   expect(f.cache().lookup()).toBeNull();
   f.cache().publish(panel);
   expect(f.entries()).toHaveLength(2);
@@ -440,8 +441,44 @@ test('changing response serialization misses the cache even when prompt and mode
     expect(f.cache().lookup()).toBeNull();
   } finally { WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning.description = description; }
   expect(f.cache().lookup()?.samples).toEqual(panel);
-  f.opts.structuredResponse = false;
+  f.opts.schemaTransport = false;
   expect(f.cache().lookup()?.samples).toEqual(panel);
+});
+
+test('schema transport and the compact-reasoning validator independently affect workflow cache identity', () => {
+  const f = fixture(); f.cache().publish(panel);
+  f.opts.schemaTransport = true;
+  expect(f.cache().lookup()).toBeNull();
+  f.cache().publish(panel);
+  f.opts.compactReasoning = true;
+  expect(f.cache().lookup()).toBeNull();
+  f.cache().publish(panel);
+  expect(f.entries()).toHaveLength(3);
+  f.opts.compactReasoning = false;
+  expect(f.cache().lookup()?.samples).toEqual(panel);
+  const long = { ...scores, reasoning: Array(150).fill('word').join(' ') };
+  expect(validWorkflowJudgeScore(long, { clarity: 1, completeness: 1, actionability: 1 })).toBe(true);
+  expect(validWorkflowJudgeScore(long, { clarity: 1, completeness: 1, actionability: 1 }, true)).toBe(false);
+});
+
+test('schema transport alone sends the schema without applying the compact-reasoning validator', async () => {
+  const f = fixture();
+  const long = { ...scores, reasoning: Array(150).fill('word').join(' ') };
+  const create = spyOn(Messages.prototype, 'create').mockResolvedValue({
+    stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(long) }],
+  } as any);
+  try {
+    const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
+    await h.run({ ...h.options, schemaTransport: true });
+    expect(create.mock.calls[0]).toEqual([{
+      model: resolveEvalModel('judge'), max_tokens: 8192,
+      output_config: { format: { type: 'json_schema', schema: WORKFLOW_JUDGE_RESPONSE_SCHEMA } },
+      messages: [{ role: 'user', content: f.opts.prompt }],
+    }, { signal: h.signals[0] }]);
+    expect(h.records[0]).toMatchObject({ passed: true });
+    const validated = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
+    await expect(validated.run({ ...validated.options, testName: 'validated', schemaTransport: true, compactReasoning: true })).rejects.toThrow('compact response contract');
+  } finally { create.mockRestore(); }
 });
 
 test('the actual cap and streaming transport independently affect workflow cache identity', () => {
@@ -476,7 +513,7 @@ test('the structured callback rejects incomplete, schema-invalid and below-thres
       stream.mockReturnValue({ finalMessage: async () => ({ stop_reason: response.stop_reason,
         content: [{ type: 'text', text: JSON.stringify(response.value) }] }) } as any);
       const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
-      await expect(h.run({ ...h.options, structuredResponse: true, maxTokens: 65_536, stream: true })).rejects.toThrow();
+      await expect(h.run({ ...h.options, schemaTransport: true, compactReasoning: true, maxTokens: 65_536, stream: true })).rejects.toThrow();
       expect(h.records).toHaveLength(1);
       expect(h.records[0].passed).toBe(false);
       expect(f.entries()).toHaveLength(0);
@@ -577,3 +614,15 @@ describe('judge panel', () => {
     expect(source).not.toMatch(/\bscores\.reasoning\b|\bresult\.reasoning\b/);
   });
 });
+
+// Stored browse reference panel means against the judge floors.
+{
+  type Scores = { clarity: number; completeness: number; actionability: number };
+  const stored = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/browse-judge/panel-means.json'), 'utf8')) as
+    { known_good: Record<string, Scores>; known_bad: Record<string, Scores> };
+
+  describe('browse judge floors', () => {
+    test.each(Object.entries(stored.known_good))('passes %s', (_name, scores) => expect(browseJudgeFloorsMet(scores)).toBe(true));
+    test.each(Object.entries(stored.known_bad))('fails %s', (_name, scores) => expect(browseJudgeFloorsMet(scores)).toBe(false));
+  });
+}

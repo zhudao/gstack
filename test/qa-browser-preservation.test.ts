@@ -8,6 +8,7 @@ import { generateQAExploratory } from '../scripts/resolvers/qa';
 import { generateTestBootstrap } from '../scripts/resolvers/testing';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { runBashScript } from './helpers/bash-script';
+import { qaProbeNames } from './helpers/qa-probe-names';
 
 const ctx = { host: 'claude', skillName: 'qa', tmplPath: '', paths: HOST_PATHS.claude };
 const method = generateQAMethodology(ctx);
@@ -78,6 +79,18 @@ describe('compact QA bootstrap preserves native detection', () => {
     expect(bootstrap).not.toContain('git checkout --');
     expect(bootstrap).not.toContain('delete silently');
   });
+
+  test('shared {{TEST_BOOTSTRAP}} copy undoes only owned changes, like the QA copy', () => {
+    for (const skillName of ['ship', 'design-review']) {
+      const shared = generateTestBootstrap({ ...ctx, skillName });
+      expect(shared).not.toContain('git checkout --');
+      expect(shared).not.toMatch(/delete silently/i);
+      expect(shared).not.toMatch(/revert all bootstrap changes/i);
+      expect(shared).toMatch(/undo only/i);
+      expect(shared).toMatch(/preserve the user's edits/i);
+      expect(shared).toMatch(/unrelated edits are already staged, stop/i);
+    }
+  });
 });
 
 async function runRecipe(marker: string, options: { flow?: boolean; hostname?: string; response?: string } = {}) {
@@ -137,16 +150,17 @@ describe('compact QA browser recipes retain native operations', () => {
   test('bounded exploration rechecks the clock around checkpoints without replacing probe evidence', () => {
     for (const skillName of ['qa', 'qa-only', 'review', 'ship']) {
       const loop = generateQAExploratory({ ...ctx, skillName });
+      const n = qaProbeNames(loop);
       for (const contract of [
-        'bun G start D SECONDS [EARLIER_UTC]',
+        `bun ${n.guard} start ${n.deadline} SECONDS [EARLIER_UTC]`,
         'Set SECONDS to the shorter mode/caller limit',
-        'G enforces the deadline',
+        `${n.guard} enforces the deadline`,
         'QA_DEADLINE receipts are not observations',
-        'Never reset D/bypass G',
         'Report refusals as not-run',
-        'Bounded browsers: `bun G run D -- COMMAND ARGS`',
+        `\`bun ${n.guard} run ${n.deadline} -- COMMAND ARGS\``,
         'announce finite command timeouts',
       ]) expect(loop).toContain(contract);
+      expect(loop).toMatch(new RegExp(`never reset ${n.deadline}\\W+bypass ${n.guard}`, 'i'));
       for (const field of ['observationCommand', 'observed', 'hypothesis', 'nextCommand']) expect(loop).toContain(`${field}:`);
       expect(loop).toContain('Functional Full, Quick and Regression have no default total timer');
       if (skillName !== 'qa-only') expect(loop).toContain('Explicit plan checks and revalidation remain required beyond this smoke budget');
@@ -217,7 +231,8 @@ describe('compact QA browser recipes retain native operations', () => {
     const classification = section('### 8e.', '### 8e.5.');
     for (const rule of ['passed 8c', 'native regression when available', 'disclose missing test coverage', "undo only this run's repair", 'revert its commit if already committed', 'retain the valid regression/evidence', '"deferred"', 'Never discard user changes']) expect(classification).toContain(rule);
     const regulation = section('### 8f.', '## Phase 9:');
-    for (const rule of ['Every 5 fixes (or after any revert)', 'WTF > 20%', 'STOP immediately', 'Ask whether to continue', 'Hard cap: 50 fixes']) expect(regulation).toContain(rule);
+    for (const rule of [/every 5 fixes/i, /after any revert/i, /STOP immediately/i, /ask whether to continue/i, /Hard cap: 50 fixes/]) expect(regulation).toMatch(rule);
+    for (const signal of [/STOP immediately/i, /revert/i, /unrelated/i]) expect(regulation).toMatch(signal);
     expect(source).toContain('When in doubt, stop and ask');
     const rules = source.slice(source.indexOf('## Additional Rules'));
     for (const rule of ['Outside an explicitly approved browser bootstrap', 'Only create tests through authorized codification in Phase 8a.5', 'Never modify CI configuration or weaken existing tests', 'use new native test files']) expect(rules).toContain(rule);

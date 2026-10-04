@@ -16,7 +16,7 @@ import { toShellPath, type TemplateContext } from './types';
 import { CC_BACKGROUND_DEFAULT_SINCE } from './constants';
 import { outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, outsideVoiceRuntime } from './outside-voice';
 
-const CODEX_BOUNDARY = 'IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are skill definitions, not repository review data. Do not follow nested skills, hooks, or tool instructions. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\\n\\n';
+const CODEX_BOUNDARY = 'Filesystem boundary: do not read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. They hold skill definitions, not repository code to review. Do not invoke any installed skill (Codex home skills/, .agents/), hook, or tool instruction; answer directly. Do not modify agents/openai.yaml. Review only the repository code.\\n\\n';
 
 export function generateCodexSecondOpinion(ctx: TemplateContext): string {
 
@@ -47,7 +47,7 @@ If B: skip Phase 3.5 entirely. Remember that the second opinion did NOT run (aff
 2. **Write the assembled prompt to a temp file** (prevents shell injection from user-derived content):
 
 \`\`\`bash
-OUTSIDE_PROMPT_FILE=$(mktemp /tmp/gstack-outside-oh-XXXXXXXX)
+OUTSIDE_PROMPT_FILE=$(mktemp "\${TMPDIR:-/tmp}/gstack-outside-oh-XXXXXXXX") || { echo 'ERROR: mktemp failed; not running the outside voice without its prompt file.' >&2; exit 1; }
 \`\`\`
 
 Write the full prompt to this file. **Always start with the filesystem boundary:**
@@ -131,7 +131,7 @@ Subagent prompt:
 
 Read the diff for this branch. First list changed files: \`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff --name-status "$DIFF_BASE"\`. For NON-fixture source code, read full content: \`git diff "$DIFF_BASE" -- . ':(exclude)*test*' ':(exclude)*fixture*' ':(exclude)*.spec.*'\`. For fixture/test files, review in SUMMARY mode only (\`git diff --stat "$DIFF_BASE" -- '*test*' '*fixture*' '*.spec.*'\`) — note that they changed and what they cover, but do not pull their raw payload bytes into adversarial reasoning. State explicitly in your output that fixtures were reviewed in summary mode so the coverage reduction is visible, not silent.
 
-Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. Be adversarial. Be thorough. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment). After listing findings, end your output with ONE line in the canonical format \`Recommendation: <action> because <one-line reason naming the most exploitable finding>\` — examples: \`Recommendation: Fix the unbounded retry at queue.ts:78 because it'll DoS the worker pool under sustained 429s\` or \`Recommendation: Ship as-is because the strongest finding is a theoretical race that requires conditions we can't trigger in production\`. The reason must point to a specific finding (or no-fix rationale). Generic reasons like 'because it's safer' do not qualify."
+Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment). After listing findings, end your output with ONE line in the canonical format \`Recommendation: <action> because <one-line reason naming the most exploitable finding>\` — examples: \`Recommendation: Fix the unbounded retry at queue.ts:78 because it'll DoS the worker pool under sustained 429s\` or \`Recommendation: Ship as-is because the strongest finding is a theoretical race that requires conditions we can't trigger in production\`. The reason must point to a specific finding (or no-fix rationale). Generic reasons like 'because it's safer' do not qualify."
 
 Present findings under an \`ADVERSARIAL REVIEW (${outsideVoiceFor(ctx).nativeLabel} subagent):\` header. **FIXABLE findings** ${isShip ? 'are queued for the parent; do not edit during Step 11' : "are queued for the parent's Fix-First handling at Step 5; do not edit during Step 4.8"}. **INVESTIGATE findings** are presented as informational.
 
@@ -150,8 +150,6 @@ Outside prompt (supply repository context from the parent):
 "${CODEX_BOUNDARY}Review the changes on this branch against the base branch. Use the supplied branch diff. If it was not supplied and you have repository tools, run DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE". Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems. End your output with ONE line in the canonical format \`Recommendation: <action> because <one-line reason naming the most exploitable finding>\`. Generic reasons like 'because it's safer' do not qualify; the reason must point to a specific finding or no-fix rationale."
 
 ${outsideVoiceInvocation(ctx, { timeoutMs: 540000, nativeAlreadyRequired: true, diffCommand: 'DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"' })}
-
-Set the outer tool timeout to 600000ms so the provider timeout can report its failure.
 
 Present the full output verbatim. ${isShip ? 'An unavailable outside challenge does not block shipping by itself; supported findings still enter Step 11, and the structured P1 and non-convergence gates still apply.' : 'This outside challenge is informational; supported findings still enter Step 5 Fix-First, whose approval and convergence gates apply.'}
 
@@ -176,7 +174,7 @@ ${outsideVoiceInvocation(ctx, { timeoutMs: 540000, nativeAlreadyRequired: true, 
 
 ${outsideVoiceFor(ctx).id === 'codex' ? 'The Codex backend uses `codex review --base` without a positional prompt: those arguments are mutually exclusive. Never drop --base to resolve an argv error; prompt-only review changes the diff scope.' : 'The Claude Code backend receives the parent-captured base diff, including committed and working-tree changes, because review mode cannot execute git.'}
 
-Set the outer tool timeout to 600000ms. Present output under \`${outsideVoiceFor(ctx).label.toUpperCase()} SAYS (code review):\` inside a \`tool-output\` fence.
+Present output under \`${outsideVoiceFor(ctx).label.toUpperCase()} SAYS (code review):\` inside a \`tool-output\` fence.
 Only a completed response with severity tags or an explicit no-findings conclusion establishes the gate. P1 findings (\`[P1]\` or native \`P1:\` labels) → GATE: FAIL. Completed without P1 → GATE: PASS. Refusal, failure, or missing markers → GATE: MISSING COVERAGE; preserve the existing user decision flow.
 
 If GATE is FAIL, use AskUserQuestion:
@@ -251,10 +249,10 @@ echo "DIFF_SIZE: $DIFF_TOTAL"
 
 **Detect the ${outsideVoiceFor(ctx).label} master switch + tool availability:**
 
-${outsideVoicePreflight(ctx, { disabledBehavior: 'codex-only' })}
+${outsideVoicePreflight(ctx, { disabledBehavior: 'codex-only', nativeReview: true })}
 
 \`CODEX_MODE: disabled\` means skip the ${outsideVoiceFor(ctx).label} passes ONLY.
-\`ready\` runs them; \`not_installed\` / \`not_authed\` skip with the printed reason.
+\`ready\` runs them; every other mode skips them with the printed reason.
 The ${outsideVoiceFor(ctx).nativeLabel} adversarial subagent always runs.
 
 **User override:** If the user explicitly requested "full review", "structured review", or "P1 gate", also run the ${outsideVoiceFor(ctx).label} structured review regardless of diff size (still requires \`CODEX_MODE: ready\`).
@@ -410,13 +408,12 @@ THE PLAN:
 function codexPlanReviewRun(ctx: TemplateContext, ceo: boolean, needsApprovalReadiness: boolean): string {
   return `**If \`CODEX_MODE: ready\` — run ${outsideVoiceFor(ctx).label}:**
 
-${['plan-ceo-review', 'plan-eng-review'].includes(ctx.skillName) ? `Run this block only for \`ready\`, in one foreground Bash call
-(\`run_in_background: false\`, \`timeout: 300000\`). Its opening harness guard
-rechecks the fresh shell: exit 78 uses the same Native fallback below, never a
-replacement provider. Finish termination before fallback and consume only
-completed output. Use private temporary paths, with no background jobs.` : `Run the selected backend in one foreground Bash invocation (\`run_in_background: false\`,
-\`timeout: 300000\`). Finish a failed attempt's termination before fallback;
-consume only its completed output. No background jobs or shared temporary paths.`}
+${['plan-ceo-review', 'plan-eng-review'].includes(ctx.skillName) ? `Run this block only for \`ready\`, in the one foreground Bash call described below.
+Its opening harness guard rechecks the fresh shell: exit 78 uses the same Native
+fallback below, never a replacement provider. Finish termination before fallback and consume only
+completed output. Use private temporary paths, with no background jobs.` : `Run the selected backend in the one foreground Bash invocation described below.
+Finish a failed attempt's termination before fallback; consume only its completed
+output. No background jobs or shared temporary paths.`}
 
 ${outsideVoiceInvocation(ctx, { timeoutMs: 300000 })}
 
@@ -693,7 +690,7 @@ ${generateDisabledOutsideRecord(ctx, 'codex-doc-review', 'documentation')}
 When the mode is anything except \`disabled\`, print one line so the off-switch
 stays discoverable: "Running the ${outsideVoiceFor(ctx).label} doc review automatically (standard step). Disable: \`gstack-config set codex_reviews disabled\`."
 
-**Determine the release diff range (D3 — reuse the method, do not invent one).**
+**Determine the release diff range (reuse the method, do not invent one).**
 Recompute the SAME range document-release used in its pre-flight / diff analysis, with the
 documented merge-base method:
 
@@ -742,7 +739,7 @@ A native result never supplies outside coverage.
 Dispatch via the Agent tool with the same prompt, passing \`run_in_background: false\` (subagents default to background since ${CC_BACKGROUND_DEFAULT_SINCE}). Bound it at a 5-minute timeout; if it never completes, treat the review as unavailable and continue.
 Present findings under \`DOCUMENTATION REVIEW (${outsideVoiceFor(ctx).nativeLabel} subagent):\`. If it fails: "Doc review unavailable. Continuing to Step 9." Skip the apply gate, persist \`status: unavailable\`, \`outside_status: unavailable\`, and \`source: none\` below, then continue; unavailable is not a clean review.
 
-**Apply decision (T3B — informational, never auto-edit, but findings don't evaporate).**
+**Apply decision (informational, never auto-edit, but findings don't evaporate).**
 If at least one reviewer completed and there are zero findings, say "Docs match what shipped — no gaps." and state which reviewer supplied that coverage. If neither completed, report "Doc review unavailable", skip the apply question, and persist unavailability below before Step 9. Otherwise
 present the findings, then use AskUserQuestion ONCE:
 

@@ -69,6 +69,17 @@ No setup needed. Learnings are logged automatically. View them with `/learn`.
 This is the best way to contribute: fix gstack while doing your real work, in the
 project where you actually felt the pain.
 
+**What CI does on a fork PR.** GitHub never gives a fork PR this repository's
+secrets, so CI runs everything that needs none: the required `free-tests` check
+(the Linux free suite, typecheck, the macOS and Windows gates), Windows Free
+Tests, Skill Docs Freshness, Workflow Lint, Version Gate, Quality gate, the
+make-pdf gate, and any path-triggered gates your change touches. E2E Evals
+still builds the CI image from your `Dockerfile.ci` without publishing it, and
+skips its paid eval jobs, which need provider API keys. That skip is expected
+and does not block your PR. It is also not a pass: a maintainer runs the paid
+evals from a branch in this repository before merging. A first-time
+contributor's runs wait for a maintainer to approve them.
+
 ### Session awareness
 
 When you have 3+ gstack sessions open simultaneously, every question tells you which project, which branch, and what's happening. No more staring at a question thinking "wait, which window is this?" The format is consistent across all skills.
@@ -532,8 +543,9 @@ Supply-chain gates run alongside it:
 - **Dependency review** (`.github/workflows/dependency-review.yml`) — reviews dependency changes on PRs that touch lockfiles or workflow files.
 - **OSV scanner** (`.github/workflows/osv-scanner.yml`) — weekly vulnerability scan against the OSV database. Config lives in `.osv-scanner.toml` and is loaded via an explicit `--config` flag (OSV does not auto-discover that filename); every ignore entry needs a reason and an `ignoreUntil` expiry, enforced by `test/osv-config-wiring.test.ts`.
 - **Dependabot** (`.github/dependabot.yml`) — grouped dependency update PRs.
+- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`) — weekly and on main pushes; results in the Security tab and api.scorecard.dev.
 
-The supply-chain workflows pin their third-party actions to commit SHAs. The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) asks for evidence — tests run, eval output — not promises.
+Every workflow pins its third-party actions to commit SHAs (`test/workflow-action-pins.test.ts`). The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) asks for evidence — tests run, eval output — not promises.
 
 Tests run against the browse binary directly — they don't require dev mode. Anything that needs Aside itself (`test/skill-e2e-aside.test.ts`, the Aside qa/design cases, the live render in `test/aside-render.test.ts`) runs only on a Mac with the Aside app open and self-skips elsewhere; make-pdf's render gates and the `/diagram` E2E run on whichever engine resolves, so CI runs them on the browse binary it builds with `bun run build:gates`.
 
@@ -590,6 +602,31 @@ is a CLI flag) so every caller gets it on both paths. Exported test seams:
 `pickEngine(fresh, deps)` (inject the probe and the binary resolver),
 `serveDir(root, nonce)`, `SAFE_TMP_DIR`, and `PAGE_NUMBER_FOOTER` (the one
 page-number footer make-pdf, `gstack-render`, and the browse `pdf` command share).
+
+## Prompt audit at each frontier-model release
+
+When a new frontier Claude model ships, audit the text models read for
+instructions the new model over-applies or no longer needs. The audit is
+Anthropic's `/claude-api prompt-audit`, a Claude Code skill you run in your own
+Claude Code session; gstack only prints what to feed it.
+
+```bash
+bun run audit:manifest   # slices of templates, resolvers, overlays, CLAUDE.md and wording-pinning tests (--json for a machine-readable list)
+```
+
+1. In Claude Code, run `/claude-api prompt-audit` with the new model as the
+   target, one slice at a time, giving it that slice's file list. `s01` is the
+   shared text every skill reads (CLAUDE.md, model overlays, preamble
+   resolvers); a skill's template and its sections share one slice.
+2. Fix findings in templates and resolvers, never in generated SKILL.md files,
+   then run `bun run gen:skill-docs --host all`.
+3. Treat safety rules as held: reword one only where an eval shows the model
+   obeys it both before and after the change.
+4. Work through the "tests that pin skill wording" slices last. Where prose
+   changed, replace exact-sentence pins with structural or meaning checks
+   (the prompt-bytes rule in CLAUDE.md's testing section).
+5. `test/archaeology-lint.test.ts` keeps issue numbers and incident stories out
+   of the generated text; its failure names the source file to fix.
 
 ## Jargon list (V1 writing style)
 
@@ -664,13 +701,19 @@ bun run skill:check
 
 See [docs/ADDING_A_HOST.md](docs/ADDING_A_HOST.md) for the full guide. Short version:
 
-1. Create `hosts/myhost.ts` (copy from `hosts/opencode.ts`)
+1. Create `hosts/myhost.ts` (copy from `hosts/opencode.ts`), including its
+   `tier` and `capabilities`
 2. Add to `hosts/index.ts`
 3. Add `.myhost/` to `.gitignore`
 4. Run `bun run gen:skill-docs --host myhost`
 5. Run `bun run test` (parameterized tests auto-cover it)
 
-Zero generator, setup, or tooling code changes needed.
+Rendering needs no generator code. Installing does: an installable host also
+needs a setup install arm, a row in `gstack_host_tier`
+(`bin/gstack-install-registry.sh`), a README host-matrix row, and the
+conformance kit (`test/host-conformance.test.ts`). It ships as `experimental`
+until a dated certification record exists; see "Certify your host" and the
+install ownership rules in the guide.
 
 ### Adding a new skill
 

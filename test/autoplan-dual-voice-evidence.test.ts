@@ -258,7 +258,7 @@ test.each(['assignment-only','set-config','other-config','foreign-reader','or-co
  if(kind==='inside-body')input.command=input.command.replace(guards+'\n','').replace('_OUTSIDE_EXIT=0','_OUTSIDE_EXIT=0\n'+guards);
  if(kind==='before-cd')input.command=guards+'\ncd '+f.dir+'\n'+f.options.commands.outside.replace("'<prepared-prompt-file>'","'"+f.file+"'");
  if(kind==='changed-harness')input.command=input.command.replace('exit 78','exit 0');
- if(kind==='changed-timeout')input.command=input.command.replace('_gstack_codex_timeout_wrapper 600','_gstack_codex_timeout_wrapper 1');
+ if(kind==='changed-timeout')input.command=input.command.replace('_gstack_codex_timeout_wrapper 540','_gstack_codex_timeout_wrapper 1');
  if(kind==='changed-sandbox')input.command=input.command.replace('-s read-only','-s danger-full-access');
  if(kind==='changed-prompt')input.command=input.command.replace('codex exec "$_OUTSIDE_PROMPT"','codex exec "Different plan"');
  if(kind==='skipped-validator')input.command=input.command.replace(/^bun .*outside-review-result.*\n/m,'');
@@ -286,7 +286,9 @@ test.each(['disabled','missing-cli','missing-ack','failed-ack','foreign-ack','ch
 
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
 function capturedGuardFixture(attempt:typeof captured.sourceBoundB176.attempts[number]){
- const f=fixture(attempt.plan),old=attempt.snapshot;
+ const f=fixture(attempt.plan),old=attempt.snapshot,{probe,outside}=captured.sourceBoundB176.commandContract;
+ // Judge each capture against the delivered blocks it executed, not today's render.
+ f.options.commands={probe,outside};
  // Authenticate the original public payload before adapting only fixture paths
  // and the native prompt's path-derived byte count/hash to real owned artifacts.
  expect(hash(attempt.plan)).toBe(old.sha256);

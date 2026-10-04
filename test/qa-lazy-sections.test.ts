@@ -241,7 +241,8 @@ describe('QA-only cross-host lazy rendering', () => {
         expect(explorer.split(functionalRead)).toHaveLength(2);
         expect(explorer).toContain('Do not repeat a Read already completed in this invocation');
         if (skill === 'qa') {
-          expect(entry).toContain('`--quick` also selects Quick exploration; `--exhaustive` changes only the fix tier.');
+          expect(entry).toMatch(/`--quick`[^\n]*Quick exploration/i);
+          expect(entry).toContain('`--exhaustive` changes only the fix tier');
           expect(entry).toContain('Regression mode preserves the selected fix tier.');
           for (const tier of ['**Quick:** Fix critical + high severity only', '**Standard:** + medium severity (default)', '**Exhaustive:** + low/cosmetic severity']) expect(entry).toContain(tier);
         } else {
@@ -382,7 +383,7 @@ describe('installed QA pointers', () => {
     expect(source).toContain('source/diff reads only map changes to pages and flows');
     expect(source).toContain('read `TODOS.md` if present to identify known bugs');
     expect(source).toContain('defaulting to functional then browser');
-    expect(source).toContain('Do not reset a clock when switching surfaces');
+    expect(source).toMatch(/absolute deadline is shared; switching surfaces does not extend it/i);
     expect(source).toContain('CLI executable basename');
     expect(source).toContain('**No explicit permission:** skip learning-store writes and continue to the report');
     expect(source).toContain('**Explicit permission:** Read the named store first');
@@ -543,7 +544,9 @@ describe('installed QA pointers', () => {
     '_gstack_generated_header', '_claude_entry_owned_strongly', '_claude_entry_is_ours', '_write_owned_marker',
     '_backup_skill_md', '_cleanup_weak_dir', '_gstack_dir_only_links', '_cleanup_linked_dir',
     '_owned_for_windows_refresh', '_sidecar_root_user_owned', '_prune_stale_generated', '_skill_source_exists',
-  ].map(setupFunction).join('\n');
+  ].map(setupFunction).join('\n')
+    // Install-registry rows (setup's _setup_arm_* / _setup_row) are not under test here.
+    + '\n_setup_arm_begin() { :; }\n_setup_arm_publish() { :; }\n_setup_row() { :; }';
   const kiroStart = setup.indexOf('# 6. Install for Kiro CLI');
   const kiroBlock = setup.slice(kiroStart, setup.indexOf('# 6b.', kiroStart));
 

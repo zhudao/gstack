@@ -7,9 +7,7 @@ description: |
   saved state (preferring the current branch, falling back across branches) so
   you can pick up where you left off — even across Conductor workspace handoffs.
   Use when asked to "resume", "restore context", "where was I", or
-  "pick up where I left off". Pair with /context-save.
-  Formerly /checkpoint resume — renamed because Claude Code treats /checkpoint
-  as a native rewind alias in current environments. (gstack)
+  "pick up where I left off". Pair with /context-save. (gstack)
 allowed-tools:
   - Bash
   - Read
@@ -55,7 +53,7 @@ branch.)
 
 Parse the user's input:
 
-- `/context-restore` → load the most recent saved context (any branch)
+- `/context-restore` → load the most recent saved context (current branch first, then any branch)
 - `/context-restore <title-fragment-or-number>` → load a specific saved context
 - `/context-restore list` → tell the user "Use `/context-save list` — listing
   lives on the save side" and exit. No mode detection here.
@@ -68,10 +66,12 @@ Parse the user's input:
 
 ```bash
 {{SLUG_SETUP}}
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 CHECKPOINT_DIR="$GSTACK_STATE_ROOT/projects/$SLUG/checkpoints"
 # Project identity: canonical remote (root only when there is no remote).
-eval "$(~/.claude/skills/gstack/bin/gstack-slug --identity 2>/dev/null)" || true
+PROJECT_REMOTE=$(~/.claude/skills/gstack/bin/gstack-slug --get PROJECT_REMOTE 2>/dev/null) || true
+PROJECT_ROOT=$(~/.claude/skills/gstack/bin/gstack-slug --get PROJECT_ROOT 2>/dev/null) || true
+LEGACY_SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get LEGACY_SLUG 2>/dev/null) || true
 echo "PROJECT_IDENTITY: ${PROJECT_REMOTE:-${PROJECT_ROOT:-unknown}}"
 echo "PROJECT_ROOT: ${PROJECT_ROOT:-unknown}"
 if [ -n "${LEGACY_SLUG:-}" ] && [ -d "$GSTACK_STATE_ROOT/projects/$LEGACY_SLUG/checkpoints" ]; then
@@ -116,7 +116,7 @@ else
     done <<EOF
 $ALL
 EOF
-    # Identity check (#3003): only checkpoints stamped with THIS project's
+    # Identity check: only checkpoints stamped with THIS project's
     # identity are candidates for "latest". Unstamped (older) checkpoints are
     # trusted unless the directory demonstrably holds another project's files.
     CLASSIFIED=$(printf '%s%s' "$SAME" "$OTHER" | grep -v '^[[:space:]]*$' \
@@ -128,12 +128,12 @@ EOF
       FOREIGN_N=$(printf '%s\n' "$CLASSIFIED" | grep -c '^foreign' || true)
       # Cap at 20: a user with 10k saved files shouldn't blow the context window.
       FILES=$(printf '%s\n' "$CLASSIFIED" | awk -F '\t' -v f="$FOREIGN_N" \
-        '$1 == "match" || $1 == "match-root" || ($1 == "unstamped" && f == 0) { print $2 }' | head -20)
+        '$(1) == "match" || $(1) == "match-root" || ($(1) == "unstamped" && f == 0) { print $(2) }' | head -20)
       if [ -n "$FILES" ]; then echo "$FILES"; else echo "NO_VERIFIED_CHECKPOINTS"; fi
       printf '%s\n' "$CLASSIFIED" | awk -F '\t' -v f="$FOREIGN_N" \
-        '$1 == "match-root" { print "ROOT_DIFFERS " $2 }
-         $1 == "foreign" { print "FOREIGN " $2 }
-         $1 == "unstamped" && f > 0 { print "UNVERIFIED " $2 }' | head -40
+        '$(1) == "match-root" { print "ROOT_DIFFERS " $(2) }
+         $(1) == "foreign" { print "FOREIGN " $(2) }
+         $(1) == "unstamped" && f > 0 { print "UNVERIFIED " $(2) }' | head -40
       if [ "$FOREIGN_N" -gt 0 ]; then
         echo "SHARED_BUCKET: $FOREIGN_N checkpoint(s) here were saved by another project"
       fi
@@ -180,6 +180,22 @@ checkpoint(s) from another project; only this project's are listed." If it print
 `LEGACY_BUCKET`, relay that line. If the chosen file is `ROOT_DIFFERS`, add
 "Saved from another checkout of this repository at `{project_root}`." as info.
 
+**Sort Remaining Work by provenance.** Keep every item's original text and saved
+order, and drop nothing. Put an item under **Verify first** when it:
+- ends in `(path assumed)` or `(code read)`;
+- ends in `(path run)` but its text reports a failure;
+- has no marker and is a writing step (migration, sync, insert, import, a dialog that
+  writes) or names a concrete path (a runnable command, CLI flag or switch, config key
+  or value, or file or directory path).
+
+Every other item goes under **Next steps**: `(path run)` with a successful outcome,
+`(path read)`, `(target state checked)`, and unmarked items that neither write nor
+name a concrete path. Verifying means read-only inspection: read the file or the
+target, or run a command that changes nothing. Checkpoints saved before provenance
+markers existed have none, so their concrete-path items land under Verify first. When
+the file has no provenance markers at all, print this line above the groups:
+`This checkpoint predates provenance markers; items naming commands, paths or writes are listed under Verify first.`
+
 Read the chosen file and present a summary:
 
 ```
@@ -196,7 +212,13 @@ Status:      {status}
 {summary from saved file}
 
 ### Remaining Work
-{remaining work items}
+{legacy banner line, if it applies}
+
+Next steps
+{Next steps items, in saved order, original text}
+
+Verify first (inspect read-only before executing anything)
+{Verify first items, in saved order, original text}
 
 ### Notes
 {notes}
@@ -214,7 +236,10 @@ After presenting, ask via AskUserQuestion:
 - B) Show the full saved file
 - C) Just needed the context, thanks
 
-If A, summarize the first remaining work item and suggest starting there.
+If A, take the first Remaining Work item in saved order. If it is under Next steps,
+suggest starting there. If it is under Verify first, suggest verifying it (read-only)
+before doing it or any later item, so a later runnable step never jumps ahead of an
+unverified earlier one.
 
 ---
 
@@ -234,9 +259,9 @@ in the old bucket until the user copies them with `gstack-slug --adopt-legacy`.
 
 - **Never modify code.** This skill only reads saved files and presents them.
 - **Prefer the current branch's own checkpoint, but keep all branches in the
-  fallback set.** Cross-branch resume (Conductor handoff) still works when the
-  current branch has no checkpoint; it just no longer lets a sibling worktree's
-  newer save shadow this branch's own.
+  fallback set.** Cross-branch resume (Conductor handoff) works when the
+  current branch has no checkpoint, and a sibling worktree's newer save never
+  shadows this branch's own.
 - **Never present another project's checkpoint as "latest".** Identity is the
   canonical remote (the root only when there is no remote); a mismatch is
   reported before any summary.

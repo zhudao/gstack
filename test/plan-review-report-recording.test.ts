@@ -212,7 +212,8 @@ test('canonical reports preserve both successful exits, terminal forms, metadata
       timeout: CAPTURE_LONG_MS, runId: 'public-report-free' });
     expect(call.signal).toBeInstanceOf(AbortSignal);
     expect(call.prompt).toContain('Read plan-eng-review/SKILL.md and plan-eng-review/sections/review-sections.md');
-    expect(call.prompt).toContain('"Plan File Review Report" section of plan-eng-review/sections/review-sections.md');
+    expect(call.prompt).toContain('plan.md is the plan file for this review session');
+    expect(call.prompt).not.toMatch(/CRITICAL REQUIREMENT|GSTACK REVIEW REPORT|\bMUST\b/);
     expect(call.prompt).not.toContain('placeholder table with all five review rows (CEO, Codex, Eng, Design, DX)');
     expect(call.main).toBe(fs.readFileSync(path.join(ROOT, 'plan-eng-review/SKILL.md'), 'utf8'));
     expect(call.section).toBe(fs.readFileSync(path.join(ROOT, 'plan-eng-review/sections/review-sections.md'), 'utf8'));
@@ -265,9 +266,12 @@ function runnerResult(exitReason: string, turnsUsed = 0, transcript: any[] = [{ 
     costEstimate: { inputChars: 1, outputChars: 0, estimatedTokens: 0, estimatedCost: 0, turnsUsed } };
 }
 function recordedClass(result: any, extra?: Partial<EvalTestEntry>) {
-  const collector = new EvalCollector('e2e');
-  recordE2E(collector, 'infra-probe', 'Infra probe', result, extra);
-  return (collector as any).tests.at(-1)?.failure_class;
+  const evalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'report-recording-class-'));
+  try {
+    const collector = new EvalCollector('e2e', evalDir);
+    recordE2E(collector, 'infra-probe', 'Infra probe', result, extra);
+    return (collector as any).tests.at(-1)?.failure_class;
+  } finally { fs.rmSync(evalDir, { recursive: true, force: true }); }
 }
 
 test.each(['error_api', 'timeout_startup', 'error_output_stream', 'exit_code_1'])(
