@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { generatePlanCompletionAuditReview, generatePlanCompletionAuditShip, generatePlanCompletionGateShip, generatePlanVerificationExec } from '../scripts/resolvers/plan-gates';
 import { HOST_PATHS } from '../scripts/resolvers/types';
+import { expectMentions } from './helpers/prompt-structure';
 
 const SHIP_DIR = path.join(__dirname, '..', 'ship');
 
@@ -17,7 +18,7 @@ describe('authored ship-only plan verification handoff', () => {
     expect(extraction).toContain('Step 8.1/9');
     expect(extraction).toMatch(/outside implementation counts/i);
     expect(extraction).toMatch(/never DONE from static inspection/);
-    expect(extraction).toMatch(/do not waive those checks/i);
+    expectMentions(extraction, [['do not', 'checks', 'waive']], 'extraction');
     expect(fs.readFileSync(path.join(SHIP_DIR, 'sections/plan-completion.md.tmpl'), 'utf8')).toContain('exactly these seven fields');
     const gate = generatePlanCompletionGateShip(ctx);
     expect(gate).toContain('Any NOT DONE items');
@@ -33,7 +34,7 @@ describe('authored ship-only plan verification handoff', () => {
   test('preparation hands every explicit check to the report-only execution owner before Fix-First', () => {
     const text = generatePlanVerificationExec(ctx).replace(/\s+/g, ' ');
     expect(text).toContain('Collect now; execute in Step 9');
-    expect(text).toMatch(/do not invoke an entire QA skill or start probes here/i);
+    expectMentions(text, [['do not', 'invoke', 'entire']], 'text');
     for (const heading of ['Verification', 'Test plan', 'Testing', 'How to test', 'Manual testing']) {
       expect(text).toContain(`\`${heading}\``);
     }
@@ -54,13 +55,11 @@ describe('authored ship-only plan verification handoff', () => {
     expect(parent).toContain('exactly the seven declared fields');
     expect(parent).toContain('classification sum equals `total_items`');
     expect(parent).toContain('a string `summary`');
-    expect(parent).toMatch(/missing, extra or invalid fields fail/i);
-    expect(parent).toMatch(/no-plan\/no-actionable reports retain zero counts/i);
+    expectMentions(parent, [['no', 'no-plan/no-actionable', 'reports']], 'parent');
     expect(parent).toContain('~10 minutes');
-    expect(parent).toMatch(/stop any live child and confirm it stopped before an inline audit/i);
+    expectMentions(parent, [['stop', 'confirm', 'stopped']], 'parent');
     expect(parent).toMatch(/never race a late result/i);
-    expect(parent).toMatch(/if that also fails, AskUserQuestion/i);
-    expect(parent).toContain('Stop and fix the audit (recommended/default)');
+    expectMentions(parent, [['stop', 'recommended/default', 'audit']], 'parent');
     const contract = audit.split('\n').find(line => line.startsWith('{"total_items":N,'))!;
     expect(Object.keys(JSON.parse(contract.replace(/:N([,}])/g, ':0$1'))).sort())
       .toEqual(['total_items', 'done', 'changed', 'partial', 'not_done', 'unverifiable', 'summary'].sort());
@@ -99,15 +98,15 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
 
   test('Per-item UNVERIFIABLE confirmation: blanket-confirm is forbidden', () => {
     expect(skill).toMatch(/per-item confirmation/i);
-    expect(skill).toMatch(/do not use a single AskUserQuestion to blanket-confirm/i);
+    expectMentions(skill, [['do not', 'askuserquestion', 'blanket-confirm']], 'skill');
   });
 
   test('Subagent failure: fail-closed, not silent fail-open', () => {
-    expect(skill).not.toMatch(/Never block \/ship on subagent failure\.\s*$/m);
+    expect(skill).not.toMatch(/block \/ship on subagent failure/i);
     // The audit-failure fallback still forbids a silent fail-open (meaning, not the old incident ID).
     const fallback = skill.slice(skill.indexOf('**Audit-failure fallback:**'), skill.indexOf('**Audit-failure fallback:**') + 800);
     expect(fallback).toMatch(/fail[- ]open/i);
-    expect(skill).toMatch(/Stop and fix the audit/);
+    expectMentions(skill, [['stop', 'audit']], 'skill');
   });
 
   test('parent rejects audit errors and malformed counts instead of treating them as no plan', () => {
@@ -143,7 +142,6 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
     expect(todos).toMatch(/Step 8[^\n]+P1[^\n]+plan/);
     expect(todos).toMatch(/Step 5[^\n]+P0[^\n]+deduplicate/);
     expect(todos.indexOf('Add approved deferrals')).toBeLessThan(todos.indexOf('Detect completed TODOs'));
-    expect(todos.replace(/\s+/g, ' ')).toMatch(/retain unsaved follow-ups in Step 19's PR summary/i);
   });
 
   test('CHANGELOG uses the normal workflow without checkpoint context or squash prerequisites', () => {
@@ -163,7 +161,7 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
     expect(storage).not.toContain('gstack-evidence run');
     expect(storage).toMatch(/without that proof, use STALE\/MISSING/i);
     expect(text).toMatch(/\*\*New, changed or unwaived test failure:\*\* stop publication\. Run Steps 5–15/i);
-    expect(text).toMatch(/reuse waivers only for the same verified pre-existing failures/i);
+    expectMentions(text, [['only', 'pre-existing', 'verified']], 'text');
     expect(text).toMatch(/make evidence STALE/);
   });
 
@@ -182,7 +180,7 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
     const commit = entry.slice(entry.indexOf('## Step 15:'), entry.indexOf('## Step 16:'));
     expect(commit).toMatch(/bisectable commits/i);
     expect(commit).toContain('continue to Step 16');
-    expect(commit).toMatch(/never create an empty commit/i);
+    expectMentions(commit, [['never', 'create', 'commit']], 'commit');
     expect(commit).not.toMatch(/checkpoint|WIP|squash|git rebase|git reset/);
     expect(entry).not.toMatch(/Step 15\.[012]/);
   });
@@ -193,10 +191,9 @@ describe('ship/SKILL.md — Plan Completion gate invariants', () => {
     const recovery = push.replace(/\s+/g, ' ');
     expect(push).toMatch(/push fails[^\n]+\bstop\b/i);
     expect(recovery).toContain('**Non-fast-forward push:**');
-    expect(recovery).toContain('Run Steps 5–16 before returning to Step 17');
+    expectMentions(recovery, [['before', 'returning', 'steps']], 'recovery');
     expect(recovery).toMatch(/never rewrite history/i);
     expect(recovery).toContain('**Authentication, hook or network failure:**');
-    expect(recovery).toMatch(/repeat Step 16 even if content is unchanged/i);
     expect(push).toMatch(/never force.push/i);
     expect(push).toMatch(/only a successful push/i);
   });
@@ -238,3 +235,105 @@ test('push idempotency requires the live remote SHA and fails closed on transpor
     expect(unavailable.stdout).toContain('BLOCKED');
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 }, 120_000);
+
+// F1 (#2768, #2800): the Plan Completion Audit used to fall back to "the newest
+// plan file from the last day" and to any plan naming the repo, so a branch
+// with no plan was audited against an unrelated one, and repo-committed
+// docs/designs/ was never searched. The rendered discovery block now binds
+// explicitly, lists docs/designs/ candidates, and never auto-picks.
+describe('F1: plan binding, docs/designs candidates, exact not-run line', () => {
+  const ROOT = path.join(__dirname, '..');
+  const NOT_RUN = 'Plan completion audit: not run (no plan is bound to this branch and no docs/designs/ file matches). Fix: add "Plan: <path>" to the PR body, or run /autoplan.';
+  const sections = {
+    ship: path.join(ROOT, 'ship', 'sections', 'plan-completion.md'),
+    review: path.join(ROOT, 'review', 'sections', 'plan-completion.md'),
+  };
+
+  function discovery(file: string): string {
+    const md = fs.readFileSync(file, 'utf8');
+    return md.slice(md.indexOf('### Plan File Discovery')).match(/```bash\n([\s\S]*?)```/)![1]
+      .replaceAll('~/.claude/skills/gstack', ROOT).replaceAll('<base>', 'main');
+  }
+
+  function fixture(opts: { design?: boolean; prBody?: string }) {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'plan-bind-')));
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    const env = { ...process.env, HOME: tmp, GSTACK_HOME: path.join(tmp, '.gstack'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } as Record<string, string>;
+    delete env.GSTACK_STATE_ROOT; delete env.GSTACK_PROJECT_SLUG;
+    const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, env, encoding: 'utf8', timeout: 30_000 });
+    git('init', '-q', '-b', 'main');
+    fs.mkdirSync(path.join(repo, 'docs', 'designs'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'docs', 'designs', 'OLD_FEATURE.md'), '# an older, unrelated design\n');
+    git('add', '-A'); git('commit', '-qm', 'base');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('checkout', '-qb', 'feat-pricing');
+    fs.writeFileSync(path.join(repo, 'src.ts'), 'x\n');
+    if (opts.design) fs.writeFileSync(path.join(repo, 'docs', 'designs', 'PRICING.md'), '# pricing plan\n');
+    git('add', '-A'); git('commit', '-qm', 'work');
+    // An unrelated plan-mode file from today, naming neither branch nor feature.
+    fs.mkdirSync(path.join(tmp, '.claude', 'plans'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.claude', 'plans', 'recent-unrelated.md'), '# refactor the billing page for repo\n');
+    const bin = path.join(tmp, 'bin');
+    fs.mkdirSync(bin);
+    if (opts.prBody !== undefined) fs.writeFileSync(path.join(tmp, 'pr-body.txt'), opts.prBody);
+    fs.writeFileSync(path.join(bin, 'gh'), opts.prBody === undefined ? '#!/bin/sh\nexit 1\n' : `#!/bin/sh\ncat '${path.join(tmp, 'pr-body.txt')}'\n`, { mode: 0o755 });
+    env.PATH = `${bin}:${process.env.PATH}`;
+    return { tmp, repo, env };
+  }
+
+  function run(which: 'ship' | 'review', f: ReturnType<typeof fixture>) {
+    return spawnSync('bash', ['-c', discovery(sections[which])], { cwd: f.repo, env: f.env, encoding: 'utf8', timeout: 30_000 });
+  }
+
+  for (const which of ['ship', 'review'] as const) {
+    test(`${which}: a docs/designs file changed on this branch is a candidate; an unrelated recent plan is not`, () => {
+      const f = fixture({ design: true });
+      try {
+        const out = run(which, f).stdout;
+        expect(out).toContain(`PLAN_CANDIDATE: ${path.join(f.repo, 'docs', 'designs', 'PRICING.md')}`);
+        expect(out).not.toContain('OLD_FEATURE.md');
+        expect(out).not.toContain('recent-unrelated.md');
+        expect(out).not.toContain('PLAN_FILE:');
+      } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
+    });
+
+    test(`${which}: nothing bound and nothing matching yields no plan at all`, () => {
+      const f = fixture({});
+      try {
+        const out = run(which, f).stdout;
+        expect(out).not.toContain('PLAN_CANDIDATE:');
+        expect(out).not.toContain('PLAN_FILE:');
+        expect(out).not.toContain('recent-unrelated.md');
+      } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
+    });
+
+    test(`${which}: a "Plan:" line in the PR body is printed as the binding`, () => {
+      const f = fixture({ prBody: 'Summary\n\nPlan: `docs/designs/PRICING.md`\n' });
+      try {
+        expect(run(which, f).stdout).toContain('PLAN_BINDING: docs/designs/PRICING.md');
+      } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
+    });
+
+    test(`${which}: binding precedence and the exact not-run line`, () => {
+      const md = fs.readFileSync(sections[which], 'utf8');
+      const text = md.slice(md.indexOf('### Plan File Discovery')).replace(/\s+/g, ' ');
+      expect(text).toContain(NOT_RUN);
+      const order = ['Conversation context (primary)', 'PR body binding', 'Content-based search (fallback)', 'No binding and no chosen candidate'];
+      const at = order.map(o => text.indexOf(o));
+      expect(at.every(i => i >= 0)).toBe(true);
+      expect([...at].sort((a, b) => a - b)).toEqual(at);
+      expect(text).toMatch(/never pick one silently/i);
+      expect(text).toContain('No plan: skip the audit');
+    });
+  }
+
+  test('ship binds the plan in the parent before dispatch; the child never searches', () => {
+    const md = fs.readFileSync(sections.ship, 'utf8');
+    expect(md.indexOf('### Plan File Discovery')).toBeLessThan(md.indexOf('````text'));
+    const child = md.slice(md.indexOf('````text'), md.lastIndexOf('````'));
+    expect(child).not.toContain('### Plan File Discovery');
+    expectMentions(child, [['do not', 'another', 'search']], 'child');
+    expect(md).toMatch(/not-run line, skip dispatch/);
+  });
+});

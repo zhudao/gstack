@@ -1,8 +1,9 @@
 /**
  * Pins the paid-tier sharded runner (scripts/test-paid-shards.ts).
  *
- * Two properties matter, and both are why `test:gate` has never finished a run:
- *   1. Enumeration + sharding — every file `test:gate`'s globs expand to gets
+ * Two properties matter, and both are why the retired single-process
+ * `test:gate` never finished a run:
+ *   1. Enumeration + sharding — every file PAID_TEST_GLOBS expands to gets
  *      its own process, and tier exclusion only ever fires on explicit evidence.
  *   2. A spinning shard is killed externally and the run CONTINUES. The fake
  *      command here is a real busy loop, so an in-process timer could not save
@@ -57,12 +58,14 @@ import {
   runCaseDiagnosis,
   caseFile,
   parseCliOptions,
+  loadPaidTestDurations,
+  shardDurationViolations,
   type CaseTrialPlan,
   type ShardOutcome,
 } from '../scripts/test-paid-shards';
 
 describe('paid test enumeration', () => {
-  test('matches the globs package.json test:gate expands', () => {
+  test('matches PAID_TEST_GLOBS', () => {
     expect(isPaidTestFile('test/skill-e2e-qa-workflow.test.ts')).toBe(true);
     expect(isPaidTestFile('test/skill-llm-eval.test.ts')).toBe(true);
     expect(isPaidTestFile('test/codex-e2e.test.ts')).toBe(true);
@@ -128,6 +131,35 @@ describe('tier lane skip (B5)', () => {
     expect(tierSkipReason(file, "testIfSelected('sample-gate', async () => {});", 'gate', touchfiles, tiers)).toBeNull();
   });
 
+  test('a computed registration is skipped only when every id of the lane tier is registered to another test file', () => {
+    const other = 'test/skill-e2e-other.test.ts';
+    const owned = { 'sample-periodic': [file], 'gate-elsewhere': [other, 'x/**'] };
+    const ownedTiers = { 'sample-periodic': 'periodic', 'gate-elsewhere': 'gate' };
+    for (const source of [
+      "testConcurrentIfSelected(`sample-${label}`, async () => {});",
+      "runSkillTest({ testName: `sample-${label}` });",
+      "for (const entry of CASES) describeIfSelected(entry.suite, [entry.id], () => { testIfSelected(entry.id, async () => {}); });",
+    ]) {
+      expect(tierSkipReason(file, source, 'gate', owned, ownedTiers)).toBe(
+        'skipped: no E2E_TIERS id has tier gate (its computed names can only produce gate ids other test files register)');
+      expect(tierSkipReason(file, source, 'periodic', owned, ownedTiers)).toBeNull();
+      expect(tierSkipReason(file, source, 'gate', owned, { ...ownedTiers, 'gate-orphan': 'gate' })).toBeNull();
+      expect(tierSkipReason(file, `${source}\ntestIfSelected('gate-elsewhere', async () => {});`, 'gate', owned, ownedTiers)).toBeNull();
+    }
+  });
+
+  test('census files whose computed names hold only other-tier cases never take a runner (2026-10-03 census)', () => {
+    const lanes = { gate: ['test/skill-e2e-plan-decision-classification.test.ts', 'test/skill-e2e-plan-devex-peer-comparison-classification.test.ts',
+      'test/skill-e2e-qa-bugs.test.ts', 'test/skill-routing-e2e.test.ts'], periodic: ['test/skill-e2e-coverage-audit.test.ts', 'test/skill-e2e-test-value.test.ts'] };
+    for (const [tier, files] of Object.entries(lanes) as Array<['gate' | 'periodic', string[]]>) {
+      const { selected, excluded } = selectPaidTestFiles(collectPaidTestFiles(), tier, ROOT);
+      for (const hollow of files) {
+        expect(selected, hollow).not.toContain(hollow);
+        expect(excluded.find(entry => entry.file === hollow)?.reason, hollow).toStartWith(`skipped: no E2E_TIERS id has tier ${tier}`);
+      }
+    }
+  });
+
   test('the real constructed-name diagram file stays scheduled in both lanes', () => {
     const source = fs.readFileSync(path.join(ROOT, 'test/skill-e2e-diagram.test.ts'), 'utf8');
     for (const tier of ['gate', 'periodic'] as const) expect(tierSkipReason('test/skill-e2e-diagram.test.ts', source, tier)).toBeNull();
@@ -143,7 +175,7 @@ describe('tier lane skip (B5)', () => {
     }
     const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/evals-periodic.yml'), 'utf8');
     expect(workflow.match(/--skip-judges/g)).toHaveLength(1);
-    expect(workflow).toMatch(/--tier gate --emit-plan \/tmp\/gate-census-plan\/manifest\.json --slice-budget 540 --jobs 2 --skip-judges/);
+    expect(workflow).toMatch(/--tier gate --emit-plan \/tmp\/gate-census-plan\/manifest\.json --slice-budget 420 --jobs 2 --skip-judges/);
   });
 });
 
@@ -171,6 +203,15 @@ describe('marathon tier lane', () => {
     expect(classifyPaidTestFile(periodic, 'marathon')).toEqual({ included: false, reason: "declares tier 'periodic' only" });
   });
 
+  test('a marathon case that only depends on a file does not plan a hollow marathon shard there (W2f)', () => {
+    // plan-decision-classification: its own case is periodic; the marathon split-overflow case lists it as a touchfile.
+    const dependency = { 'sample-long': [file], 'sample-periodic': [file] };
+    const withPeriodic = { ...tiers, 'sample-periodic': 'periodic' };
+    const source = "const CASE_ID = 'sample-periodic'; testIfSelected(CASE_ID, async () => {});";
+    expect(marathonSkipReason(file, source, dependency, withPeriodic)).toBe('skipped: declares no marathon tier and registers no marathon case');
+    expect(selectPaidTestFiles(collectPaidTestFiles(), 'marathon').selected).not.toContain('test/skill-e2e-plan-decision-classification.test.ts');
+  });
+
   test('a registered marathon case keeps its gate sibling scheduled in the gate lane', () => {
     const source = "testIfSelected('sample-gate', async () => {}); testIfSelected('sample-long', async () => {});";
     expect(tierSkipReason(file, source, 'gate', reg, tiers)).toBeNull();
@@ -185,6 +226,29 @@ describe('marathon tier lane', () => {
       expect(marathonSkipReason(file, source), file).toBeNull();
     }
     expect(selected.length + excluded.length).toBe(collectPaidTestFiles().length);
+  });
+});
+
+describe('PR-lane shard wall (I5)', () => {
+  const census = JSON.parse(fs.readFileSync(path.join(ROOT, 'test/fixtures/paid-report-census/gate-census-durations.json'), 'utf8')).durations as Record<string, number>;
+  const gateKeys = () => buildRunManifest({ tier: 'gate', sliceCount: 1, evalsAll: true, env: { EVALS_ALL: '1' } })
+    .entries.filter(entry => entry.status === 'planned').map(entry => entry.file);
+
+  test('no planned gate shard has a recorded wall over 600 s (committed seed and the last gate census)', () => {
+    const keys = gateKeys();
+    expect(keys.length).toBeGreaterThan(50);
+    expect(shardDurationViolations(keys, loadPaidTestDurations(ROOT, 'gate'))).toEqual([]);
+    expect(shardDurationViolations(keys, census)).toEqual([]);
+  });
+
+  test('the guard names an over-limit shard and its recorded wall; deploy runs one shard per case', () => {
+    expect(shardDurationViolations(['test/skill-e2e-deploy.test.ts', 'test/skill-e2e-qa-workflow.test.ts'], census))
+      .toEqual(['test/skill-e2e-deploy.test.ts: recorded 668s > 600s']);
+    expect(shardDurationViolations(['test/a.test.ts#x~t2'], { 'test/a.test.ts#x': 612_000 })).toEqual(['test/a.test.ts#x~t2: recorded 612s > 600s']);
+    expect(CASE_SHARDED_FILES).toContain('test/skill-e2e-deploy.test.ts');
+    expect(gateKeys().filter(key => shardFile(key) === 'test/skill-e2e-deploy.test.ts').sort()).toEqual([
+      'benchmark-workflow', 'canary-workflow', 'land-and-deploy-first-run', 'land-and-deploy-review-gate', 'land-and-deploy-workflow', 'setup-deploy-workflow',
+    ].map(id => `test/skill-e2e-deploy.test.ts#${id}`));
   });
 });
 
@@ -213,7 +277,8 @@ describe('case-sharded files', () => {
     }
     expect(caseFile('plan-design-review-plan-mode')).toBe('test/skill-e2e-design.test.ts');
     expect(caseFile('plan-design-review-plan-mode-smoke')).toBe('test/skill-e2e-plan-design-plan-mode.test.ts');
-    expect(() => caseFile('carve-section-loading')).toThrow(/registered by .*; it needs exactly one/);
+    expect(() => caseFile('carve-section-loading')).toThrow(/no paid file statically registers it/);
+    expect(caseFile('carve-section-loading-review')).toBe('test/carve-section-loading.test.ts');
   });
 
   test('a case key runs exactly its case: exact name pattern, own eval slug, per-case supervision', () => {
@@ -664,7 +729,7 @@ console.log("Ran 1 tests across 1 files. [1ms]"); process.exit(${fail ? 1 : 0});
       expect(sliceExitCode(summary.outcomes)).toBe(0);
       const env = JSON.parse(fs.readFileSync(path.join(evalDirBase, 'shards', shardSlug([key(3)]), 'env.json'), 'utf8'));
       expect(env).toMatchObject({ GSTACK_EVAL_CASE_ID: 'review-sql-injection', GSTACK_EVAL_KIND: 'behavior', GSTACK_EVAL_TRIAL: '3',
-        GSTACK_EVAL_PANEL_N: '3', GSTACK_EVAL_PANEL_K: '2', GSTACK_EVAL_POLICY_VERSION: '1' });
+        GSTACK_EVAL_PANEL_N: '3', GSTACK_EVAL_PANEL_K: '2', GSTACK_EVAL_POLICY_VERSION: '2' });
       expect(JSON.parse(env.EVALS_SELECTION_JSON).selected).toEqual(['review-sql-injection']);
     } finally { fs.rmSync(evalDirBase, { recursive: true, force: true }); }
   });

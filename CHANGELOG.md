@@ -1,5 +1,194 @@
 # Changelog
 
+## [1.91.24.0] - 2026-10-05
+
+**PR evals stop throwing away work, and a red weekly census means something again.**
+**The free suite is faster, its flakes are visible, and broken commands are gone.**
+
+This release is a test, eval and CI audit wave. It touches no skill behavior. The paid PR lane keeps a cancelled run's finished results for the next push, waits briefly when pushes come in quick succession, and runs only the gate cases a change can affect once the change avoids a shared input. Every paid lane has a ceiling sized per runner, so a stuck shard ends as an honest `TIMEOUT` or `not_run` instead of holding a runner for four hours. The weekly census can no longer be cancelled by a branch dispatch, and a new weekly test-health report says which free tests are getting flaky or slow.
+
+### The numbers that matter
+
+| Check | v1.91.22.0 | v1.91.24.0 |
+|---|---|---|
+| Paid CI job ceiling (gate census / periodic) | 254 / 173 min for every slice | 34-82 min per slice; 50 min for ordinary periodic slices |
+| Local `eval:bg:pr` / `eval:bg:release` detach cap | 25.8 h / 32.4 h | 2.9 h / 2.25 h (1.5× planned work, never over 4 h) |
+| Passing results a cancelled PR run hands to the next push | 0 | every finished shard, failures included |
+| A branch dispatch that cancels main's weekly census | possible | no (concurrency is per ref and event) |
+| Windows free lane wall | 8.1 min on one runner | about 4.6 min on six runners |
+| Windows-safe files the curated lane runs | 573 | 638 |
+| zsh arms of the bash+zsh portability tests in CI | ~42 skipped (no zsh) | all run |
+| Free-suite flaky passes reported anywhere | none (a write-only artifact) | job summary + weekly `test:health` |
+| Sentence pins on skill prose in free tests | 2,332 | 1,190 |
+
+### What changes for you
+
+- **PR evals keep finished work.** A `recover-receipts` job restores the passes and failures of up to five cancelled runs of the same PR, checks where each came from, and hands them to the planner, so a re-push re-runs only what changed. A 90-second debounce skips a run that a newer push has already superseded; the `evals-no-debounce` label turns it off and `evals-fresh` turns reuse off.
+- **PR selection narrows where it can.** Duration seeds, free-only workflows, free tests and free fixtures (listed in `test/helpers/free-fixtures-data.ts`) no longer force the full gate. Other files map to the paid cases that actually consume them, derived from imports, bin names, template placeholders and build outputs (`scripts/pr-dependencies.ts`); deleted files are placed the same way. Shared inputs (package.json, the CI image, setup, the preamble resolvers, the eval policy) still run the full gate. The job summary names every fallback file and its fix.
+- **`bun run eval:bg:pr` and friends dispatch CI when your HEAD is clean and pushed**, and otherwise run locally with a cap sized to the planned work. Both paths end with `### gstack-detach EXIT=<code> ###`; `bun run scripts/eval-bg.ts status <log-or-run-id>` reads it.
+- **Weekly test health.** `bun run test:health` (and `.github/workflows/test-health.yml`, Mondays) reports PR-lane fallback rate, reuse, cancelled slice-minutes, flaky free tests over 5% of main runs, and unseeded free tests. Its tracking issue opens only from main.
+- **Branch census dispatches run the periodic lane only.** Add `-f include_gate_census=true` for the gate census too, or dispatch `evals.yml` with `-f evals_all=true` for gate cases alone.
+- **The OSV scan opens a tracking issue when it fails on main**, and a free test fails 14 days before any `ignoreUntil` suppression expires.
+
+### Behavior changes you may notice
+
+- **EVAL_POLICY is v2.** A case's pass-rate history resets only when its own files or the declared `HARNESS_VERSION` change, weeks for quarantine expiry count main runs only, and branch census trials count toward a case's history only when its files match a series main has run. Readers ignore records from a newer policy version and say how many they skipped. Shared-harness edits record a decision with `bun run scripts/bump-harness-version.ts --bump|--non-behavioral "<why>"`.
+- **The 15 `carve-section-loading-<skill>` test files are one case-sharded file** with a case id per skill (`--case carve-section-loading-review`); `GSTACK_CARVE_SKILL` is gone. `skill-e2e-qa-workflow` runs case by case.
+- **Paid slices pack 7 minutes of work (was 9)**, so more runners start at once.
+- **`eval:select` defaults to the PR profile.**
+- **`/cso` docs say contained runtime and scanner runs are not available yet**: no runtime profile is qualified and the scanner catalog is empty.
+
+### For contributors
+
+- These package scripts print their replacement and exit 1 for one release, then go away:
+
+| Retired | Use instead |
+|---|---|
+| `test:evals`, `test:e2e`, `eval:bg` | `bun run eval:bg:pr` |
+| `test:evals:all`, `test:e2e:all`, `eval:bg:all` | `bun run eval:bg:release` |
+| `test:gate` / `test:periodic` | `bun run test:gate:sharded` / `test:periodic:sharded` |
+| `test:codex`, `test:codex:all` | `bun run test:periodic:sharded` (they ran zero cases) |
+| `eval:flake-rank` | `bun run eval:pass-rates` |
+| `eval:watch` | tail the `gstack-detach` log, or `gh run watch <run-id>` |
+| `test:audit` | `bun run test` |
+
+- `docs/test-value-bar.md` narrows a "prompt-byte contract" to machine-read tokens. Check template and SKILL.md structure with `test/helpers/prompt-structure.ts` instead of pinning English sentences.
+- Free-suite tests share one install fixture (copy-on-write clones of a read-only seed) and inject short deadlines instead of waiting real seconds. Subprocess pipe tests use FIFOs; see TESTING_INTERNALS "Flake ledger" for the rules.
+- The free duration seed is shrink-only above 60 seconds per file (`scripts/free-test-seed-allowlist.json`), and only `bun run test:ubicloud --record-durations` produces an acceptable seed. Windows has its own seed, refreshed by a `record_durations` dispatch.
+- Deleted: `ci-image.yml` (the eval workflows build the same image), `scripts/update-readme-throughput.ts`, `scripts/eval-watch.ts`, orphaned fixtures, and ~160 unused imports in the paid runner (now split into `scripts/lib/paid-types.ts` and `paid-select.ts`). Native Windows and Dia qualification moved to the dispatch-only `native-qualification.yml`; ML, gitleaks and Swift opt-in tests run in the quarterly `platform-qualification.yml`. Small CI jobs run on free GitHub-hosted runners.
+- Evidence, the EVAL_POLICY v2 memo and its backtest are in [docs/test-audit-2026-10.md](docs/test-audit-2026-10.md).
+
+## [1.91.22.0] - 2026-10-05
+
+**`/cso` scanner execution has reviewed, signed scanner images to build from.**
+
+`lib/cso/scanner-images/build-inputs.json` now pins one attested base image per scanner (gitleaks, OSV-Scanner, Semgrep, zizmor, Trivy, Schemathesis) for linux/amd64 and linux/arm64, plus the SBOM generator. None of the upstream images publish GitHub artifact attestations, so the bases come from [`garrytan/gstack-cso-scanner-bases`](https://github.com/garrytan/gstack-cso-scanner-bases) release `bases-2026.10.04.3`: each re-publishes a pinned upstream digest with the offline Semgrep rules or OSV/Trivy databases added, and its workflow signs SLSA provenance and an SPDX SBOM. Every identity, statement-set digest and asset hash was re-verified independently before the state changed to `reviewed`. Dispatching `cso-scanner-images.yml` on main now builds, qualifies and proposes the scanner catalog; until that catalog merges, scans still report `not assessed`.
+
+### The numbers that matter
+
+| Check | Result |
+|---|---|
+| Attested images (6 scanners x 2 platforms + generator) verified with gstack's own `gh attestation verify` flags | 13/13, both predicates |
+| Statement-set digests recomputed with `scripts/cso-attestation-evidence.ts` | 26/26 equal |
+| Offline asset hashes recomputed from both platforms with `hash-asset` | 6/6 equal |
+| Scanners completing a real network-none scan through the production adapter on the published amd64 bases | 6/6, no coverage gaps |
+
+### What changes for you
+
+- **OSV and Trivy reports survive redaction.** Advisory links such as `ntap-20210312-0006` read as phone numbers and four-part versions read as IP addresses, which used to discard the whole report. Scanner output now has each located span replaced in place; output is still withheld when a span cannot be located or crosses stdout and stderr.
+- **Schemathesis scans finish.** Schemathesis 4.26+ fuzzes until `--max-time` is spent; the adapter now budgets 75% of the scanner deadline and accepts a `max_time` stop once every selected operation ran.
+- **The scanner qualification test runs.** Its fixture now lives where the executor mounts sources and declares a real dependency, so OSV and Trivy exercise their offline databases.
+
+### For contributors
+
+- Refresh advisory databases by pushing a new `bases-*` tag in `gstack-cso-scanner-bases`, then review the release's `build-inputs.json` candidate here.
+
+## [1.91.19.0] - 2026-10-03
+
+**A check that did not run now says so, and memory stops losing transcripts.**
+**Codex and the other non-Claude hosts find gstack in every step of every skill.**
+
+This release closes the severe bugs left in the tracker. Two promises lead. First, nothing is silently lost: memory ingest marks a transcript saved only after gbrain confirms it landed, and learnings that could not be written say so. Second, no false all-clear: a Codex review whose sandbox could not start, a retired Codex model, a design binary killed at launch, and a learnings search with no Bun all used to read as "ready", "pass" or "no results". Each now prints `not run` or `unavailable` with the reason and the fix command, and every one of those messages has a section in the new [docs/troubleshooting.md](docs/troubleshooting.md).
+
+### The numbers that matter
+
+Measured on this release's tests against v1.91.16.0's code (each regression test was run on both; the counts come from those runs and from `bun run gen:skill-docs --host all`).
+
+| Check | v1.91.16.0 | v1.91.19.0 |
+|---|---|---|
+| Codex review in a container with no user namespaces | gate `pass` on "no findings" | `unavailable`, missing coverage |
+| Structured outside review with a `[P0]` finding | gate `pass` | gate `fail` |
+| Generated bash blocks on env-var hosts that use a gstack path without finding gstack (`test/env-host-fence-conformance.test.ts`) | hundreds | 0 |
+| Codex `/ship` SKILL.md | 202-241 KB, ~57K tokens | carved, ~20K tokens |
+| Redaction warnings on one rendered `/diagram` (SVG + .excalidraw) | 115 | 0 |
+| A transcript gbrain skipped during import | stamped as saved | retried until gbrain has it |
+
+The first two rows are the ones to care about: a review that read nothing, or found a P0, used to let /ship through.
+
+### What changes for you
+
+- **Gates tell the truth.** Outside reviews go through one classifier that reads the text, stderr and exit status. Codex reviews that could not run print `Codex outside review unavailable: <reason>` with the fix, and /ship and /review show them as missing coverage, never as passed.
+- **Memory keeps what you gave it.** Memory ingest checks that each page landed before marking it saved, retries pages gbrain skipped, and sets aside (and names) one page that keeps breaking a batch. After upgrading, a bounded catch-up per `/sync-gbrain` re-imports transcripts older versions lost (`gstack-memory-ingest --reconcile --dry-run` previews it). Transcripts import into a private gbrain source per repository.
+- **Codex, Factory, OpenCode, Cursor, Copilot and Kiro** see the gstack router (setup installs real copies, which Codex requires), get the design and make-pdf binaries, and every skill block finds gstack on its own, honoring `CODEX_HOME` and an exported `GSTACK_ROOT`. `./setup --status` says whether each install's router is a real file and its section links resolve.
+- **Pushes stop being blocked by false positives:** diagram coordinates, `session = requests.Session()`, `CLAUDE.local.md`, four-part version numbers and `postgres:postgres@localhost`. Real secrets still block.
+- **Windows:** /freeze, /guard and /investigate stop denying every edit, the generators no longer crash with EEXIST, the node-server bundle builds, and the /cso helper builds with the current Windows SDK.
+- **/ship in a repo without a VERSION file** ships without a version change instead of stopping.
+
+### Behavior changes you may notice
+
+- **Codex reviews in containers say "unavailable" instead of passing.** Fix: enable unprivileged user namespaces, or in a container you trust `export GSTACK_CODEX_NO_SANDBOX=1`.
+- **The structured outside-review gate fails on P0 findings**, not only P1. An untagged structured review is `OUTSIDE_STATUS: unverified` (missing coverage).
+- **`CODEX_MODE: unverified`** replaces `ready` when the model check times out; the review still runs and its own result is checked.
+- **The first automatic Codex review on a machine prints a one-time notice** naming the provider and which login or key pays. Reviews stay on; `gstack-config set codex_reviews disabled` turns them off.
+- **/ship without a version source ships without a version change:** no bump, no CHANGELOG version header, no `vX.Y.Z` title prefix. To version releases, create `VERSION` or `echo package.json > .gstack/version-path`. A pinned version file that is missing or malformed stops /ship with its path.
+- **The plan completion audit says `not run`** instead of auditing your PR against the newest unrelated plan. Bind one with a `Plan: <path>` line in the PR body, or run /autoplan.
+- **Learnings and timeline lookups report a missing Bun** (exit 127 with the fix) and skills print `LEARNINGS: unavailable (<reason>)` instead of an empty list.
+- **Design skills say `DESIGN_NOT_AVAILABLE: <path> --version exited <code>`** when the design binary cannot start, instead of claiming it is ready. Fix: `cd <gstack checkout> && ./setup`.
+- **`/sync-gbrain --dream` (and `--full`) runs only the call-graph phase.** If your gbrain cannot, it skips and says so; run `gbrain dream --source <id>` yourself for the full ~35-minute cycle.
+- **`gstack-memory-ingest --no-write` is a true dry run** and no longer records pages as saved.
+- **Transcripts with no repository stay on this machine** when your brain is remote. Staged pages carry a `gstack_content_sha256` frontmatter field.
+- **Disabled skills leave the router** (`gstack-config set disabled_skills ...` updates it in the same command).
+- **`browse type --selector <sel> <text>`** types into an element. Bare `browse type` still types into the focused element and hints when the first word looks like a selector. Text starting with `--` goes after `--`.
+- **Headed browse keeps one profile per project** (`<project>/.gstack/chromium-profile`). First use copies your logins from `~/.gstack/chromium-profile` when no browser is using it. `browse profiles` lists them; `browse profiles prune --days 30` removes idle ones. If a live browser holds the profile, browse names it and stops instead of killing it.
+- **A redirect or link to a link-local or metadata address resets the tab to `about:blank`** and the command fails with the reason.
+- **`BROWSE_EXTENSION_ID` is ignored;** forks use `gstack-config set browse_extension_id <id>`. `BROWSE_EXTENSIONS_DIR` runs headless with no window.
+- **`$D` (design) no longer picks up `OPENAI_API_KEY` from a project's `.env`.** Export it in your shell or use `~/.gstack/openai.json`.
+- **A database URL with the default `postgres`/`postgres` login still blocks a push on any host but `localhost` or `127.0.0.1`,** including a compose service name like `@db`. Use `localhost`, or read the URL from an env var.
+- **Auto-update (team mode) no longer says "just upgraded" when setup failed.** It retries after 1h, 6h and 24h, and each session start prints one line naming what did not finish and the fix.
+- **Hand edits to installed router copies are saved to `~/.gstack/backups/skill-copies/`, then overwritten.** Setup prints where.
+- **In Conductor, setup no longer installs the AskUserQuestion preference hook** and removes one it added. To keep it: `gstack-config set plan_tune_hooks yes`, then `./setup`.
+- **Required team mode also blocks Copilot CLI's skill tool.** Re-run `gstack-team-init required` to upgrade the project hook.
+- **`gstack-qa-evidence capture` prints a `revalidate` list after your inputs change**, naming the probes to rerun on current inputs before `materialize`; `materialize` says its verdict is final for that report root, so rerun the listed probes first.
+- **/gstack-upgrade asks you to paste the absolute path Step 2 prints**; every later step checks it is inside gstack's checkout before running git.
+- **/ship's documentation gate snapshots its inputs in one call.** `gstack-docs-candidate snapshot` records the audit candidate (base, HEAD, index, changed and new paths, content hashes) and `compare` reports what changed after the child returns.
+- **Two setups writing settings.json at once both land.** A writer whose lock attempt raced a holder releasing it used to skip its hook change (exit 5); it now retries once and only reports `cannot create lock` when the lock directory truly cannot be created.
+- **/plan-ceo-review prints its mode handoff** by running `gstack-ceo-mode-handoff` right after the mode is chosen (by you or by a saved preference), so the selected mode and approved decisions always appear before the review continues.
+- **Browser setup names the platform when Aside is absent:** the probe prints `NEEDS_ASIDE: <OS>` (was `NEEDS_ASIDE`), and the macOS-only download pitch trusts that line instead of re-checking the OS. `GSTACK_PLATFORM` overrides it for tests and unusual hosts; set it in your shell, never a project `.env`.
+
+### Security
+
+- A repository's `.env` or `bunfig.toml` can no longer change gstack's browser. Compiled binaries and the browse daemons ignore them, so a project cannot turn off Chromium's sandbox (`GSTACK_CHROMIUM_NO_SANDBOX`) or run code through a bunfig `preload`. This needs Bun 1.3.3 or later; gstack now requires Bun 1.4.0 (`engines.bun`), the version CI runs.
+- The browse sidebar terminal accepts connections only from the gstack extension.
+- Browse refuses link-local and cloud-metadata addresses (169.254.0.0/16 including container credential endpoints, 100.100.100.200, fe80::/10, fc00::/7) in every numeric and IPv6-mapped spelling, including after redirects and page-driven navigation. Connection-time DNS rebinding is not covered.
+- Screenshot, PDF and scrape output paths are checked the way the OS resolves them, so a symlink cannot redirect a write outside the allowed folders.
+- `GSTACK_CODEX_NO_SANDBOX` is read only from your shell environment (exactly `1`), and every use prints a warning.
+- The iOS QA daemon bounds each device response (one 30-second deadline for the whole response, 64 MiB cap) and never replays a tap or write whose response was lost.
+
+### Upgrade
+
+- **Claude Code:** run `/gstack-upgrade`, then start a new session.
+- **Codex and the other env-var hosts (Factory, OpenCode, Cursor, Copilot, Kiro):** find your checkout with `./setup --status` (the `source` column), then run `cd <source> && git pull && ./setup --host <host>`, and start a new session.
+- Then `./setup --status` should show each install's router as a real file with every section link resolving.
+
+### Itemized changes
+
+#### Fixed
+- **Memory and gbrain.** Ingest stamped pages gbrain skipped or never stored (#2778); `--no-write` wrote state. A project's `.env` `DATABASE_URL` reached a local PGLite brain (#1931). Offline or off-VPN looked like a broken config, and dot-leading project names (`.claude`) blocked ingest forever (#2884). Transcripts from every repository shared one source (#2232). `/sync-gbrain` said "pushed" when the artifacts source had 0 indexed pages (#2670), forced the full dream cycle (#2783), always reported the call graph as unknown, and kept deleted worktrees' sources silently. The 1.27 artifacts-repo rename never worked, and installs it repointed at a repo that never existed are repaired (#1437). gbrain install and source wiring needed `jq` (#2369).
+- **Codex.** A retired model (HTTP 404) or a custom provider with a wrong `base_url` reported `ready` (#2843). Custom providers configured with `env_key` failed the auth check (#2192). Large prompts failed on argv limits (Windows 32 KB, Linux E2BIG) and the macOS fallback timeout dropped the prompt (#1674, #1686).
+- **Non-Claude hosts.** Later skill blocks lost `$GSTACK_*`, `$B` and `$D` and ran `/bin/gstack-...` (#1159). Codex skipped the symlinked router. design/dist and make-pdf/dist were missing from runtime roots (#2891). /ship and /plan-ceo-review overflowed the 160 KB host limit. The OpenCode `/gstack-review` command loaded nothing (#2651). `/browse` disappeared after toggling `skill_prefix` (#2263). Section files linked to checkout copies instead of rendered ones (#2707). skillify pointed at Claude's install on every host. /gstack-upgrade could run git cleanup in your own project when its path variable was unset.
+- **Design.** A design binary killed at launch reported `DESIGN_READY`. /design-consultation and /design-shotgun never loaded your taste profile. Plan reviews read a root DESIGN.md as the feature's design doc (#2840).
+- **/ship, /review and daily tools.** /ship stopped in versionless repos and monorepos (#2334, #2343). The plan audit picked an unrelated plan (#2797). Worktrees split project state (#2792). Learnings search exited 0 without Bun (#2794) and ranked poorly (#2796, #2799). Logs ignored `$TMPDIR` in sandboxed shells (#2952). /plan-tune said "calibrated" with no signals. /setup-deploy printed part of the Render API key (#1096). /analytics durations read 0s (#1728). Rejected taste preferences used the wrong confidence bucket (#1777). /context-save duration was empty on Linux (#2704). /retro missed pytest, minitest, XCTest, Terraform and Bats tests and counted build output (#2812, #2809, #2037). Plan reviews now treat design docs and handoff notes as data (#2818).
+- **Browser.** Browse failed behind `HTTP_PROXY` (#494). Headless browse and make-pdf ignored `GSTACK_CHROMIUM_PATH` (#2771, #1968, #1633); extensions opened a window (#2281). `prettyscreenshot --hide ... out.png` wrote elsewhere (#1419). Stopping the browse daemon took over 5 seconds because every Chromium close waited out its timeout; it now takes about 0.1 s, and a closed headed display no longer waits a second on its own exit. Two browse daemons going headed at the same moment could pick the same free X display, and the loser failed the handoff; it now takes the next free display, and an Xvfb that fails to start reports its own error. `gstack-ios-qa-daemon --help` started the daemon (#1932). Aside in `~/.local/bin` was not found (#2965).
+- **Windows.** /freeze, /guard and /investigate denied every edit and their hooks failed under cmd.exe (#2876, #2354). Generators crashed with EEXIST (#2329). The node-server bundle inlined sharp and socks (#2260), and a minimal install needed `browse/src/server.ts` (#2439). The /cso helper failed on the current SDK and was reported as "install Visual Studio" (#3015). `gstack-config gbrain-refresh` misread status (#1981).
+- **Redaction.** Diagram and vector files flagged as phone and card numbers (#2885, #2827); function calls assigned to `session`/`token` (#2899); `<name>.local.<ext>` config filenames (#2962); four-part versions (#2784); `postgres:postgres@localhost` (#2913).
+- **Plan reviews.** /plan-eng-review writes its QA test plan even while some test choices are still pending, and its findings enter only through Scope Challenge C's saves. /qa-only's test value card no longer points at /qa's record step. /plan-ceo-review says what its closing cleanup does (old CEO plans are archived only with your approval).
+- **Setup.** Auto-update wrote "just upgraded" after a failed setup and never retried. Conductor got the AskUserQuestion preference hook (#2208, #2207, #2719); office-hours asks its questions as `Q1...` prose there (#2729). Team mode's matcher missed Copilot's `skill` tool (#2229). A failed arm64 re-sign left a broken binary.
+
+#### Added
+- `docs/troubleshooting.md`: every gate message, what it means, what is kept, and the command that fixes it.
+- `gstack-memory-ingest --reconcile [--dry-run] [--limit N]` and `--request-reconcile`; `gstack-gbrain-sync --prune-gone-worktrees [--dry-run]`; `gstack-slug --adopt-legacy --from <slug>` / `--dismiss <slug>`.
+- `browse type --selector`, `browse profiles [list|prune --days N]`, `design --version`, `gstack-config set browse_extension_id <id>`.
+- For scripts: `bun lib/outside-review-result.ts --verdict <gate> <file>` prints `VERDICT: clean|findings|unverified|unavailable` (exit 0/3/4/1); the two-argument form is unchanged.
+
+#### For contributors
+- New invariants with free tests: gate outcomes in `lib/gate-outcomes.ts` with a troubleshooting anchor per reason code; a fresh-shell conformance test and a quote-aware bash lint over every generated block on every env-var host; a per-host 160,000-byte SKILL.md ceiling.
+- Eval children no longer receive credential env vars that carry a suffix (`GITHUB_TOKEN_1`, `GITHUB_APP_PRIVATE_KEY_BASE64`); admit one explicitly with `extraAllow` (#2949). Chunked large-push coverage for the pre-push guard (#2915).
+- The test typecheck ratchet ignores the order tsc prints an object type's members in.
+- The weekly eval report counts only cases that ran: tests deselected for another tier or case shard are listed by reason with no credit, every result is attributed to its case (0 unattributed, was 72), and no PR-lane eval shard runs over 10 minutes (the deploy eval is split per case).
+- Codex evals run on their own CI job where Codex's sandbox can start, and pass only when Codex completed a command; a review whose sandbox failed now fails instead of passing. The `/codex review` eval passes only when Codex actually reviewed the diff. The AUQ matrix checks the `(recommended)` marker on option labels, where the auto-decide hook reads it. The `/plan-eng-review` QA test-plan eval now runs the real interactive review instead of a shortcut prompt that skipped the workflow: a periodic checkpoint resumes it at Test review from a recorded Scope Challenge, and the full fresh run is a non-blocking marathon case.
+
+Contributed by @CermakM (#2843), @Haijie-Lee (#2192), @SomSamantray (#2965), @Vaughan-g-aus (#2329), @BharadwajMittapelli (#2729), @maxpetrusenkoagent (#1931, #1932, #1981), @Infiniteyieldai (#2884), @afshaker (#2778), @time-attack (#2232, #2229), @jzeisweiss (#2670), @liutiming (#2783), @agile-operators (#1437), @benjaminberes-bp (#2369), @lewispeel (#2885), @Yugz29 (#2899), @fcmerle (#2962), @cdecook23 (#2784), @mb1810 (#2913), @ntdatt812 (#2949), @pneumorea-ai (#2915), @gabrielrondon (#2811), @kevingrasso32 (#2876), @xwang4-svg (#2354), @DizzyWesterwald (#2936), @oli548 (#2771), @shofel (#1968), @ryanlaiwy (#1633), @yinanli1917-cloud (#2281), @Spooks444 (#2260), @punksterlabs (#2439), @himiaocc (#2492), @jbetala7 (#1419, #1777), @mamedov (#2891), @Lockyer228 (#2651), @topcoder1 (#2263), @jonahberg (#2707), @AlinValentin7 (#3015), @philhie (#2208), @Alchemist-DevAI (#2334), @merit-blake (#2343), @day-of-davon (#2952), @loulanyue (#2797, #2792, #2794, #2796), @Bit0ps (#2840), @szsunyuan (#2799), @frosimanuel (#2818), @JiayuuWang (#1096), @RyanAlberts (#1728), @exGeni (#2704), @Jino00 (#2812), @snig-17 (#2809) and @SholtoMc (#2037).
+
 ## [1.91.18.0] - 2026-10-03
 
 **Transcript consent can cover only new sessions or only chosen repos, and Claude Code users can opt into a model-tuned skill overlay.**
