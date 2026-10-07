@@ -83,6 +83,12 @@ describe('test value bar render contract', () => {
     expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(TEST_VALUE_BAR_MAX_BYTES[mode]);
   });
 
+  test('the card clamp applies to card lines only; written JSON keeps full values (C2)', () => {
+    for (const mode of TEST_VALUE_BAR_MODES) {
+      expect(bar(mode)).toContain(`each field at most ${CARD_FIELD_MAX_BYTES} UTF-8 bytes here (clamp to 157 plus \`...\`; written JSON keeps full values)`);
+    }
+  });
+
   test('qa mode names only the invoking skill\'s card location (/qa-only has no 8e.5 record)', () => {
     const forSkill = (skillName: string) => generateTestValueBar({ ...ctx, skillName }, ['qa']);
     expect(forSkill('qa')).toContain('Put it in the 8e.5 record.');
@@ -143,9 +149,11 @@ describe('ship parent decision rules', () => {
   });
 
   test('the rejection step removes new rejected files and reports tracked ones for a hunk revert', () => {
-    const block = shipSection.slice(shipSection.indexOf('   while IFS= read -r f; do'), shipSection.indexOf('   REJECTED\n') + '   REJECTED\n'.length)
-      .split('\n').map(line => line.replace(/^ {3}/, '')).join('\n');
-    expect(block).toContain('<one rejected test path per line>');
+    const start = shipSection.indexOf('   REJECTED_FILE="$(git rev-parse');
+    const end = shipSection.indexOf('   rm -f "$REJECTED_FILE"\n', start) + '   rm -f "$REJECTED_FILE"\n'.length;
+    const block = shipSection.slice(start, end).split('\n').map(line => line.replace(/^ {3}/, '')).join('\n');
+    expect(block).toContain('<rejected-file-name>');
+    expect(block).toContain('done < "$REJECTED_FILE"');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-value-rejected-'));
     try {
       const git = (...args: string[]) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 10_000 });
@@ -156,13 +164,18 @@ describe('ship parent decision rules', () => {
       git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'seed');
       fs.appendFileSync(path.join(dir, 'test/kept.test.ts'), 'test("dup", () => {});\n');
       fs.writeFileSync(path.join(dir, 'test/new dup.test.ts'), 'test("dup", () => {});\n');
-      const script = block.replace('<one rejected test path per line>', 'test/new dup.test.ts\ntest/kept.test.ts');
+      fs.mkdirSync(path.join(dir, '.gstack/tmp'), { recursive: true });
+      const list = path.join(dir, '.gstack/tmp/rejected-tests.abc123');
+      fs.writeFileSync(list, 'test/new dup.test.ts\ntest/kept.test.ts\n../outside.test.ts\n');
+      const script = block.replace('<rejected-file-name>', 'rejected-tests.abc123');
       const run = spawnSync('bash', ['-c', script], { cwd: dir, encoding: 'utf8', timeout: 10_000 });
       expect(run.status).toBe(0);
       expect(run.stdout).toContain('REMOVED: test/new dup.test.ts');
       expect(run.stdout).toContain('REVERT_HUNK: test/kept.test.ts');
+      expect(run.stdout).toContain('SKIPPED (outside repo): ../outside.test.ts');
       expect(fs.existsSync(path.join(dir, 'test/new dup.test.ts'))).toBe(false);
       expect(fs.existsSync(path.join(dir, 'test/kept.test.ts'))).toBe(true);
+      expect(fs.existsSync(list)).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

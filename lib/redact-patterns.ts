@@ -65,7 +65,7 @@ export interface RedactPattern {
    * (crypto wallets), RFC1918-exclusion (public IPs), etc. Receives the
    * matched secret span (group 1 or match[0]) and the full match array.
    */
-  validate?: (span: string, match: RegExpExecArray) => boolean;
+  validate?: (span: string, match: RegExpExecArray, opts?: { sourcePath?: string }) => boolean;
   /**
    * Proximity requirement: the pattern only counts if `nearRegex` also matches
    * within `nearWindow` chars of the match. Used for AWS secret keys (need
@@ -321,6 +321,26 @@ export function isNumericMetadataValue(span: string, match: RegExpExecArray): bo
 }
 
 /**
+ * GitHub Actions run and job ids are bare 10-12 digit integers, so
+ * pii.phone.e164 reads them as phone numbers. A published eval report prints
+ * the run id inside the command the reader copies
+ * (`bun run eval:pass-rates --run 37235771700`), and redacting it breaks that
+ * command. Only the position decides: a run/job flag (`--run 37235771700`,
+ * `--job=111534615007`), a `gh run view|watch|rerun|download|cancel`
+ * argument, an `actions/runs/<id>` or `/job/<id>` URL segment, or a
+ * `run_id` / `job_id` key. The same digits anywhere else still report.
+ */
+const CI_ID_POSITION_BEFORE =
+  /(?:--(?:run|job)(?:-id)?(?:[ \t]+|[ \t]*=[ \t]*)|\bgh[ \t]+run[ \t]+(?:view|watch|rerun|download|cancel)[ \t]+|\/actions\/runs\/|\/jobs?\/|(?:run|job)_id["']?[ \t]*[:=][ \t]*["']?)$/i;
+export function isCiRunIdentifier(span: string, match: RegExpExecArray): boolean {
+  if (!/^\d+$/.test(span)) return false;
+  const input = match.input ?? "";
+  const { start } = spanBounds(match);
+  const lineStart = input.lastIndexOf("\n", start - 1) + 1;
+  return CI_ID_POSITION_BEFORE.test(input.slice(Math.max(lineStart, start - 80), start));
+}
+
+/**
  * A four-part version (MAJOR.MINOR.PATCH.BUILD: .NET assembly versions,
  * gstack's own VERSION) is byte-for-byte a dotted quad, and `1.128.1.0` is a
  * public address, so `"version": "1.128.1.0"` raised pii.ip_public on every
@@ -567,6 +587,33 @@ function isCallExpression(span: string, match: RegExpExecArray): boolean {
   const call = match.input.slice(start + span.indexOf("(")).split("\n", 1)[0];
   if (!call.includes(")") && call.trim() !== "(") return false;
   return !carriesSecretLiteral(call);
+}
+
+/**
+ * #3048: in a TypeScript/JSX file, an unquoted value after `:` is a type or an
+ * expression, never a string literal (`session: SessionState,`), and a JSX
+ * brace holding only names and property reads (`key={turn.requestId + turn.role}`)
+ * is an expression. Decided by file context, not by how the value looks:
+ * `API_KEY=VelvetRiverOrbitSunset;` in a .env or YAML file is still a literal.
+ * Without a known TS/JSX path nothing is exempt.
+ */
+const TS_SOURCE = /\.(?:[cm]?tsx?|jsx)$/i;
+const CODE_NAME_CHAIN = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*(?:<[\w$.,\s<>[\]|]*>)?(?:\[\])*$/;
+
+function isSourceExpression(span: string, match: RegExpExecArray, sourcePath: string | undefined): boolean {
+  if (!sourcePath || !TS_SOURCE.test(sourcePath)) return false;
+  const { start } = spanBounds(match);
+  const before = match.input[start - 1];
+  if (before === '"' || before === "'" || before === "`") return false;
+  if (span.startsWith("{")) {
+    const line = match.input.slice(start + 1).split("\n", 1)[0];
+    const close = line.indexOf("}");
+    if (close < 0 || /["'`]/.test(line.slice(0, close))) return false;
+    return line.slice(0, close).split("+").every(term => CODE_NAME_CHAIN.test(term.trim()));
+  }
+  const separator = match[0].slice(0, match[0].length - span.length).trimEnd().slice(-1);
+  if (separator !== ":") return false;
+  return CODE_NAME_CHAIN.test(span.replace(/[,;)=|]+$/, ""));
 }
 
 export const PATTERNS: RedactPattern[] = [
@@ -843,13 +890,14 @@ export const PATTERNS: RedactPattern[] = [
     // literal (`os.getenv("X", "<secret>")`). A literal appended to the read
     // itself (`process.env.X||"…"`) is not an exact read and still fires.
     // #2899: a function call assigned to the name is code, not a value (see
-    // isCallExpression).
-    validate: (span, match) =>
+    // isCallExpression). #3048: so is a TS/JSX type or expression (isSourceExpression).
+    validate: (span, match, opts) =>
       isCredentialShapedEnvName(match[0]) &&
       !isPlaceholderSpan(span) &&
       !/^\$\{?[A-Za-z_]/.test(span) &&
       !isBareEnvRead(span, match) &&
       !isCallExpression(span, match) &&
+      !isSourceExpression(span, match, opts?.sourcePath) &&
       shannonEntropy(span) >= 3.0,
   },
   {
@@ -892,14 +940,16 @@ export const PATTERNS: RedactPattern[] = [
     // A digit-only UUID's hyphen groups read as national phone formatting, and
     // so do a county tax-map parcel ID (see looksLikeParcelId), vector
     // coordinates (looksLikeDecimalCoordinates) and seed/nonce/timestamp JSON
-    // values (isNumericMetadataValue).
+    // values (isNumericMetadataValue), and GitHub Actions run and job ids in
+    // their id positions (isCiRunIdentifier).
     validate: (span, match) =>
       !insideUuid(match) &&
       span.replace(/\D/g, "").length >= 10 &&
       !looksLikeCompactTimestamp(span) &&
       !looksLikeParcelId(span, match) &&
       !looksLikeDecimalCoordinates(span) &&
-      !isNumericMetadataValue(span, match),
+      !isNumericMetadataValue(span, match) &&
+      !isCiRunIdentifier(span, match),
   },
   {
     id: "pii.ssn",

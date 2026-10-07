@@ -1544,11 +1544,13 @@ describe('SPEC_REVIEW_LOOP resolver', () => {
     for (const section of ["'The Assignment'", "'What I noticed about how you think'"]) expect(prompt).toContain(section);
     expect(prompt).toMatch(/never invent customer answers/i);
     expect(prompt).toMatch(/including minor findings/i);
-    expect(prompt).toMatch(/identical JSON/i);
+    expect(prompt).toContain('`OFFICE_HOURS_VERDICT round=1 sha256=<hash> path=<verdict path>`');
+    expect(prompt).toMatch(/run the `Seal:` command/);
+    expect(prompt).not.toMatch(/identical JSON/i);
     expect(prompt).toMatch(/classify every preceding finding/i);
     ordered(prompt, ['1. **Completeness**', '2. **Consistency**', '3. **Clarity**', '4. **Scope**', '5. **Feasibility**']);
     expect(prompt).toMatch(/distinguished from committed behavior/i);
-    expect(prompt).toContain('"version": 1');
+    expect(prompt).toContain('"version": 2');
     expect(prompt).toContain('"prior": []');
   });
 
@@ -1556,7 +1558,8 @@ describe('SPEC_REVIEW_LOOP resolver', () => {
     const output = render('office-hours');
     const step2 = output.slice(output.indexOf('**Step 2:'), output.indexOf('**Step 3:'));
     expectMentions(step2, [['before','dispatching','findings']], 'step2');
-    ordered(step2, ['gstack-office-hours-review check', '- PASS:', '- CONVERGENCE:', '- MAX_ITERATIONS: round 3', '- CONTINUE:', 'gstack-office-hours-review finalize --design']);
+    ordered(step2, ['gstack-office-hours-review check --receipt "<receipt line>"', 'mismatched receipt fails the check', '- PASS:', '- CONVERGENCE:', '- MAX_ITERATIONS: round 3', '- CONTINUE:', 'gstack-office-hours-review finalize --design']);
+    expectMentions(step2, [['fix only the blocking findings'], ['do not edit for minor findings']], 'step2');
     expectMentions(step2, [['do not','re-dispatch','again']], 'step2');
     expectMentions(step2, [['do not','generated','section']], 'step2');
     expect(step2.slice(step2.indexOf('finalize --design'))).toMatch(/existing user approval/i);
@@ -2113,9 +2116,18 @@ describe('preamble routing injection (bin/gstack-skill-start emission layer)', (
     expect(routingBlock).not.toContain('invoke checkpoint');
   });
 
-  test('routing section uses soft "when in doubt" policy, not hard "ALWAYS invoke"', () => {
-    expect(routingBlock).toContain('When in doubt, invoke the skill');
+  test('routing section routes only to available skills, without "when in doubt" over-triggering (#3018)', () => {
+    expect(routingBlock).toContain("Route only to skills in the session's available-skills list");
+    expect(routingBlock).not.toContain('When in doubt');
     expect(routingBlock).not.toContain('Do NOT answer directly');
+  });
+
+  test('root router skips routes to skills that are not loaded and says when not to invoke (#3018)', () => {
+    const router = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
+    expect(router).toContain('Route only to skills in your available-skills list');
+    expect(router).toContain('skip it, never try to invoke it');
+    expect(router).toContain('Answer directly when\nno skill matches');
+    expect(router).not.toContain('When in doubt, invoke the skill');
   });
 });
 
