@@ -160,7 +160,11 @@ the readiness dashboard and the PR body, and never count it as a pass.
   cell `| P1 |`. P0 and P1 block; P2 and P3 are advisory. A P0-P3 token in that
   label position that none of these forms reads (`## P1/P2 findings`) makes the
   review [`unverified`](#outside-review-unparsed-severity), never `clean`. Code
-  fences and inline code are quotes, not labels.
+  fences and inline code are quotes, not labels. A fence that never closes
+  still hides its text from the evidence for `clean`, but after its opening
+  line a P0 or P1 label (or a Critical or High word) and a last
+  `Verdict: not ready` still block, and an unreadable label still makes the
+  review `unverified`.
 - **Severity words in label position.** `Severity: High`, `Priority: low`, a
   line that starts with `High:`, `High —`, `[High]` or `**High**` (after an
   optional heading, bullet or number), a bold `**High**` anywhere, or a table
@@ -1105,6 +1109,28 @@ conflict yourself instead, finish or abort your merge (`git -C '<dir>' merge
 --abort`, `git -C '<dir>' checkout -- <file>`); gstack retries at the next
 check.
 
+<a id="auto-update-tracked-by-project"></a>
+### `gstack auto-update: update held (tracked-by-project: ...)` / `(version-reverted: ...)` / `gstack-upgrade: tracked-by-project: ... (UPGRADE_REFUSED)` / `gstack-upgrade: version-reverted: ... (UPGRADE_REFUSED)`
+
+**Meaning.** Your gstack install sits inside another git project, and that
+project has committed gstack's files as ordinary files. Every time you switch
+branches or check out files in that project, git puts its old copies of
+gstack's files back, so VERSION and other files fall behind the install's own
+HEAD while updates seem to succeed (#1022). `version-reverted` is the same
+symptom seen from the install: its VERSION disagrees with HEAD. Neither
+`gstack-upgrade`, `/gstack-upgrade` nor the auto-updater moves the install
+until it is fixed. A project that holds gstack as a git submodule is fine.
+`version-reverted` with no enclosing project means VERSION was edited by
+hand; only the `stash push` step below applies.
+
+**Fix.** Print the exact commands with
+`bash <install>/bin/gstack-ff-update --preflight <install>`. They do three
+things: untrack the install in the project (`git rm -r --cached`), add it to
+the project's `.gitignore`, and commit both on every branch you check out
+(or vendor gstack as a submodule instead). Then
+`git -C <install> stash push` puts the install's own files back and keeps
+any edit you made in the stash, and the next update proceeds.
+
 <a id="auto-update-autostash-unrecoverable"></a>
 ### `gstack auto-update: update held (autostash-unrecoverable: <reason>); your local edits are where they were and nothing was installed. Look first: git -C '<dir>' status --short. Fix now (...)` / `autostash-unrecoverable: <reason>`
 
@@ -1525,7 +1551,8 @@ yourself; or change the pin in the project.
 **Meaning.** An install-mode session start above the supported minimum found
 the checkout behind origin and could not fast-forward it: the checkout is
 dirty, diverged or pinned (`UPGRADE_REFUSED`), another live session holds a
-lease (`UPGRADE_BUSY`), or `bin/gstack-upgrade` is missing
+lease (`UPGRADE_BUSY`), `bin/gstack-upgrade` is missing, or the session is a
+`--for review-voice` reviewer, which never moves a checkout a lane may share
 (`UPGRADE_SKIPPED`). Nothing was changed, the doctor certified the installed
 revision, and the trailer stays `gstack: ok` with the notes above: a gap
 above the minimum is never a hard fail. The verdict records the installed
@@ -1546,6 +1573,8 @@ directory is not a gstack checkout, HEAD is detached or on another branch (a
 pin), a tracked file is modified, a local commit is not on the remote branch,
 the incoming release's Bun floor is above the Bun on PATH, or another updater
 holds `<state root>/.setup-lock`. It never stashes, resets or discards.
+A `tracked-by-project` or `version-reverted` cause has its own section:
+[an enclosing project tracks the install](#auto-update-tracked-by-project).
 
 **Fix.** Resolve the named cause with the printed command (commit or move the
 listed changes, check out the default branch, move local commits to another
@@ -1553,7 +1582,7 @@ branch), then re-run `bin/gstack-upgrade`. A reinstall that failed after the
 fast-forward is completed by the next run (`reinstall pending from <version>`).
 
 <a id="upgrade-busy"></a>
-### `gstack-upgrade: live gstack sessions hold this installation: pid <p> (<age>m), ...; nothing was changed; fix: ... (UPGRADE_BUSY)`
+### `gstack-upgrade: live gstack sessions hold this installation: pid <p> (<age>m), ...; nothing was changed; fix: ... (UPGRADE_BUSY)` / `gstack-upgrade: a shared harness (capy-server, pid <p>) holds a lease <n>m old; ... (UPGRADE_BUSY)`
 
 **Meaning.** Several agents share this checkout (Capy subagents on one
 machine, say). Each session start writes a workflow lease,
@@ -1566,20 +1595,27 @@ process has exited never blocks, and neither does a stale one: each lease
 records its process's start identity, so a pid reused after a reboot or a
 machine wake (GBRA-105's lease named pid 379, which had become dbus-daemon)
 is reclaimed instead of blocking. The upgrader's own session (the pid chain it
-runs under) never counts for `bin/gstack-upgrade` run by hand. A Capy install
+runs under) never counts for `bin/gstack-upgrade` run by hand, except under a
+shared harness: on Capy every tool call of every session runs under one
+`capy-server`, so a `capy-server` lease in the caller's chain may be a
+sibling's. `bin/gstack-upgrade` counts it until it is 120 minutes old, counted
+from the last renewal by any session on the machine (`a shared harness
+(capy-server, pid <p>) holds a lease <n>m old; …`, GST-396). A Capy install
 in install mode (`bin/gstack-capy-session`) counts it while that lease is under
 120 minutes old: an install run from inside a workflow that holds the lease
 (/ship's docs step, #3571) prints `SELF_UPGRADE: skipped (a gstack run in this
 session holds a workflow lease on this installation: pid <p> (<age>m
 <command>), so the upgrade waits until the lease is 120 minutes old; fix:
-<checkout>/bin/gstack-upgrade once the run ends (UPGRADE_BUSY))` and leaves the
+<checkout>/bin/gstack-upgrade once the lease is 120 minutes old, or
+GSTACK_UPGRADE_FORCE=1 <checkout>/bin/gstack-upgrade when no other session uses
+this checkout (UPGRADE_BUSY))` and leaves the
 checkout where the run started. Each `gstack-skill-start` renews the lease.
 
 **Fix.** Wait for those sessions to finish (`bin/gstack-lease list` shows
 every lease with its age and `alive|dead|stale`; a holder is named as
 `pid <p> (<age>m <command>)`), then re-run `bin/gstack-upgrade`. For the
-session's own run, run the printed `bin/gstack-upgrade` after the run ends.
-When you know they are idle, `GSTACK_UPGRADE_FORCE=1 bin/gstack-upgrade`
+session's own run, or a shared-harness lease, re-run once the lease is 120
+minutes old. When you know no other session uses the checkout, `GSTACK_UPGRADE_FORCE=1 bin/gstack-upgrade`
 proceeds. At a Capy session start the same refusal appears as
 `SELF_UPGRADE: skipped (live gstack sessions hold this installation: ...)`,
 the doctor adds `WARN behind — … (UPGRADE_BUSY)` and the trailer stays
@@ -2509,11 +2545,22 @@ section instead of overwriting it: a section in the file replaces the
 same-titled section (title compared case-insensitively), the
 ````gstack-ship-receipt```` block is a section of its own so a receipt
 rewrite replaces only the receipt, sections the file does not rewrite stay in
-place, new sections are appended after them, and a current body with no
-`## ` headings is kept as the leading text. One stderr line names what was
-replaced, kept and added (`gstack-post: pr-body merged by section: replaced
-What changed; kept ship receipt, Why, Approvals; added Tests`). A body file
-holding only its first section therefore no longer wipes the rest of the PR.
+place, and new sections are appended after them. The text above the first
+`## ` heading belongs to the file when the file is a full post: a
+receipt block above its first `## ` section, as /ship composes it. Then the current body's text there (the opening lines, and
+any lines between the receipt and the first heading, or the whole body when it
+has no `## ` heading) is replaced by the file's own text above its first
+heading, or dropped when the file has none. A partial post (`## ` sections
+with no receipt above them, such as a lane posting `## Screenshots`) and a
+file with no `## ` section (a receipt-only or text-only post) leave that text alone, so a human
+intro or a `Review-loop exception:` line under the receipt survives; only
+opening lines the file brings of its own replace the PR's opening lines. One stderr line names what was replaced, kept, added
+and dropped, a dropped piece with its first line, or with that line withheld
+when the redaction scan flags it (`gstack-post: pr-body merged
+by section: replaced What changed; kept ship receipt, Why, Approvals; added
+Tests; dropped leading text ("Draft from gh pr create")`). A body file holding
+only its first section therefore no longer wipes the rest of the PR, and an
+old intro no longer sits above a fresh /ship body.
 The redaction scan runs on the merged bytes, so a MEDIUM or HIGH finding can
 come from a kept section; the `RULE:` line's `LINE:` is in the merged text.
 When the current body cannot be read (`gh pr view --json body` fails) nothing
@@ -3270,8 +3317,9 @@ repository's lockfile), then rerun `gstack-regen check` or the pre-gate.
 **Meaning.** `.gstack/pregate.json` has an unknown key, a wrong type, a glob
 that escapes the repository, a runner without `{files}`, or `secrets` in `warn`.
 The user-owned `<state root>/projects/<slug>/pregate.json` also refuses when it
-sets `sealed` or `price_file` (both are read only from the base branch's copy)
-or exists but cannot be read (a dangling symlink on its path counts).
+sets `sealed`, `price_file`, a non-empty `run_profiles` or `remote_gate_runs`
+(all read only from the base branch's copy) or exists but cannot be read (a
+dangling symlink on its path counts).
 
 **Fix.** `gstack-pregate validate`. `secrets` and required-lane obligations
 cannot be downgraded; every other check id in `warn` is honoured only from the
@@ -3360,7 +3408,10 @@ for files with no behaviour) under `dependencies` in `.gstack/pregate.json` (or 
 Other non-Markdown documentation goes in `empty_lanes` on the base branch.
 Dart files under `integration_test/` or `test_driver/` need a device, so pregate
 never runs them: declare `"**/integration_test/**": []` (and
-`"**/test_driver/**": []`) under `dependencies` and let CI run them.
+`"**/test_driver/**": []`) under `dependencies` on the base branch and let CI run
+them. A `[]` declaration added only on the branch is refused under
+`--policy-from head` ([`PREGATE_HEAD_POLICY_LOOSENS`](#pregate-head-policy-loosens)),
+so land it in its own PR first.
 With no policy anywhere (no base copy, no user-owned file) an unmapped file is
 the warning [`PREGATE_NO_POLICY`](#pregate-no-policy) with a starter policy
 printed, not this error; `gstack-pregate init` writes that draft and lists the
@@ -3384,13 +3435,33 @@ two routes:
 
 1. Land the policy change in its own PR first (the reviewed route), then merge
    the base into this branch and rerun.
-2. Rerun with `--policy-from head --allow-repo-commands`. The run reads the
-   branch's copy and its record says `policy head (unreviewed)`, so a
-   reviewer sees that the gate ran under a policy nobody has reviewed yet;
-   `gstack-ship-queue` never accepts a head-policy run as a remote mirror.
+2. Rerun with `--policy-from head --allow-repo-commands` (in /ship,
+   `gstack-ship-preflight --tests-only --policy-from head`). The run uses the
+   trusted policy plus the lanes the branch adds, and its record says
+   `policy head (unreviewed)`, so a reviewer sees that the gate ran under a
+   policy nobody has reviewed yet; `gstack-ship-queue` never accepts a
+   head-policy run as a remote mirror. A head policy that does anything but add
+   test lanes is refused ([`PREGATE_HEAD_POLICY_LOOSENS`](#pregate-head-policy-loosens)).
 
-An allowlist entry the branch adds to its own `pregate.json` is read the same
-way: it clears a finding only once it is on the base.
+An allowlist entry or a `[]` declaration the branch adds to its own
+`pregate.json` counts only once it is on the base.
+
+<a id="pregate-head-policy-loosens"></a>
+### `PREGATE_HEAD_POLICY_LOOSENS`
+
+**Meaning.** Under `--policy-from head`, the branch's `.gstack/pregate.json`
+does more than add test lanes over the trusted policy (the base branch's copy,
+or the user-owned file when the base has none). The message lists each
+difference: a `dependencies` glob removed, a test dropped from a glob, a new
+`[]` declaration, a deleted file, or another key (`runner`, `guards`, `warn`,
+`allowlist`, `timeout_s`, `remote_gate`, ...) that differs. A branch behind
+its base is compared with the copy at its merge base, so a lane the base added
+later is not a difference. Nothing ran and no record was written.
+
+**Fix.** Keep every key of the trusted policy as it is and only add
+`dependencies` globs with at least one test, or tests on an existing glob. Land
+any other change, a `[]` declaration included, in its own PR on the base branch
+first, then merge the base into this branch and rerun.
 
 <a id="pregate-lane-failed"></a>
 ### `PREGATE_LANE_FAILED`
@@ -3421,8 +3492,7 @@ the lane log, then rerun or split the selection. A tool missing from PATH is
 <a id="pregate-stalled"></a>
 ### `PREGATE_STALLED`
 
-**Meaning.** A test command the lanes check (or a guard, or the `--remote`
-gate) launched wrote nothing to its log for the stall timeout (default 300 s,
+**Meaning.** A test command the lanes check (or a guard) launched wrote nothing to its log for the stall timeout (default 300 s,
 `stall_timeout_s` in the base branch's `.gstack/pregate.json` or the user-owned file, or
 `--stall-timeout`). pregate killed its process group and names the last test
 file started. The check is incomplete, never pass.
@@ -3431,7 +3501,9 @@ file started. The check is incomplete, never pass.
 child, a server that never exits, a synchronous wait), fix it and rerun
 `gstack-pregate --stage tests`. A test that is legitimately quiet for longer
 needs a larger `--stall-timeout`; `0` disables the stall kill and leaves only
-`--timeout`.
+`--timeout`. The `--remote` gate never stalls: it is bounded by `--timeout`
+(else `timeout_s`), so a gate that waits on CI needs a timeout long enough for
+the CI run.
 
 <a id="pregate-receipt-invalid"></a>
 ### `PREGATE_RECEIPT_INVALID`
@@ -3442,6 +3514,12 @@ names another tree than the one `pregate.json` tested, reports 0 tests, or
 reports failures. The obligation stays uncleared. A run URL alone never clears
 this obligation; a `test_backend/<backend>` obligation takes a run URL, recorded
 as attested rather than validated.
+
+`gstack-pregate clear --run <id|url>` refusals use this code too: the line
+reads `gstack-pregate clear: receipt refused — REUSE: refused reason=<code> —
+…`, and the GitHub Actions runs offered did not verify against the base
+branch's `run_profiles`. Each reason code and
+what it checks is listed in [run evidence](pregate.md#run-evidence).
 
 Another tree is accepted in exactly one case: it differs from `pregate.json`'s
 tree only in the repo's stamp rule (`.gstack/ship-policy.json` on the base
@@ -3538,7 +3616,9 @@ run, named by `workflow.yml/job`, or the small-machine `pregate.json/remote_gate
 tier) has no receipt; or a `remote_gate` receipt accepted from a stamp-only
 predecessor tree records `accepted_for` as a tree other than `pregate.json`'s,
 or a `gated_tree` other than its receipt string's `tree=` (the file was edited
-after `clear`), so it clears nothing here.
+after `clear`), so it clears nothing here; or a `clear --run` receipt names
+another tree than `pregate.json`'s with no substitution recorded (`run
+receipt(s) verified for another tree`).
 
 **Fix.** Dispatch that job, then
 `gstack-pregate clear --remote <workflow.yml/job> --run-url <url>` (or
@@ -3546,7 +3626,11 @@ after `clear`), so it clears nothing here.
 `clear --remote pregate.json/remote_gate --receipt <gate output>`: the gate's
 own run on this tree, or a run on a predecessor tree that differs only by the
 repo's stamp rule ([gate ahead of the stamp](pregate.md#remote-gate-stamp-only));
-`verify` then prints the accepted substitution on its ok line. The ship receipt
+`verify` then prints the accepted substitution on its ok line. When the base
+branch declares run profiles, `clear --remote <lane> --run <id|url>` clears a
+lane from verified GitHub Actions runs on this tree (for the remote gate, one
+run per `remote_gate_runs` profile, with `--allow-repo-commands`); a profiled
+lane refuses `--bundle-lane` ([run evidence](pregate.md#run-evidence)). The ship receipt
 carries each obligation with its receipt.
 
 <a id="issue-unreadable"></a>
@@ -3597,13 +3681,58 @@ parentheses; grep the code.
 ### `PREREG_INCOMPLETE`
 
 **Meaning.** `gstack-eval-plan prereg --check <file>` found a required
-preregistration section missing or empty: `## Bars`, `## Arms`, `## Decoys`,
-`## Stop rules` or `## Held-out exposure` (every held-out set the plan
-touches, its prior exposure and the reservation on it).
+preregistration section missing or empty: `## Bars`, `## Arms`,
+`## Comparison`, `## Decoys`, `## Stop rules` or `## Held-out exposure`
+(every held-out set the plan touches, its prior exposure and the reservation
+on it). It also fires when `## Comparison` has no `stack:` line, a value other
+than `loaded` or `none`, or `stack: none` without a `why:` line, and when a
+`## Diagnostics` declaration is malformed.
 
 **Fix.** Fill the named sections before any priced call. A plan that cannot
 name its stop rule or its held-out exposure is not preregistered; the pilot
 refuses to start without a passing check.
+
+<a id="prereg-no-gstack-arm"></a>
+### `PREREG_NO_GSTACK_ARM`
+
+**Meaning.** The preregistration says `stack: loaded` (some arm loads gstack or
+another skill stack) and its `## No-gstack arm` section is missing, lacks one
+of `arms:`, `inputs:`, `prompt:`, `panel:` or `report:`, lists an arm that
+is not a `<model>#no-gstack` Arms line, or leaves a model in the comparison
+without its own no-gstack arm. Arms match on whole identities, so
+`claude-opus-5#no-gstack` does not cover `claude-opus-5-5`.
+
+**Fix.** Add one `<model>#no-gstack` line per model under `## Arms`, list them
+on the `arms:` line, and fill the other four keys: the same inputs, a plain
+prompt with no skill text, the same panel and judge, and where the result row
+goes beside the variants. When no arm loads a skill stack, write
+`stack: none` with a `why:` line instead. The rule is in
+[docs/TESTING_INTERNALS.md](TESTING_INTERNALS.md#no-gstack-arm).
+
+<a id="eval-report-no-gstack-row"></a>
+### `EVAL_REPORT_NO_GSTACK_ROW`
+
+**Meaning.** `gstack-eval-plan results --check <prereg> <results>` found no
+single markdown table in the results file with a filled row for every arm
+identity the preregistration's Arms section lists. Usually the
+`<model>#no-gstack` row is missing, sits in a separate table from its
+variants, or holds only placeholders (`-`, `n/a`, `tbd`). It also fires when
+the preregistration itself fails `prereg --check`.
+
+**Fix.** Put one row per arm identity, each no-gstack arm beside its variants,
+in one table, and rerun the check. Publish no number before it prints
+`RESULTS: ok`. A preregistration with `stack: none` needs no row. The rule is
+in [docs/TESTING_INTERNALS.md](TESTING_INTERNALS.md#no-gstack-arm).
+
+<a id="eval-arm-duplicate"></a>
+### `EVAL_ARM_DUPLICATE`
+
+**Meaning.** `gstack-eval-plan pilot start --arms` named the same arm identity
+twice, so two arms would share one set of pilot attempts.
+
+**Fix.** Give each arm its own identity: `<model>` or `<model>#<loadout>`, for
+example `claude-opus-5-5` and `claude-opus-5-5#no-gstack`. Nothing was
+reserved.
 
 <a id="eval-price-missing"></a>
 ### `EVAL_PRICE_MISSING`
@@ -4486,6 +4615,12 @@ GitHub accepted the dispatch). It is never dispatched again blindly.
 run carrying the nonce, or marks the dispatch absent; only then does
 `train build --train <nonce>` dispatch it again, under the same nonce.
 
+On a train with `gates`, a workflow is sent at most twice per prefix. When
+neither send shows a run carrying the nonce, `train build` (and `train watch`)
+refuses with this code instead of sending a third: run `train doctor` (a
+run-name without the nonce is the usual cause), fix the workflow on the base
+branch, then build a new train.
+
 <a id="queue-train-waiting"></a>
 ### `QUEUE_TRAIN_WAITING`
 
@@ -4506,9 +4641,12 @@ one-PR train.
 **Meaning.** The train's run (free tests, the full gate or the bisect) has
 not finished, so there is no verdict yet. The same code covers a `train watch`
 that reached its timeout, `verify --pr <n> --screen` on a screen run still
-going, `verify --post-merge` on checks that have not settled, and a
-`ready --dispatch-ci` workflow run still going at its `--timeout`; each prints
-the command to rerun as `NEXT:`.
+going, `verify --post-merge` on checks that have not settled, a
+`ready --dispatch-ci` workflow run still going at its `--timeout`, a `train
+build` or `train verdict` while another process holds the train's lease or
+runs one of its command gates, and a `train land` whose previous slot's
+post-merge checks have not settled; each prints the command to rerun as
+`NEXT:`.
 
 **Fix.** Rerun the printed `NEXT:` command later. Nothing is dispatched again
 while a run is pending.
@@ -4525,6 +4663,10 @@ record. An incomplete gate is never green.
 one re-dispatch EVAL_POLICY.infraRedispatch allows (`train rebuild --train
 <nonce> --infra`) and report both runs. Otherwise diagnose the run.
 
+On a train with `gates` it means a prefix gate is incomplete (a required job
+that was skipped or never ran, for example); the `PREFIX:` line names the
+run. `train rebuild` refuses, so diagnose that run and build a new train.
+
 <a id="queue-train-red"></a>
 ### `QUEUE_TRAIN_RED`
 
@@ -4535,6 +4677,11 @@ verdict.
 **Fix.** Bisect the red cases (`train bisect --train <nonce> --spend-cap
 <usd>`). After a rebuild's second red, route the cases to a repair lane.
 
+On a train with `gates` there is no bisect: T<i> is the first red prefix after
+a green one and every later prefix is red, so slot i is the culprit. The slots
+before it land (`train land`, or `train watch --land`), the culprit goes back
+to its lane, and `NEXT:` builds the rest into a new train.
+
 <a id="queue-train-red-on-main"></a>
 ### `QUEUE_TRAIN_RED_ON_MAIN`
 
@@ -4543,6 +4690,9 @@ included: main is broken, not the train's PRs.
 
 **Fix.** Fix forward on main first (a one-PR train), then rebuild this train
 unchanged.
+
+On a train with `gates`, no bisect runs: T0 (main) is red on its own gate run,
+or red on anything other than exactly slot 1's `FIXES_BASE_RED` cases.
 
 <a id="queue-train-unattributed"></a>
 ### `QUEUE_TRAIN_UNATTRIBUTED`
@@ -4553,6 +4703,10 @@ monotone. One trial per prefix cannot tell a flake from a break.
 **Fix.** All green: the one preregistered rebuild (`train rebuild --train
 <nonce>`), reporting both runs. Any other pattern: a repair lane, then a
 changed train once the repair merges.
+
+On a train with `gates` it means a red prefix is followed by a green one.
+Repair the red cases or seat the PRs in another order (`--order`); `train
+rebuild` refuses, so this train never runs again unchanged.
 
 <a id="queue-train-bisect-capped"></a>
 ### `QUEUE_TRAIN_BISECT_CAPPED`
@@ -4623,6 +4777,83 @@ ran with `--no-fetch`, verify freezes as before (`QUEUE_TRAIN_FROZEN`). A queue
 another machine already froze stays frozen; the refusal prints its freeze
 lines.
 
+<a id="queue-train-base-red"></a>
+### `QUEUE_TRAIN_BASE_RED`
+
+**Meaning.** A conditional (base-red) PR or its fixer cannot ride this train.
+The train's policy has no `gates`, the fixer is missing or not at slot 1, two
+PRs declare `FIXES_BASE_RED`, the condition expired, or the fixer's own prefix
+T1 is red.
+
+**Fix.** Seat the fixer at slot 1 of a train with gates and build again. A red
+fixer prefix is the fixer lane's to repair; an expired condition is classified
+again by its lane ([ship-policy.md](ship-policy.md#train-gates)).
+
+<a id="queue-train-spend-cap"></a>
+### `QUEUE_TRAIN_SPEND_CAP`
+
+**Meaning.** A command gate's next Ubicloud run would pass that gate's spend
+cap for the train, or `UBI_OWNER` is not set. Nothing more ran; finished runs keep
+their outcomes.
+
+**Fix.** Set `UBI_OWNER` to your thread code and rerun `train build --train
+<nonce>`. For the cap, raise `spend_cap_usd` (or lower `timeout_sec`) on the
+base branch, then build a new train on the new main: the policy commit moves
+main past T0.
+
+<a id="queue-train-land-method"></a>
+### `QUEUE_TRAIN_LAND_METHOD`
+
+**Meaning.** This slot must land through an update commit (stamped train,
+strict protection, conditional PR, or release-file resolution), and
+`train.land.merge_method` is `rebase`, which would replay commits instead of
+landing the gated tree.
+
+**Fix.** Set `merge_method` to `squash` or `merge` on the base branch, then
+build a new train on the new main: the policy commit moves main off this
+train's prefixes.
+
+<a id="queue-train-init-refused"></a>
+### `QUEUE_TRAIN_INIT_REFUSED`
+
+**Meaning.** Open PRs bump the version and the policy neither declares
+`changelog_fragments` nor stamps at merge, so every train merge would conflict
+on the version. The `VERSION_PRS:` line names them.
+
+**Fix.** Adopt `changelog_fragments` (recommended) or `queue_mode:
+stamp-at-merge` on the base branch, then run `train init` again.
+
+<a id="queue-train-doctor-findings"></a>
+### `QUEUE_TRAIN_DOCTOR_FINDINGS`
+
+**Meaning.** The live train block and the repository disagree. Each
+`FINDING:` line names one problem: a gate workflow missing, without the
+`nonce` input or run-name, a required job it does not define, a global
+concurrency group, a push trigger on `train-prefix/` refs, a workflow never
+green on the base, a command gate cap below what a full train reserves, a
+merge method GitHub refuses, or `rebase` as the merge method.
+
+**Fix.** Fix each finding on the base branch (`train init` prints the
+snippet), then run `train doctor` again.
+
+<a id="queue-base-red-no-train"></a>
+### `QUEUE_BASE_RED_NO_TRAIN`
+
+**Meaning.** `ready --base-red` or `--fixes-base-red` needs a train that gates
+every prefix, and the base policy has no train block with `gates`.
+
+**Fix.** Wait for the base to pass the cases and run `/ship --resume`, or turn
+on a train with gates on the base branch.
+
+<a id="ship-base-red-fixer"></a>
+### `SHIP_BASE_RED_FIXER`
+
+**Meaning.** `ready --base-red` names no fixer, the receipt carries no
+`base_red` block, or the condition was classified on an older base.
+
+**Fix.** Pass `--fixer <pr>` naming the PR whose merge fixes the cases; after
+a base move, run `gstack-base-red classify` and /ship again first.
+
 <a id="queue-train-frozen"></a>
 ### `QUEUE_TRAIN_FROZEN`
 
@@ -4681,6 +4912,69 @@ written for the pinned head is the binding one and `verify --train` accepts it.
 **Fix.** Rerun /ship on the current head so the receipt names it, then rerun
 `gstack-ship-queue ready --pr <n> --screen|--no-screen`. A lane never stamps
 to fix this: the stamp comes only when the slot is called.
+
+<a id="queue-receipt-conditional"></a>
+### `QUEUE_RECEIPT_CONDITIONAL`
+
+**Meaning.** The PR body's ship receipt carries a `base_red` block: /ship's
+Step 5 failed on cases `gstack-base-red` proved are the base branch's own, so
+/ship paused before READY ([base_red](ship-policy.md#base-red)). Nothing
+READYs, trains, carries or merges on it, except on a train with `gates`, where
+`ready --base-red --fixer <pr>` READYs it to ride behind its fixer at slot 1
+([base-red PRs](ship-policy.md#train-gates)).
+
+**Fix.** Wait for the base to pass those cases (`gstack-base-red wait --pause
+<file>`), then run `/ship --resume <record>`, which reruns Step 5 and rewrites
+the receipt without `base_red`.
+
+<a id="base-red-unconfigured"></a>
+### `BASE_RED_UNCONFIGURED`
+
+**Meaning.** `origin/<base>`'s ship policy has no `base_red` block, so
+`gstack-base-red` cannot reproduce a failure there and every Step 5 failure
+stays in-branch. An invalid ship policy on the base counts the same (the
+invalid key is printed first). `wait` prints it when the block was removed
+after the pause.
+
+**Fix.** Use /ship's usual triage. To let /ship pause on a red base, add
+`base_red` to `.gstack/ship-policy.json` on the base branch
+([base_red](ship-policy.md#base-red)).
+
+<a id="base-red-unnamed"></a>
+### `BASE_RED_UNNAMED`
+
+**Meaning.** The failure evidence names fewer failures than the lane reported,
+so an unnamed failure could be the PR's.
+
+**Fix.** List every failing test (`id`, `file`, first error line as
+`signature`) with `total` equal to the lane's failure count, and classify again.
+
+<a id="base-red-repro-error"></a>
+### `BASE_RED_REPRO_ERROR`
+
+**Meaning.** `gstack-base-red` could not run the reproduction: the base or HEAD
+did not resolve, the PR's diff was unreadable, the scratch checkout failed, or
+`setup` exited non-zero. Every failure stays in-branch.
+
+**Fix.** Read the printed detail. Fetch the base, or fix the `base_red.setup`
+command on the base branch, then classify again.
+
+<a id="base-red-pause-expired"></a>
+### `BASE_RED_PAUSE_EXPIRED`
+
+**Meaning.** The pause is older than 24 hours, so its classification is stale.
+
+**Fix.** Report the paused PR to its Captain or owner, then start /ship again on
+the current base; it classifies afresh.
+
+<a id="base-red-wait-timeout"></a>
+### `BASE_RED_WAIT_TIMEOUT`
+
+**Meaning.** No new base head passed the paused cases before `gstack-base-red
+wait`'s `--timeout`.
+
+**Fix.** Run `wait` again (the pause stays valid until it expires), or find who
+owns the base's red.
 
 <a id="queue-receipt-depth-raised"></a>
 ### `QUEUE_RECEIPT_DEPTH_RAISED`
@@ -4819,7 +5113,10 @@ or `--timeout` (default 2700 s) passes, prints `POST_MERGE: <sha12>
 green|red|pending|none (passed= failed= pending= skipped=)` and one
 `CHECK: <name> <conclusion|status>` line per check, and a timeout is
 `QUEUE_TRAIN_PENDING` with the same command as `NEXT:`, so rerunning it after
-an interruption continues the watch.
+an interruption continues the watch. With `--checks <a,b>` (a workflows
+gate's `post_merge_checks`, which `train land` and `train watch --land` pass),
+each named check must also succeed; one that never ran is `QUEUE_TRAIN_PENDING`
+at the timeout.
 
 **Fix.** Read the red run named on its `CHECK:` line. Repair on a new PR or
 roll back the merge; `gstack-ship-queue train status` names the freeze if the
@@ -5058,7 +5355,8 @@ body that names a counter the receipt records (`passes=3` against
 `review_loop.passes: 2`, `1 deferred` against `deferred: 2`, `passed: 40`
 against `gate.passed: 41`) with a different value. The receipt is written from
 the run; the prose was typed, so a reader of the body would learn a number the
-run did not produce. The `PROSE:` line names each field with both values.
+run did not produce. The `PROSE:` line names each field with both values. The
+`## Approvals` table `gstack-approvals` renders is never read as a claim.
 
 **Fix.** Correct the body to the receipt's number. When the receipt is the
 stale one (the run was repeated), rerun `/ship` so the receipt is rewritten

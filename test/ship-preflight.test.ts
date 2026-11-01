@@ -192,3 +192,60 @@ describe('gstack-ship-preflight --audit (GSTA-167 variant G)', () => {
     expect(f.run(PREFLIGHT, ['--audit', '--base', 'main']).status).toBe(2);
   });
 });
+
+describe('GSTA-167 part 4a: RUNTIME_LINES and REVIEW_DEPTH share one owner', () => {
+  // Value: protects=preflight's RUNTIME_LINES equals gstack-review-plan's runtime_lines on a mixed diff (code, a data file code
+  //   names, one nothing names, config JSON, YAML); fails_when=the two counts disagree, as preflight's own DATA_PATH did; seam=classifyDiff
+  test('a mixed diff counts the same runtime lines in preflight and the review plan', () => {
+    const f = fx({}, {
+      'src/b.ts': 'export const b = 2;\n', 'src/load.ts': "export const u = 'used.json';\n", 'data/used.json': '[1,\n2,\n3]\n',
+      'data/rows.json': Array.from({ length: 100 }, (_, i) => `{"i":${i}}`).join('\n') + '\n', 'config/app.json': '{"a":1}\n', 'deploy.yaml': 'a: 1\nb: 2\n',
+    });
+    const preflight = lineOf(f.run(PREFLIGHT, ['--base', 'main']).stdout, 'RUNTIME_LINES');
+    const plan = JSON.parse(f.run(path.join(path.dirname(PREFLIGHT), 'gstack-review-plan'), ['--base', 'main', '--json', '--gate-tagged', '0']).stdout);
+    expect(plan.runtime_lines).toBe(1 + 1 + 3 + 1 + 2);
+    expect(preflight).toMatch(new RegExp(`^RUNTIME_LINES: ${plan.runtime_lines} `));
+    expect(plan.consumed).toEqual(['data/used.json']);
+  });
+});
+
+describe('gstack-ship-preflight Step 5 pregate: head policy and timeout_s (GST-419, GST-420)', () => {
+  const POLICY = { runner: 'node --test {files}', dependencies: { 'README.md': [], 'CHANGELOG.md': [] } };
+  const PASSING = "const test = require('node:test');\ntest('x', () => {});\n";
+  const base = (extra: Record<string, unknown> = {}) => ({ '.gstack/pregate.json': JSON.stringify({ ...POLICY, ...extra }) + '\n', 'test/x.test.js': PASSING });
+  // Value: protects=a branch that adds the lane for a file it touches passes Step 5 through preflight with --policy-from head; fails_when=preflight drops the flag and pregate reports PREGATE_NO_LANE;
+  //   why_new=GEVA-2 (gstack-evals#93) had to call runLanes by hand; seam=gstack-pregate --policy-from head; no_claim=queue treatment of head records
+  test('--policy-from head reaches pregate: the branch lane counts, and without the flag PREGATE_DETAIL names the missing lane', () => {
+    const f = fx(base(), { 'src/a.ts': 'export const a = 2;\n', '.gstack/pregate.json': JSON.stringify({ ...POLICY, dependencies: { ...POLICY.dependencies, 'src/a.ts': ['test/x.test.js'] } }) + '\n' });
+    const viaBase = f.run(PREFLIGHT, ['--tests-only', '--base', 'main', '--lane', LANE]);
+    expect(viaBase.status).toBe(3);
+    expect(lineOf(viaBase.stdout, 'PREGATE_DETAIL')).toContain('with no test lane: src/a.ts');
+    expect(lineOf(viaBase.stdout, 'PREGATE_DETAIL')).toContain('(PREGATE_NO_LANE');
+    const viaHead = f.run(PREFLIGHT, ['--tests-only', '--base', 'main', '--policy-from', 'head', '--lane', LANE]);
+    expect(lineOf(viaHead.stdout, 'PREGATE')).toMatch(/^PREGATE: pass/);
+    expect(viaHead.status).toBe(0);
+    expect(lineOf(viaHead.stdout, 'LANE')).toMatch(/^LANE: tests pass /);
+  });
+
+  // Value: protects=the head-policy rule holds through preflight: a head policy that removes a lane is refused and named; fails_when=preflight passes or hides the refusal as unreadable;
+  //   why_new=preflight now forwards --policy-from; seam=PREGATE_HEAD_POLICY_LOOSENS; no_claim=none
+  test('--policy-from head with a head policy that removes a lane stops with PREGATE_HEAD_POLICY_LOOSENS', () => {
+    const f = fx(base(), { 'src/a.ts': 'export const a = 2;\n', '.gstack/pregate.json': JSON.stringify({ ...POLICY, dependencies: { 'src/a.ts': ['test/x.test.js'] } }) + '\n' });
+    const r = f.run(PREFLIGHT, ['--tests-only', '--base', 'main', '--policy-from', 'head', '--lane', LANE]);
+    expect(r.status).toBe(3);
+    expect(lineOf(r.stdout, 'PREGATE')).toBe('PREGATE: refused (PREGATE_HEAD_POLICY_LOOSENS)');
+    expect(lineOf(r.stdout, 'PREGATE_DETAIL')).toContain('dependencies["README.md"] is removed');
+    expect(r.stdout).not.toContain('LANE: tests');
+  });
+
+  // Value: protects=the repo's timeout_s reaches preflight's pregate and the cause is printed; fails_when=preflight's pregate runs at the 600 s default or prints only the verdict;
+  //   why_new=HARN-1 (HARN-12) lanes of ~780 s were always PREGATE: incomplete under preflight; seam=gstack-pregate timeout_s; no_claim=the finish fallback, which runs the same pregate default
+  test('timeout_s from the base policy bounds Step 5 pregate and PREGATE_DETAIL names it', () => {
+    const slow = "const test = require('node:test');\ntest('slow', async () => { await new Promise(r => setTimeout(r, 4000)); });\n";
+    const f = fx(base({ timeout_s: 2 }), { 'test/slow.serial.test.js': slow });
+    const r = f.run(PREFLIGHT, ['--tests-only', '--base', 'main', '--lane', LANE]);
+    expect(r.status).toBe(3);
+    expect(lineOf(r.stdout, 'PREGATE')).toMatch(/^PREGATE: (tests |all )?incomplete/);
+    expect(lineOf(r.stdout, 'PREGATE_DETAIL')).toContain('timed out after 2000 ms (timeout_s from origin/main');
+  });
+});

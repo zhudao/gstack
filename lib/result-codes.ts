@@ -13,6 +13,7 @@
 import { RELEASE_RESULT_CODES } from './result-codes-release';
 import { CAPY_RESULT_CODES } from './result-codes-capy';
 import { BUDGET_RESULT_CODES } from './result-codes-budget';
+import { EVAL_RESULT_CODES } from './result-codes-eval';
 
 export interface ResultCode {
   /** Stable `<a id>` in docs/troubleshooting.md. */
@@ -435,11 +436,6 @@ export const RESULT_CODES = {
   },
   // PR E (multi-agent wave): gstack-eval-plan, gstack-lane-check, gstack-evidence verify,
   // gstack-owner-brief, gstack-contributor-mode, gstack-banned-terms.
-  PREREG_INCOMPLETE: {
-    anchor: 'prereg-incomplete',
-    summary: 'the preregistration file lacks a required section or a section is empty',
-    fix: 'fill every section `gstack-eval-plan prereg --check` names (bars, arms, decoys, stop rules, held-out exposure) before any priced call',
-  },
   EVAL_PRICE_MISSING: {
     anchor: 'eval-price-missing',
     summary: 'an arm names a model with no row in the price table, so its admission cannot be estimated',
@@ -593,13 +589,13 @@ export const RESULT_CODES = {
   // Field wave lane A (items 1-4): gstack-upgrade, the Capy skill bootstrapper, install admission.
   UPGRADE_REFUSED: {
     anchor: 'upgrade-refused',
-    summary: 'bin/gstack-upgrade changed nothing: the checkout is dirty, diverged, pinned (detached or off the remote default branch), not a gstack checkout, or the incoming release holds',
+    summary: 'bin/gstack-upgrade changed nothing: the checkout is dirty, diverged, pinned (detached or off the remote default branch), not a gstack checkout, tracked by an enclosing project (#1022), or the incoming release holds',
     fix: 'resolve the named cause (commit or move the listed changes, check out the default branch), then re-run bin/gstack-upgrade; it never stashes or resets',
   },
   UPGRADE_BUSY: {
     anchor: 'upgrade-busy',
-    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, so moving the checkout would change gstack under it',
-    fix: 'wait for those sessions to finish (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know they are idle',
+    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, or a shared harness (capy-server) whose lease may be a sibling session\'s is under 120 minutes old, so moving the checkout would change gstack under it',
+    fix: 'wait for those sessions to finish, or for a shared-harness lease to turn 120 minutes old (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know no other session uses the checkout',
   },
   UPGRADE_FETCH_FAILED: {
     anchor: 'upgrade-fetch-failed',
@@ -670,12 +666,6 @@ export const RESULT_CODES = {
     anchor: 'artifact-public-target-exists',
     summary: '`gstack-autoplan export --public <dir>` writes only into an empty directory or over an earlier public copy of the same run',
     fix: 'pass an empty or new --public directory, or the directory that already holds this run\'s public copy',
-  },
-  // Field list 2 (2026-10-16), W8: preregistered diagnostics run before the freeze commit.
-  PREREG_DIAGNOSTIC_UNTESTED: {
-    anchor: 'prereg-diagnostic-untested',
-    summary: 'the declared summarizer, run on the declared synthetic fixture, did not report every preregistered diagnostic at its expected count',
-    fix: 'fix the summarizer or the declared definition (expected count, fixture) until every PREREG_DIAGNOSTIC line says ok, then commit the freeze; never freeze a diagnostic the summarizer has not counted',
   },
   // Field list 2 (2026-10-16), W9: .gstack/eval-models.json.
   EVAL_MODELS_INVALID: {
@@ -772,6 +762,7 @@ export const RESULT_CODES = {
   ...RELEASE_RESULT_CODES,
   ...CAPY_RESULT_CODES,
   ...BUDGET_RESULT_CODES,
+  ...EVAL_RESULT_CODES,
 } as const satisfies Record<string, ResultCode>;
 
 export type ResultCodeName = keyof typeof RESULT_CODES;

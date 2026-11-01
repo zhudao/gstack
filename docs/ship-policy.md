@@ -39,7 +39,7 @@ refuses the file (`POLICY_GSTACK_TOO_OLD`). `validate` ends with
 
 | Key | Values | Default | Meaning |
 |---|---|---|---|
-| `bump` | `patch` \| `ask` | `ask` | `patch` skips the MINOR/MAJOR prompt in `/ship` Step 12 and `gstack-restamp --next` bumps PATCH; `ask` keeps the prompt. |
+| `bump` | `patch` \| `ask` \| `never` | `ask` | `patch` skips the MINOR/MAJOR prompt in `/ship` Step 12 and `gstack-restamp --next` bumps PATCH; `ask` keeps the prompt, and in a session no person answers any version Step 12 would write (`--bump` on a fresh branch, `--version <v>` on a bumped one) stops with `BUMP_ANSWER_REQUIRED` until `--answer "<the owner's words>"`; `never` is for a repo whose unit PRs never change VERSION: Step 12 keeps it with no question, refuses `--bump`, and `gstack-restamp --next` needs an explicit `--bump` or `--version` (the release process bumps). CI's Version Gate passes a head that keeps VERSION; a release PR that moves it takes the ordinary bump and collision rules. `never` needs `min_gstack_version` at its introducing release and cannot be combined with `queue_mode: stamp-at-merge`, `train` or `changelog_fragments`, which stamp a version at every merge. |
 | `queue_mode` | `claim-at-open` \| `stamp-at-merge` | `claim-at-open` | See [stamp-at-merge](#stamp-at-merge). `claim-at-open` is today's queue (`gstack-next-version` claims a slot when the PR opens). |
 | `release_tool` | command or `null` | `null` | The repo's own release command (`bun run release:restamp`). Runs in an isolated staging worktree under the [release-tool contract](#release-tool-contract). |
 | `release_outputs` | globs | `[]` | Paths the release tool may write beyond the version files, lockfiles, CHANGELOG and `stamp_paths`. Anything else is `RESTAMP_OUTPUT_OUTSIDE_ALLOWED`. |
@@ -60,7 +60,8 @@ refuses the file (`POLICY_GSTACK_TOO_OLD`). `validate` ends with
 | `review_scope` | `frozen` \| `diff-plus-blocking` \| `all` | `frozen` | The finding scope of `/ship`'s review loop; see [review_scope](#review-scope). `frozen` fixes the diff on pass 1, files blocking findings in unchanged code as issues, and later passes read only the range since the previous pass. `diff-plus-blocking` is the same but fixes a blocking finding in unchanged code in this PR instead of filing it. `all` is the earlier loop: every finding is fixed on every pass. Needs `min_gstack_version` when not `frozen`. |
 | `min_gstack_version` | version or `null` | `null` | The oldest gstack that may read the file; see the compatibility rule above. |
 | `docs` | `{ caps: [{ path, max_bytes }] }` or `null` | `null` | Documentation files with a byte cap. `/ship` Step 14.5 runs `gstack-ship-receipt docs-caps --base <base>` (the caps come from `origin/<base>`'s policy, never the branch's copy; `--policy <file>` is for a repository bootstrapping its policy) before the verification gate and prints one `DOCS_CAP: <path> <bytes>/<max> ok\|over` line per cap; any `over` (an absent file counts) exits 1 and blocks the ship until the file is trimmed or the cap raised on the base branch (`DOCS_AUDIT_BLOCKED`). At most 64 caps, each path contained. See [the ship receipt](#ship-receipt). Needs `min_gstack_version`. |
-| `train` | `{ gate_workflow, free_workflow, full_gate_check, record_artifact, max_size, fill_hours, screen_selection, trial_reservation_usd }` or `null` | `null` | Turns on [merge trains](#run-a-merge-train), read from the base revision only. Every field is required and an unknown field is `POLICY_INVALID`: `max_size` 1 to 6, `fill_hours` above 0 and at most 24, `screen_selection` `gstack-paid` \| `none`, `trial_reservation_usd` above 0 and at most 100. `null` keeps the per-PR queue exactly as it is. Needs `min_gstack_version`. |
+| `train` | `{ gate_workflow, free_workflow, full_gate_check, record_artifact, max_size, fill_hours, screen_selection, trial_reservation_usd, land? }`, `{ gates, land, max_size, fill_hours }` or `null` | `null` | Turns on [merge trains](#run-a-merge-train), read from the base revision only. Every field is required and an unknown field is `POLICY_INVALID`: `max_size` 1 to 6, `fill_hours` above 0 and at most 24, `screen_selection` `gstack-paid` \| `none`, `trial_reservation_usd` above 0 and at most 100. A block with `gates` ([any repository](#train-gates)) takes `max_size` 1 to 5 and needs `min_gstack_version` at least `TRAIN_GATES_KEY_VERSION`. `null` keeps the per-PR queue exactly as it is. Needs `min_gstack_version`. |
+| `base_red` | `{ setup, select, timeout_sec }` or `null` | `null` | How `/ship` Step 5 proves a failure is the base branch's own before pausing on it; see [base_red](#base-red). Read from the base revision only. Needs `min_gstack_version`. |
 | `changelog_fragments` | `{ dir, required_checks? }` or `null` | `null` | PRs carry unversioned [CHANGELOG fragments](#changelog-fragments) in `dir` (one flat, repo-relative directory, no `..`) and the merge step ([`land`](#land)) assigns the version. `required_checks` (up to 50 distinct names) are the checks [`train land`](#stamped-trains-under-changelog_fragments-train-land) requires present and green on a stamp commit. `null` keeps `[Unreleased]` sections and per-PR stamps. Needs `min_gstack_version`. |
 
 Containment, checked by `validate` and again at write time: paths and globs are
@@ -344,13 +345,14 @@ The surface is off unless the base revision's `.gstack/ship-policy.json`
 declares a `train` block. Without one, `train …` and `verify --train` refuse
 with `QUEUE_TRAIN_OFF`, and `ready --pr <n>` prints exactly the per-PR READY
 block above (`--screen`, `--no-screen` and `--broad` are ignored with a
-warning on stderr). A block for gstack itself would read:
+warning on stderr). A repository without gstack's eval workflow declares
+[`gates`](#train-gates) instead. A block for gstack itself would read:
 
 ```json
 "train": {
   "gate_workflow": "evals.yml", "free_workflow": "free-tests.yml",
   "full_gate_check": "gstack/full-gate", "record_artifact": "gstack-train-record",
-  "max_size": 3, "fill_hours": 1, "screen_selection": "gstack-paid",
+  "max_size": 5, "fill_hours": 1, "screen_selection": "gstack-paid",
   "trial_reservation_usd": 1.5
 },
 "min_gstack_version": "<the version that introduced train>"
@@ -437,6 +439,117 @@ Slots merge with `train land --train <nonce> --pr <n>`, never a slot call:
 covers main only when its exact tree is some S_i of a green record (plain
 T_i records still cover modulo stamps). A dropped slot changes every later
 version, so the train is rebuilt, as today.
+
+<a id="train-gates"></a>
+### Trains for any repository: `gates`
+
+A repository without gstack's eval workflow declares its own gates instead of
+`gate_workflow` and the other gstack-evals keys. Such a train gates every
+prefix, not just its tip, so a red train names its culprit without a bisect:
+
+```json
+"train": {
+  "gates": [
+    { "kind": "workflows", "workflows": ["ci.yml"], "required_jobs": ["ci.yml/test", "ci.yml/lint"] },
+    { "kind": "command", "command": "bun test", "timeout_sec": 1800, "spend_cap_usd": 3 }
+  ],
+  "land": { "merge_method": "squash", "required_checks": ["test", "lint"] },
+  "max_size": 5, "fill_hours": 3
+},
+"min_gstack_version": "1.92.0.0"
+```
+
+A block with `gates` holds exactly these four keys; a gstack-evals key beside
+them is refused, and a block without `gates` is the gstack-evals kind and
+behaves exactly as above. `min_gstack_version` must be at least
+`TRAIN_GATES_KEY_VERSION` (lib/ship-policy.ts), so an older gstack refuses the
+policy by name. `max_size` is at most 5, because each gate runs on k+1
+prefixes.
+
+- **`workflows` gates.** Each workflow is dispatched on a pushed
+  `train-prefix/<nonce>/t<i>` ref with a `nonce` input; the train records the
+  nonce before it sends the dispatch and adopts only the workflow_dispatch run
+  whose run-name carries `[eval-bg <nonce>]`, never a run found by commit.
+  A prefix is GREEN only when that run tested the prefix head exactly, every
+  `required_jobs` entry (`<workflow file>/<job name as GitHub reports it>`)
+  concluded success and the run concluded success. With `record` set (an
+  artifact name), the run must also upload a JUnit XML or `{ "tests": [...] }`
+  JSON file reporting at least one executed test, and failed test ids become
+  the red cases. A red run gets one `gh run rerun --failed`: green on the
+  rerun is GREEN with a `FLAKY:` line, red again is real, and both attempts'
+  jobs stay in the record. `post_merge_checks` names checks that must succeed
+  on main after each land before the next slot lands (`verify --post-merge
+  <sha> --checks <names>`; `train land` checks the previous slot's merge and
+  refuses the next slot until they are green, and `train watch --land` runs it
+  between slots). A workflow whose concurrency
+  group is not keyed by `github.ref` (or the nonce) gets one prefix at a
+  time.
+- **`command` gates.** Each prefix is checked out clean and detached and runs
+  `command` on a Ubicloud VM through scripts/ubicloud/ubi-runner.sh
+  (standard-16, `UBI_OWNER` required). The VM's `git write-tree` must equal
+  the prefix tree, and exit 0 is GREEN. Only names in `pass_env` reach the VM
+  (`UBICLOUD_*` never). Each run reserves its timeout plus 10 minutes at the
+  list price, and each command gate's `spend_cap_usd` covers every run of that
+  gate in the train, reruns included (3 dollars covers six prefixes and one rerun at 1800 s; `train init`
+  prints that default and `train doctor` flags a cap below a full train). The
+  next run past the cap refuses (`QUEUE_TRAIN_SPEND_CAP`); raising the cap is a
+  policy commit that moves main, so it is followed by a new train.
+
+**The verdict.** T0 red is red on main (`QUEUE_TRAIN_RED_ON_MAIN`, fix
+forward). Otherwise the first non-green prefix decides: incomplete stops the
+train, red with a later prefix green is unattributed (repair or a new order,
+never an unchanged rebuild), and red with every later prefix red names its
+slot as the culprit (`QUEUE_TRAIN_RED`); the slots before it may land.
+`train bisect` and `train rebuild` refuse such trains, since every prefix
+already has its verdict. A green T0 run of the same gate at main's exact
+commit in another train is reused instead of run again.
+
+**Base-red PRs.** A lane whose /ship paused on a red base (its receipt carries
+`base_red`) READYs with `ready --pr <n> --no-screen --base-red --fixer <pr>`:
+the condition must have been classified on today's base and not have expired.
+The fixer READYs with `--fixes-base-red <case,...>`. The fixer rides at slot 1
+(moved there unless `--order` says otherwise, which then refuses), T0 may be
+red on exactly the fixer's cases and nothing else, and every conditional PR
+behind it is gated on its own prefix with nothing excluded. A conditional PR
+without its fixer at slot 1, or on a gstack-evals train, refuses
+(`QUEUE_TRAIN_BASE_RED`, `QUEUE_BASE_RED_NO_TRAIN`).
+
+**Landing.** `train land` publishes T_i, or S_i when the train stamps
+(`changelog_fragments`, or `gates` with `queue_mode: stamp-at-merge`), with
+main's tree equal to the prefix before it. It records the mode, and the update
+commit when there is one, before its first remote effect:
+
+1. `direct`: `gh pr merge --<merge_method> --match-head-commit <pin>`, used
+   only when branch protection is readable and not strict, the pin merges onto
+   main as the gated tree exactly, and the pin's own checks (every
+   `required_checks` name) are green.
+2. `update`: the gated tree committed on [pin, main], pushed under the pin's
+   lease, its checks waited for, then merged at that commit. It is forced for
+   a stamped train, strict or unreadable protection, a conditional PR, a merge
+   that resolved release files, and a pin whose checks are red. `rebase`
+   always refuses (`QUEUE_TRAIN_LAND_METHOD`): it would replay commits, and
+   the replayed tree is not the gated one.
+
+Required checks are `changelog_fragments.required_checks`, else
+`train.land.required_checks`. Fork heads refuse. Either way main's tree must
+be the prefix afterwards, or the queue freezes as above; the backstop
+dispatches each gate workflow on main by nonce. `train watch --train <nonce>
+--land` runs build, verdict and every landable slot's land in order, and stops
+at the first refusal.
+
+**Setting one up.** `train init [--command "<test command>"]` reads branch
+protection, the base's workflows and the open PRs, and prints a block mapping
+each required check to its workflow job, the `nonce` input, run-name and
+concurrency snippet each gate workflow needs, and the land mode slots will
+use. It recommends `changelog_fragments` when open PRs bump the version, and
+refuses (`QUEUE_TRAIN_INIT_REFUSED`) only when they do and the policy neither
+declares fragments nor stamps at merge. After the block lands on the base,
+`train doctor` re-checks it: a missing workflow, nonce input or run-name, a
+required job no workflow defines, a concurrency group not keyed by ref, a push
+trigger that matches `train-prefix/` refs, a workflow never green on the base,
+a command gate cap below what a full train reserves, a merge method GitHub has
+turned off, and `rebase` as the merge method (`QUEUE_TRAIN_DOCTOR_FINDINGS`).
+Neither command writes anything.
 
 <a id="ship-before-ready"></a>
 **0. Lane: /ship before READY.** Every READY follows a /ship run on the branch
@@ -567,8 +680,8 @@ forked (the chain's merge onto the pin's own prefix is the verdict), refuses
 `QUEUE_TRAIN_CONFLICT` for a pin that does not merge, and otherwise prints
 `MERGE_CHECK: T1..T<k> merge clean onto <base>@<sha>`, so a
 `QUEUE_TRAIN_WAITING` result is also a clean dry-run merge of the pool (the
-crew template's sibling trial merge, done by the tool). gstack's own block fills at 3 PRs or one hour (it was 5 PRs or
-three hours until 2026-10-26, which left READY PRs waiting most of a day). The same pins on the same base return the live train
+crew template's sibling trial merge, done by the tool). gstack's own block fills at 5 PRs or one hour (it was 5 PRs or
+three hours until 2026-10-26, which left READY PRs waiting most of a day, then 3 PRs or one hour until 2026-10-31). The same pins on the same base return the live train
 instead of a second one; `train build --train <nonce>` resumes a train from
 its record. Refusals, all before any spend: `QUEUE_TRAIN_UNTRUSTED` (a fork
 head), `QUEUE_TRAIN_MOVED` (a head moved from its pin),
@@ -773,7 +886,7 @@ repair. When verify confirms the repair merged, it prints `FREEZE: cleared`
 and `NEXT:` builds a train of the PRs still unmerged.
 
 **5b. Coordinator: after the merge.** `gstack-ship-queue verify --post-merge
-<sha> [--timeout <s>]` (the merged commit's full 40-character SHA) watches
+<sha> [--timeout <s>] [--checks <a,b>]` (the merged commit's full 40-character SHA) watches
 every check run attached to it (the push workflows: free tests, the Windows
 subset, the main backstop) and every commit status until none is still
 running, prints one `CHECK: <name> <conclusion>` per check and
@@ -782,7 +895,10 @@ Green needs at least one completed check and no failure; `neutral` and
 `skipped` (the backstop superseding itself) count as skipped; a pending
 commit status keeps the commit pending and a failed one makes it red. A
 failure is `QUEUE_POST_MERGE_RED` naming the checks; a timeout (default 2700 s) is
-`QUEUE_TRAIN_PENDING` with the same command as `NEXT:`. It keeps no process
+`QUEUE_TRAIN_PENDING` with the same command as `NEXT:`. With `--checks` (a
+workflows gate's `post_merge_checks`), each named check must also run and
+succeed: one that did not succeed is `QUEUE_POST_MERGE_RED`, and one that
+never ran is `QUEUE_TRAIN_PENDING` at the timeout. It keeps no process
 state, so rerunning it after a machine restart continues the watch.
 
 **6. Clean up.** `gstack-ship-queue train prune [--train <nonce>] [--dry-run]`
@@ -866,6 +982,8 @@ which carry the workflow consequences the skill prose would otherwise spell out:
 | `ship: shared merge queue: …` | in a coordinator-run queue, `gstack-ship-queue ready`, `gate-ahead` and `stamp` replace the restamp calls; see [Run a shared merge queue](#run-a-shared-merge-queue) |
 | `ship: gate-ahead: …` | with `.gstack/tmp/gate-ahead.json` present, Step 16 reuses only the lanes `gstack-tree-receipt … --json > .gstack/tmp/tree-receipt.json` marks reusable; stamp-sensitive and not-eligible lanes run live; `--force-gate <reason>` is the coordinator's call |
 | `ship: bump patch: …` | Step 12 never asks for MINOR or MAJOR; PATCH or MICRO by size |
+| `ship: bump never: …` | Step 12 prints `VERSION: <v> kept (policy: bump never; no write)`, asks nothing and refuses `--bump`; a branch that moved VERSION stops until it is put back |
+| `ship: bump ask: …` | Step 12 asks for MINOR and MAJOR; on FRESH, `--keep-current` (or `--version <current>`) keeps VERSION, and in a session no person answers any version Step 12 would write waits for `--answer` |
 | `ship: preregistration: …` | `gstack-evidence ancestor --from-policy --base <base>` must print only `ANCESTOR: ok` before push |
 | `ship: release_tool: …` | the command runs only inside `gstack-restamp` (staging worktree, outputs confined to `release_outputs`) |
 | `ship: review_scope …` | Step 9.4 item 0 runs `gstack-review-scope classify` on each pass's findings; see [review_scope](#review-scope) |
@@ -968,7 +1086,12 @@ not a claim; a number that is the value of a `key=` or `key:` pair is that
 key's claim alone, so `passes=2 blocking_found=1` is two claims, never a
 `2 blocking_found` one, #3513). A body that quotes a different number is
 `RECEIPT_PROSE_MISMATCH` (exit 1) and the `PROSE:` line names each field with
-both values; prose that quotes no counter is not a claim. Data PRs (evals,
+both values; prose that quotes no counter is not a claim. The `## Approvals`
+block `gstack-approvals` renders (its heading, the Date | Asked | Exact words
+table and the `Source: gstack-approvals record` line) quotes the owner's
+words, not this PR's numbers, so it is skipped: "one Step 11 pass" in that table
+is not a `pass` claim. Text you write under the heading after that block, and
+a `## Approvals` example inside a code fence, are still checked. Data PRs (evals,
 measurements, sweeps) run it before READY so the body's numbers are the run's.
 
 <a id="review-scope"></a>
@@ -1034,6 +1157,56 @@ time, and only the three-cycle fix cap stops the loop. `show-effective` prints t
 line, and the codes a refusal ends with are
 [`REVIEW_SCOPE_INPUT`](troubleshooting.md#review-scope-input) and
 [`REVIEW_SCOPE_RANGE`](troubleshooting.md#review-scope-range).
+
+<a id="base-red"></a>
+## `base_red`: pausing /ship on a red base
+
+When the base branch is red for a reason outside the PR (Truther's #815/#818
+pair each failed only on the other's broken cases), /ship's Step 5 used to fail
+or ask the T3 triage question. With a `base_red` block on the base branch it can
+prove the failure is the base's and pause instead:
+
+```json
+"base_red": { "setup": "bun install --frozen-lockfile", "select": "bun test {files}", "timeout_sec": 900 },
+"min_gstack_version": "<the release that introduced base_red>"
+```
+
+`setup` installs dependencies in a scratch checkout (`null` when none are
+needed); `select` is the lane command with a `{files}` slot that receives the
+failing test files, shell-quoted; `timeout_sec` (10–7200) bounds each command.
+`gstack-base-red classify --failures <evidence.json> --base <base> --pause`
+reads the block from `origin/<base>` (a PR cannot declare its own) and calls a
+failure base-red only when all of these hold:
+
+1. The evidence names every failure the lane reported (`total` equals the
+   number of `failures`), else `BASE_RED_UNNAMED`.
+2. No failing test file, and no path of the PR's diff (`git diff --name-only
+   <merge-base>..HEAD`) that a failure's signature names, is changed by the PR.
+3. In scratch worktrees under the state root, `setup` then `select` fails at
+   the base head and at HEAD, each output naming the same test id and the same
+   first error line (digits and whitespace normalized). A setup that fails is
+   `BASE_RED_REPRO_ERROR`.
+
+Anything else is `IN_BRANCH` and /ship continues its usual triage, exactly as
+without the block. A base-red run writes a pause record (`PAUSE: <file>` under
+`$GSTACK_STATE_ROOT/ship/base-red/`, repository and branch hashed, 24-hour
+expiry), finishes every other step, and writes its receipt with `--base-red
+<file>`: the receipt's `base_red` block (`cases`, `files`, `base`, `lane`,
+`expires_at`) makes it **conditional**. `gstack-ship-receipt result` prints
+`SHIP_PAUSED: base-red …` and `status=incomplete`; `ready`, `train build`,
+`verify --train`, `carry` and every other receipt consumer refuse a conditional
+receipt with `QUEUE_RECEIPT_CONDITIONAL`. The one exception is a train with
+`gates`: `ready --base-red --fixer <pr>` READYs the PR to ride behind its fixer
+([base-red PRs](#train-gates)).
+
+To resume, a parent runs `gstack-base-red wait --pause <file>` as a background
+operation. On each new base head (`git ls-remote`) it reruns `setup` and
+`select` on the paused files there and exits 0 (`BASE_GREEN: <sha>`) on the
+first head that passes; a head that still fails keeps it waiting, and it exits 3
+on its timeout (`BASE_RED_WAIT_TIMEOUT`) or the pause's expiry
+(`BASE_RED_PAUSE_EXPIRED`). Then `/ship --resume <record>` reruns Step 5 on HEAD
+merged with the new base in a scratch worktree and, when every lane passes,
+rewrites the receipt without `base_red`.
 
 <a id="receipt-carry"></a>
 ## Carrying a receipt across a base merge or a test-only fix

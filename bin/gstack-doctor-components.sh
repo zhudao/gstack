@@ -8,7 +8,7 @@ GSTACK_DOCTOR_COMPONENTS="claude codex patch codex-cli browse-bundle browser cso
 GSTACK_DOCTOR_CORE="runtime pins state-root privacy cores revision floor wrapper"
 GSTACK_DOCTOR_HOSTS="claude codex"
 GSTACK_DOCTOR_OPTIONAL="codex-cli cso"
-GSTACK_DOCTOR_SKILLS="autoplan plan-ceo-review plan-eng-review plan-design-review plan-devex-review plan-tune office-hours spec review ship investigate codex cso browse qa qa-only design-review design-consultation design-html design-motion devex-review scrape skillify canary benchmark make-pdf diagram pair-agent open-gstack-browser setup-browser-cookies connect-chrome land-and-deploy benchmark-models captain careful claude-code context-restore context-save design-shotgun deslop-shared-libs document-generate document-release eval-plan freeze gstack-upgrade guard health ios-clean ios-design-review ios-fix ios-qa ios-sync landing-report learn write-skill modernize retro setup-deploy setup-gbrain sync-gbrain test-audit ubicloud unfreeze review-voice"
+GSTACK_DOCTOR_SKILLS="autoplan plan-ceo-review plan-eng-review plan-design-review plan-devex-review plan-tune office-hours spec review ship investigate codex cso browse qa qa-only design-review design-consultation design-html design-motion devex-review scrape skillify canary benchmark make-pdf diagram pair-agent open-gstack-browser setup-browser-cookies connect-chrome land-and-deploy benchmark-models captain careful claude-code context-restore context-save design-shotgun deslop-shared-libs document-generate document-release eval-plan freeze gstack-upgrade guard health ios-clean ios-design-review ios-fix ios-qa ios-sync landing-report learn write-skill modernize retro setup-deploy setup-gbrain sync-gbrain test-audit ubicloud unfreeze verify review-voice"
 GSTACK_BROWSER_LAZY_REASON="lazy; gstack-browser-ensure installs on first use"
 GSTACK_DOCTOR_HELPERS="gstack-pregate gstack-plan-reality gstack-artifact gstack-autoplan"
 GSTACK_DOCTOR_NOT_NEEDED="none"
@@ -69,7 +69,7 @@ gstack_doctor_skill_requires() {
     codex) printf '%s' 'claude codex patch codex-cli' ;;
     cso) printf '%s' 'claude cso' ;;
     browse|qa|qa-only|design-review|design-consultation|design-html|design-motion|devex-review|scrape|skillify|canary|benchmark|make-pdf|diagram|pair-agent|open-gstack-browser|setup-browser-cookies|connect-chrome|land-and-deploy) printf '%s' 'claude codex patch browse-bundle browser' ;;
-    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze) printf '%s' 'claude' ;;
+    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze|verify) printf '%s' 'claude' ;;
     review-voice) printf '%s' 'helpers' ;;
     *) return 1 ;;
   esac
@@ -82,7 +82,7 @@ gstack_doctor_skill_optional() {
     codex) printf '%s' '' ;;
     cso) printf '%s' '' ;;
     browse|qa|qa-only|design-review|design-consultation|design-html|design-motion|devex-review|scrape|skillify|canary|benchmark|make-pdf|diagram|pair-agent|open-gstack-browser|setup-browser-cookies|connect-chrome|land-and-deploy) printf '%s' 'codex-cli' ;;
-    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze) printf '%s' '' ;;
+    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze|verify) printf '%s' '' ;;
     review-voice) printf '%s' '' ;;
     *) return 1 ;;
   esac
@@ -194,7 +194,6 @@ gstack_result_anchor() {
     ISSUE_UNREADABLE) printf '%s' 'issue-unreadable' ;;
     ISSUE_LOOKUP_FAILED) printf '%s' 'issue-lookup-failed' ;;
     ISSUE_LINKS_MISSING) printf '%s' 'issue-links-missing' ;;
-    PREREG_INCOMPLETE) printf '%s' 'prereg-incomplete' ;;
     EVAL_PRICE_MISSING) printf '%s' 'eval-price-missing' ;;
     EVAL_DRY_RUN_FAILED) printf '%s' 'eval-dry-run-failed' ;;
     EVAL_ARMS_UNRESOLVED) printf '%s' 'eval-arms-unresolved' ;;
@@ -240,7 +239,6 @@ gstack_result_anchor() {
     OUTSIDE_VOICE_UNAVAILABLE) printf '%s' 'outside-voice-unavailable' ;;
     ARTIFACT_MACHINE_PATH) printf '%s' 'artifact-machine-path' ;;
     ARTIFACT_PUBLIC_TARGET_EXISTS) printf '%s' 'artifact-public-target-exists' ;;
-    PREREG_DIAGNOSTIC_UNTESTED) printf '%s' 'prereg-diagnostic-untested' ;;
     EVAL_MODELS_INVALID) printf '%s' 'eval-models-invalid' ;;
     EVAL_MODEL_DENIED) printf '%s' 'eval-model-denied' ;;
     EVAL_MODEL_OLD_GENERATION) printf '%s' 'eval-model-old-generation' ;;
@@ -284,9 +282,22 @@ gstack_result_anchor() {
     QUEUE_TRAIN_STAMP_MISMATCH) printf '%s' 'queue-train-stamp-mismatch' ;;
     QUEUE_TRAIN_TREE_MISMATCH) printf '%s' 'queue-train-tree-mismatch' ;;
     QUEUE_TRAIN_STALE) printf '%s' 'queue-train-stale' ;;
+    QUEUE_TRAIN_BASE_RED) printf '%s' 'queue-train-base-red' ;;
+    QUEUE_TRAIN_SPEND_CAP) printf '%s' 'queue-train-spend-cap' ;;
+    QUEUE_TRAIN_LAND_METHOD) printf '%s' 'queue-train-land-method' ;;
+    QUEUE_TRAIN_INIT_REFUSED) printf '%s' 'queue-train-init-refused' ;;
+    QUEUE_TRAIN_DOCTOR_FINDINGS) printf '%s' 'queue-train-doctor-findings' ;;
+    QUEUE_BASE_RED_NO_TRAIN) printf '%s' 'queue-base-red-no-train' ;;
+    SHIP_BASE_RED_FIXER) printf '%s' 'ship-base-red-fixer' ;;
     QUEUE_TRAIN_FROZEN) printf '%s' 'queue-train-frozen' ;;
     QUEUE_RECEIPT_MISSING) printf '%s' 'queue-receipt-missing' ;;
     QUEUE_RECEIPT_STALE) printf '%s' 'queue-receipt-stale' ;;
+    QUEUE_RECEIPT_CONDITIONAL) printf '%s' 'queue-receipt-conditional' ;;
+    BASE_RED_UNCONFIGURED) printf '%s' 'base-red-unconfigured' ;;
+    BASE_RED_UNNAMED) printf '%s' 'base-red-unnamed' ;;
+    BASE_RED_REPRO_ERROR) printf '%s' 'base-red-repro-error' ;;
+    BASE_RED_PAUSE_EXPIRED) printf '%s' 'base-red-pause-expired' ;;
+    BASE_RED_WAIT_TIMEOUT) printf '%s' 'base-red-wait-timeout' ;;
     QUEUE_RECEIPT_DEPTH_RAISED) printf '%s' 'queue-receipt-depth-raised' ;;
     QUEUE_RECEIPT_EXCEPTION_INVALID) printf '%s' 'queue-receipt-exception-invalid' ;;
     QUEUE_SCREEN_STALE_REF) printf '%s' 'queue-screen-stale-ref' ;;
@@ -323,6 +334,7 @@ gstack_result_anchor() {
     QUEUE_LAND_BASE_BUSY) printf '%s' 'queue-land-base-busy' ;;
     PR_WAIT_BLOCKED) printf '%s' 'pr-wait-blocked' ;;
     PR_WAIT_REFUSED) printf '%s' 'pr-wait-refused' ;;
+    PREGATE_HEAD_POLICY_LOOSENS) printf '%s' 'pregate-head-policy-loosens' ;;
     APPROVAL_RECORD_INVALID) printf '%s' 'approval-record-invalid' ;;
     APPROVAL_RECORD_SECRET) printf '%s' 'approval-record-secret' ;;
     APPROVAL_RECORD_NO_BRANCH) printf '%s' 'approval-record-no-branch' ;;
@@ -345,6 +357,11 @@ gstack_result_anchor() {
     BUDGET_LEDGER_INVALID) printf '%s' 'budget-ledger-invalid' ;;
     BUDGET_CHECK_SKIPPED) printf '%s' 'budget-check-skipped' ;;
     HANDOFF_PIN_MOVED) printf '%s' 'handoff-pin-moved' ;;
+    PREREG_INCOMPLETE) printf '%s' 'prereg-incomplete' ;;
+    PREREG_DIAGNOSTIC_UNTESTED) printf '%s' 'prereg-diagnostic-untested' ;;
+    PREREG_NO_GSTACK_ARM) printf '%s' 'prereg-no-gstack-arm' ;;
+    EVAL_REPORT_NO_GSTACK_ROW) printf '%s' 'eval-report-no-gstack-row' ;;
+    EVAL_ARM_DUPLICATE) printf '%s' 'eval-arm-duplicate' ;;
     *) return 1 ;;
   esac
 }

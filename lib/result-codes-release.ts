@@ -137,6 +137,41 @@ export const RELEASE_RESULT_CODES = {
     summary: 'every slot of this train already merged on GitHub and main is a prefix another train verified, so the record is stale; comparing today’s main to its prefixes proves nothing and does not freeze the queue',
     fix: 'settle the record with train prune --stale --train <nonce>; no backstop is needed',
   },
+  QUEUE_TRAIN_BASE_RED: {
+    anchor: 'queue-train-base-red',
+    summary: 'a conditional (base-red) PR or its fixer cannot ride this train: the train has no gates list, the fixer is not slot 1 or not in the train, two PRs declare FIXES_BASE_RED, the condition expired, or the fixer\'s own prefix is red',
+    fix: 'seat the fixer (its READY declares FIXES_BASE_RED) at slot 1 of a train whose policy declares gates and build again; a red fixer prefix is the fixer lane\'s to repair, and an expired condition is reclassified by its lane',
+  },
+  QUEUE_TRAIN_SPEND_CAP: {
+    anchor: 'queue-train-spend-cap',
+    summary: 'a command gate\'s next Ubicloud run would pass the one spend cap that covers every run of the train, or UBI_OWNER is not set, so nothing more ran',
+    fix: 'set UBI_OWNER to your thread code and train build --train <nonce> runs what is left; for the cap, raise the gate\'s spend_cap_usd (or lower its timeout_sec) on the base branch, then build a new train on the new main (the policy commit moves main past T0)',
+  },
+  QUEUE_TRAIN_LAND_METHOD: {
+    anchor: 'queue-train-land-method',
+    summary: 'train land must publish this slot through a tool-made update commit (a stamped train, strict branch protection, a conditional PR, or a merge that resolved release files), and the policy\'s merge method is rebase, which would replay commits instead of landing the gated tree',
+    fix: 'set train.land.merge_method to squash or merge on the base branch (history merge-only allows merge only), then build a new train on the new main (the policy commit moves main off this train\'s prefixes)',
+  },
+  QUEUE_TRAIN_INIT_REFUSED: {
+    anchor: 'queue-train-init-refused',
+    summary: 'train init refuses this repository: its open PRs edit version files and the policy neither declares changelog_fragments nor stamps at merge, so every train merge would conflict on the version',
+    fix: 'adopt changelog_fragments (recommended) or queue_mode stamp-at-merge on the base branch first, then run train init again',
+  },
+  QUEUE_TRAIN_DOCTOR_FINDINGS: {
+    anchor: 'queue-train-doctor-findings',
+    summary: 'train doctor found the live train block out of step with the repository: a gate workflow missing, without the nonce input or run-name, a required job it does not define, a global concurrency group, a push trigger on train-prefix/ refs, a workflow never green on the base, or a merge method GitHub refuses',
+    fix: 'fix each FINDING line on the base branch (train init prints the workflow snippet), then run train doctor again',
+  },
+  QUEUE_BASE_RED_NO_TRAIN: {
+    anchor: 'queue-base-red-no-train',
+    summary: 'a conditional READY (ready --base-red) needs a train that gates every prefix, and the base policy has no train block with gates',
+    fix: 'wait for the base to pass the cases and run /ship --resume (the normal READY follows), or turn on a train with gates on the base branch',
+  },
+  SHIP_BASE_RED_FIXER: {
+    anchor: 'ship-base-red-fixer',
+    summary: 'ready --base-red names no fixer PR, or the receipt\'s base-red condition no longer matches the base: a conditional READY needs an owner for its condition and a current classification',
+    fix: 'pass --fixer <pr> naming the open PR whose merge fixes the cases; when the base moved, rerun gstack-base-red classify (and /ship) first',
+  },
   QUEUE_TRAIN_FROZEN: {
     anchor: 'queue-train-frozen',
     summary: 'a train stopped partway through publication, so main holds a prefix no gate covered on its own; ordinary trains are refused until a repair lands',
@@ -152,6 +187,36 @@ export const RELEASE_RESULT_CODES = {
     anchor: 'queue-receipt-stale',
     summary: 'the PR body’s /ship receipt is for another head than the one being READY’d or merged (a push after /ship, or a receipt copied from another PR)',
     fix: 'rerun /ship on the current head so the receipt names it, then gstack-ship-queue ready again; a slot’s stamp commit keeps the receipt written for its pinned head',
+  },
+  QUEUE_RECEIPT_CONDITIONAL: {
+    anchor: 'queue-receipt-conditional',
+    summary: 'the PR body’s /ship receipt is conditional: Step 5 failed on cases gstack-base-red proved are the base branch’s own, so /ship paused before READY',
+    fix: 'wait for the base to pass those cases (gstack-base-red wait --pause <file>), then /ship --resume <record>, which re-runs Step 5 and rewrites the receipt without base_red; only ready --base-red --fixer <pr> READYs a conditional receipt, and it rides only a train with gates whose slot 1 is its fixer',
+  },
+  BASE_RED_UNCONFIGURED: {
+    anchor: 'base-red-unconfigured',
+    summary: 'the base branch’s ship policy declares no base_red block, so gstack-base-red cannot reproduce a Step 5 failure there and every failure stays in-branch',
+    fix: 'handle the failure with /ship’s usual triage; to let /ship pause on a red base, add base_red { setup, select, timeout_sec } to .gstack/ship-policy.json on the base branch',
+  },
+  BASE_RED_UNNAMED: {
+    anchor: 'base-red-unnamed',
+    summary: 'the failure evidence names fewer failures than the Step 5 lane reported, so an unnamed failure could be in-branch',
+    fix: 'list every failing test in the evidence file (id, file, first error line), with total equal to the lane’s failure count, and classify again',
+  },
+  BASE_RED_REPRO_ERROR: {
+    anchor: 'base-red-repro-error',
+    summary: 'gstack-base-red could not reproduce at the base or the PR head: a commit did not resolve, the scratch checkout failed, or the setup command exited non-zero',
+    fix: 'read the printed detail; fix the base_red setup command on the base branch or fetch the base, then classify again. Until then every failure is in-branch',
+  },
+  BASE_RED_PAUSE_EXPIRED: {
+    anchor: 'base-red-pause-expired',
+    summary: 'the base-red pause is older than 24 hours, so its classification is stale',
+    fix: 'report the paused PR to its Captain (or owner), then start /ship again on the current base; it classifies afresh',
+  },
+  BASE_RED_WAIT_TIMEOUT: {
+    anchor: 'base-red-wait-timeout',
+    summary: 'no new base head passed the paused cases before gstack-base-red wait’s timeout',
+    fix: 'run gstack-base-red wait --pause <file> again (the pause stays valid until it expires), or check who owns the base red',
   },
   QUEUE_RECEIPT_DEPTH_RAISED: {
     anchor: 'queue-receipt-depth-raised',
@@ -340,5 +405,10 @@ export const RELEASE_RESULT_CODES = {
     anchor: 'pr-wait-refused',
     summary: 'the watcher did not start, or a local error stopped it before a verdict',
     fix: 'pass a PR number or URL the current gh login can read (--repo owner/name when the checkout is not that repository), stop the watcher the line names before starting another for the same PR, or fix the named local error',
+  },
+  PREGATE_HEAD_POLICY_LOOSENS: {
+    anchor: 'pregate-head-policy-loosens',
+    summary: 'under --policy-from head, the branch’s .gstack/pregate.json removes, shrinks or loosens something the trusted policy declares; a head policy may only add test lanes',
+    fix: 'keep every key of the trusted policy as it is and only add dependencies globs with tests (or tests on an existing glob); land any other change, a [] declaration included, in its own PR on the base branch first',
   },
 } as const satisfies Record<string, ResultCode>;
