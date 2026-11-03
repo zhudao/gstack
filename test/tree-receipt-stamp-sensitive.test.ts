@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
-import { stampOnlyLine } from '../lib/restamp';
+import { stampOnlyLine } from '../lib/stamp-only';
 import { BASE_POLICY, cleanup, ghShim, makeFixtureRepo, makePr, readFile, recordAndBundle, restamp, runBin, type FixtureRepo } from './helpers/restamp-fixture';
 
 const repos: FixtureRepo[] = [];
@@ -103,6 +103,22 @@ describe('tree receipt: stamps, stamp-sensitive gates and negative fixtures', ()
     const width = receipt(repo, ['--gated', pinned, '--bundle', bundle]);
     expect(width.status).toBe(EXIT.fail);
     expect(width.out).toMatch(/^TREE: changed \(lib\/policy\.ts\)$/m);
+  });
+
+  // Value: protects=the fork-version bound reads the branch's own line by its position, so a base copy of the same text
+  //   is still floored at the old version, and when the slot keeps its VERSION only the branch's own lines may move
+  //   (GST-979); fails_when=stampOnlyLine matches the branch's lines by text alone or takes the old-version floor at equal
+  //   versions; seam=lib/stamp-only.ts stampOnlyLine
+  test('the fork-version bound holds only at the branch line\'s own position, and a kept VERSION moves only the branch\'s own lines (GST-979)', () => {
+    const tpl = ["since: '{version}'"];
+    const row = "  { since: '1.2.3.0', id: 'x' },";
+    const moved = row.replace('1.2.3.0', '1.2.5.0');
+    const side = { fork: '1.2.3.0', added: new Set([row]), at: new Set([10]) };
+    expect(stampOnlyLine(row, moved, '1.2.4.0', '1.2.5.0', tpl, side, 10)).toBe(true);
+    expect(stampOnlyLine(row, moved, '1.2.4.0', '1.2.5.0', tpl, side, 2)).toBe(false);
+    const mine = { fork: '1.2.3.0', added: new Set(["mine since: '1.2.3.0'"]), at: new Set([5]) };
+    expect(stampOnlyLine("base since: '1.3.0.0'", "base since: '1.2.4.0'", '1.2.4.0', '1.2.4.0', tpl, mine, 1)).toBe(false);
+    expect(stampOnlyLine("mine since: '1.2.3.0'", "mine since: '1.2.4.0'", '1.2.4.0', '1.2.4.0', tpl, mine, 5)).toBe(true);
   });
 
   test('negative fixture: a dependency pin equal to the old version is `changed`, not a stamp, even inside stamp_paths', () => {
