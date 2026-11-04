@@ -325,8 +325,8 @@ repository-landing asks, including on Apple repos.
 
 ## Step 1: Pre-flight
 
-Run `~/.gemini/antigravity-cli/skills/gstack/bin/gstack-ship-preflight --base <base>`: Steps 1–3's mechanics in one call;
-act on every `STOP:` and `NEXT:` line.
+Run `~/.gemini/antigravity-cli/skills/gstack/bin/gstack-ship-preflight --base <base> --run <SESSION_ID>`: Steps 1–3 at once;
+act on each `STOP:` and `NEXT:` line.
 
 1. It saves the current branch as `<branch-name>`. If on the base branch or the repo's default branch, **abort**: "You're on the base branch. Ship from a feature branch."
 2. Uncommitted changes are always included; do not ask (`STATUS:`).
@@ -872,7 +872,7 @@ A new PR or an existing draft needs no question: Step 19 creates or keeps the dr
 ```
 
 It checks the branch, the offer, the gate above (`--gate-open <n>`; `--gate-open-approved` is B)
-and `gstack-pregate sealed`, then `git ls-remote --heads origin refs/heads/<branch-name>` against HEAD: a failed lookup STOPs, a match prints
+`gstack-pregate sealed` and push guards, then `git ls-remote --heads origin refs/heads/<branch-name>` against HEAD: a failed lookup STOPs, a match prints
 `PUSH: ALREADY_PUSHED` (go to Step 18), else it runs `git push -u origin <branch-name>`.
 
 **If the push fails, STOP.** No Step 19 or publication claim. Report the error:
@@ -956,9 +956,9 @@ The last line printed is the result line a parent greps (docs/unattended.md):
 ~/.gemini/antigravity-cli/skills/gstack/bin/gstack-ship-receipt result --pr <pr-number>   # handoff: --body .gstack/tmp/ship-receipt.md
 ```
 
-It binds the receipt to HEAD, writes the run record and prints `GSTACK_RESULT: skill=ship
-status=complete run=<dir>`; `QUEUE_RECEIPT_STALE` means HEAD moved after the receipt (rewrite,
-repost, rerun). A run that STOPs earlier ends with `GSTACK_RESULT: skill=ship status=refused run=-`.
+It binds the receipt to HEAD, writes the run record, prints `GSTACK_RESULT: skill=ship
+status=complete head=<sha> run=<dir>`; `QUEUE_RECEIPT_STALE`: HEAD moved past the receipt (rewrite,
+repost, rerun). A run that STOPs early ends with `GSTACK_RESULT: skill=ship status=refused run=-`.
 
 ---
 

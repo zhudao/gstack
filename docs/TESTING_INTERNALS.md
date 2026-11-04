@@ -1001,8 +1001,10 @@ paid test file, its fixtures and its skills' prompt files, including the
 generated SKILL.md) plus `HARNESS_VERSION`, keyed with model, Claude CLI version
 and policy version (`scripts/eval-trial-series.ts`). Each trial also records the
 full consumed-input fingerprint as provenance. `scripts/harness-version.json`
-pins every shared-harness file (`GLOBAL_TOUCHFILES` plus the session runners, the
-PTY harness, the e2e gate and the LLM judge) by blob hash. When
+holds the version and the harness patterns, and `scripts/harness-pins/<path>.json`
+pins each shared-harness file (`GLOBAL_TOUCHFILES` plus the session runners, the
+PTY harness, the e2e gate and the LLM judge) by blob hash, one file per pin, so
+two PRs that record decisions for different harness files never conflict. When
 `test/harness-version.test.ts` fails, run one of:
 
 ```bash
@@ -1010,8 +1012,8 @@ bun run scripts/bump-harness-version.ts --non-behavioral "<why no verdict can ch
 bun run scripts/bump-harness-version.ts --bump "<what behavior changed>"                # new series for every case
 ```
 
-On a merge conflict in the manifest, take the higher version, then rerun the
-script.
+On a merge conflict in the manifest or a pin file, take the higher version, then
+rerun the script.
 
 ## Ubicloud VMs (`bun run test:ubicloud`)
 
@@ -1116,6 +1118,12 @@ machine swap, in this order:
 1. `scripts/ubicloud/ubi-runner.sh records` and `list --mine`: a VM listed in
    the record but absent from the project is already gone (forget it); a VM
    in the project but not in the record belongs to another owner, leave it.
+   After a machine swap, `scripts/ubicloud/ubi-runner.sh recover` rebuilds the
+   state of every VM that `up` wrote a bundle for (`UBI_RECOVERY_DIR`; `--owner
+   OLD` adopts another owner's), so `pull` and `down NAME` work again. Run it
+   only once the creating machine is dead: it cannot tell a paused one. A VM
+   started with `--sink` pushes its own results, so they land even if no
+   controller survives.
 2. Watched background operations: a runner started under `gstack-detach` keeps
    its `### gstack-detach EXIT=<code> ###` sentinel in its log; a log without
    the sentinel after the VM is gone is an interrupted run, not a pass.
@@ -1696,7 +1704,17 @@ the core skills, drives `/browse` on gstack's own browser, and runs the short
 test list in its last step, where each file's reason sits beside it.
 `test/windows-native-workflows.test.ts` keeps that list Windows-safe and fast.
 
-The curated suite below runs nightly on main and on dispatch, never on a PR.
+Windows checks run by path. `windows-scoped-tests.yml` (Windows Scoped Tests)
+runs on every PR, and when the diff touches path, file-name or process code (the
+filter is described at the top of the workflow), one `windows-latest` job runs
+the PR's changed test files that are in the curated subset below. Its
+`windows-scoped-tests` check passes when nothing is in scope, and a red run
+blocks its PR. `windows-setup-e2e.yml` skips its Windows jobs when the only
+install change is `package.json`'s version line. Both filters are pinned by
+`test/windows-path-scope-workflow.test.ts`. To rerun chosen Windows-safe files on
+a branch, dispatch `windows-scoped-tests.yml` with `-f files='<file> <file>'`.
+
+The full curated suite below runs nightly on main and on dispatch, never on a PR.
 `windows-free-tests.yml` plans on Linux (`--windows-only --ci-plan --shards 6
 --shard-jobs $WINDOWS_FREE_JOBS`), runs one strict serial shard per
 `windows-latest` job
@@ -1858,6 +1876,24 @@ own attempts. The arm gets:
   any other arm, per [Candidate-side blinding](#candidate-side-blinding));
 - the same budget treatment: it is priced and reserved in the pilot like every
   other arm.
+
+**Masking.** On Capy, the owner's user-scope instructions tell every session to
+load the user-drive gstack skill, and eval run agents inherit them: in one
+checkpoint (24 runs, 3 arms) every run in every arm tried to read that skill in
+its first minute. So `## No-gstack arm` also needs three lines, and `prereg
+--check` refuses a missing, blank or `none` one (`PREREG_NO_GSTACK_ARM`):
+
+- `masking:` an empty directory bind-mounted over `~/.capy/drive/user-garry-tan`
+  and `~/.capy/drive/org-gstack-gbrain` before the run agent starts, or a
+  container that sees no Capy drive;
+- `install:` no gstack on the arm's machine (`~/.local/share/gstack`,
+  `~/.claude/skills`), checked before the run;
+- `audit:` a per-arm audit of drive and skill reads.
+
+An arm that read a gstack skill file is contaminated and gets zero credit. A
+no-gstack result that ran before this rule without a mask is not evidence for
+an R48 verdict until it is re-checked; the evidence ledger records it under
+`prior` with `unmasked` ([docs/inventory.md](inventory.md)).
 
 **Reporting.** The no-gstack result is one row beside the variants in every
 results table and every verdict, including when it wins. A comparison that

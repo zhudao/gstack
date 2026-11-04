@@ -10,9 +10,10 @@
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveBase, type ResolvedBase } from './gate-diff/git';
 import { GENERATED_PATH, parseRegistry } from './regen';
 import { RESULT_CODES } from './result-codes';
-import { classifyPath, dataCandidate, svgCandidate, svgDrawing, type ClassInput, type DepthError, type PathLines, type RegistryInfo } from './review-depth';
+import { BINARY_DATA_PATH, classifyPath, dataCandidate, svgCandidate, svgDrawing, type ClassInput, type DepthError, type PathLines, type RegistryInfo } from './review-depth';
 
 export interface Collected extends ClassInput {
   perPath: PathLines[];
@@ -31,6 +32,9 @@ export interface Collected extends ClassInput {
   untracked: string[];
   consumed: string[] | 'all';
   drawings: string[];
+  executables: string[];
+  /** collectLive only: the ref resolveBase read for the base name (GST-1036), null when nothing resolved. */
+  base?: ResolvedBase | null;
 }
 
 function git(root: string, args: string[]): { ok: boolean; status: number | null; out: string; err: string } {
@@ -229,9 +233,36 @@ function drawingsAmong(perPath: readonly PathLines[], classRoot: string | readon
   }).sort();
 }
 
-function result(diff: ReturnType<typeof readDiff>, extra: Pick<Collected, 'root' | 'registry' | 'errors' | 'mergeBase' | 'untracked' | 'consumed'> & { drawings?: string[] }): Collected {
+/**
+ * The changed paths a docs, data or run-log rule could move out of code that are executables: the exec bit, a symlink, or text
+ * that starts with "#!" (GSTA-258 L7). `isExec` answers for one path and fails closed (true) when it cannot read it.
+ */
+function executablesAmong(perPath: readonly PathLines[], classRoot: string | readonly string[], isExec: (e: PathLines) => boolean): string[] {
+  return perPath.filter(e => (BINARY_DATA_PATH.test(e.path) && classifyPath(e.path, classRoot) === 'code') || dataCandidate(e.path, classRoot) || svgCandidate(e.path, classRoot) || classifyPath(e.path, classRoot) === 'docs').filter(isExec).map(e => e.path).sort();
+}
+
+/**
+ * The executables among the changed paths at `headSha`: tree mode 100755 or 120000 (a symlink, as collectLive sees it), or a text
+ * blob whose first two bytes are "#!". A path the head tree lacks is a deletion, never an executable; an unreadable tree or blob counts as one.
+ */
+function executablesAt(root: string, headSha: string, perPath: readonly PathLines[], classRoot: readonly string[]): string[] {
+  const tree = git(root, ['ls-tree', '-r', '-z', headSha]);
+  const entries = new Map(tree.out.split('\0').flatMap(rec => { const m = /^(\d+) blob ([0-9a-f]+)\t(.*)$/s.exec(rec); return m ? [[m[3]!, { mode: m[1]!, sha: m[2]! }] as const] : []; }));
+  return executablesAmong(perPath, classRoot, e => {
+    if (!tree.ok) return true;
+    const t = entries.get(e.path);
+    if (!t) return false;
+    if (t.mode === '100755' || t.mode === '120000') return true;
+    if (e.binary) return false;
+    const r = spawnSync('git', ['cat-file', 'blob', t.sha], { cwd: root, timeout: 30_000, maxBuffer: 2 });
+    const read = r.status === 0 || (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS';
+    return !read || (r.stdout ?? Buffer.alloc(0)).subarray(0, 2).toString('latin1') === '#!';
+  });
+}
+
+function result(diff: ReturnType<typeof readDiff>, extra: Pick<Collected, 'root' | 'registry' | 'errors' | 'mergeBase' | 'untracked' | 'consumed'> & { drawings?: string[]; executables?: string[] }): Collected {
   const paths = diff.perPath.map(e => e.path).sort();
-  return { ...diff, drawings: [], ...extra, paths, gateTagged: null, diffLines: diff.perPath.reduce((n, e) => n + e.lines, 0) };
+  return { ...diff, drawings: [], executables: [], ...extra, paths, gateTagged: null, diffLines: diff.perPath.reduce((n, e) => n + e.lines, 0) };
 }
 
 /** The range `baseSha`...`headSha` from git objects alone; the registry is the base commit's, never the head's. */
@@ -252,19 +283,23 @@ export function collectCommit(root: string, baseSha: string, headSha: string): C
     const blob = spawnSync('git', ['cat-file', 'blob', `${headSha}:${p}`], { cwd: root, timeout: 60_000, maxBuffer: DRAWING_READ_CAP + 1 });
     return blob.status === 0 && !blob.error ? blob.stdout : null;
   });
-  return result(diff, { root: skillDirs, registry, errors, mergeBase, untracked: [], consumed, drawings });
+  return result(diff, { root: skillDirs, registry, errors, mergeBase, untracked: [], consumed, drawings, executables: executablesAt(root, headSha, diff.perPath, skillDirs) });
 }
 
-/** The working tree against the merge base with origin/<base> (or <base>; a remote-qualified base reads refs/remotes/<base> only), untracked files counted per path; the registry is the base ref's commit. */
+/**
+ * The working tree against the merge base with the base resolveBase reads (lib/gate-diff/git.ts: a bare name is
+ * origin/<base> when it shares history with HEAD, else the local branch; a remote-qualified base reads
+ * refs/remotes/<base> only), untracked files counted per path; the registry is the base ref's commit.
+ */
 export function collectLive(root: string, base: string): Collected {
   const errors: DepthError[] = [];
-  const qualified = base.startsWith('origin/') || git(root, ['remote']).out.split('\n').some(r => r && base.startsWith(`${r}/`));
-  const ref = (qualified ? [`refs/remotes/${base}`] : [`refs/remotes/origin/${base}`, `refs/heads/${base}`]).find(r => git(root, ['rev-parse', '--verify', '-q', `${r}^{commit}`]).ok) ?? base;
+  const resolved = resolveBase(base, root, 'HEAD');
+  const ref = resolved?.sha ?? base;
   const registry = loadRegistryAt(root, ref);
   const mb = git(root, ['merge-base', ref, 'HEAD']);
   if (!mb.ok) {
     errors.push({ code: 'numstat_failed', detail: oneLine(mb.err || `no merge base with ${ref}`), input: `git merge-base ${ref} HEAD`, repair: `fetch the base first (git fetch origin ${base})` });
-    return result({ perPath: [], deleted: [], stampOnly: [], created: [], added: {}, removed: {} }, { root, registry, errors, mergeBase: null, untracked: [], consumed: 'all' });
+    return { ...result({ perPath: [], deleted: [], stampOnly: [], created: [], added: {}, removed: {} }, { root, registry, errors, mergeBase: null, untracked: [], consumed: 'all' }), base: resolved };
   }
   const mergeBase = mb.out.trim();
   const diff = readDiff(root, [mergeBase], errors);
@@ -282,7 +317,19 @@ export function collectLive(root: string, base: string): Collected {
   }
   const consumed = scanConsumers(root, [...diff.perPath.map(e => e.path), ...diff.deleted], [mergeBase], true, root, errors);
   const drawings = drawingsAmong(diff.perPath, root, p => {
-    try { return fs.statSync(path.join(root, p)).size <= DRAWING_READ_CAP ? fs.readFileSync(path.join(root, p)) : null; } catch { return null; }
+    try { const st = fs.lstatSync(path.join(root, p)); return st.isFile() && st.size <= DRAWING_READ_CAP ? fs.readFileSync(path.join(root, p)) : null; } catch { return null; }
   });
-  return result(diff, { root, registry, errors, mergeBase, untracked, consumed, drawings });
+  const executables = executablesAmong(diff.perPath, root, e => {
+    try {
+      const f = path.join(root, e.path);
+      const st = fs.lstatSync(f);
+      if (!st.isFile() || st.mode & 0o111) return true;
+      if (e.binary) return false;
+      const fd = fs.openSync(f, 'r');
+      const buf = Buffer.alloc(2);
+      try { fs.readSync(fd, buf, 0, 2, 0); } finally { fs.closeSync(fd); }
+      return buf.toString('latin1') === '#!';
+    } catch (err) { return (err as NodeJS.ErrnoException).code !== 'ENOENT'; }
+  });
+  return { ...result(diff, { root, registry, errors, mergeBase, untracked, consumed, drawings, executables }), base: resolved };
 }

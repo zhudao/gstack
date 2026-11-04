@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
 import { comparePath } from '../lib/ship-patch';
+import { STAMP_PLACEHOLDERS_KEY_VERSION } from '../lib/ship-policy';
 import { extractReceipt, placeReceiptFirst } from '../lib/ship-receipt';
 import { cleanup, makeFixtureRepo, runBin, write, type FixtureRepo } from './helpers/pregate-fixture';
 import { lineOf, PREFLIGHT, RELEASE, shipFixture, type ShipFx } from './helpers/ship-bin-fixture';
@@ -265,6 +266,37 @@ describe('a restamp after a lost slot (GST-895, GBRA-218, gbrain #8134)', () => 
     expect(lineOf(own.stdout, 'ROUTE')).toEqual(expect.stringMatching(/ behavior=0 docs=0 metadata=1 tests=0 /));
     const base = kept([['0.9.0.0', 'old'], ['1.0.1.0', 'base'], ['1.0.0.0', 'mine']]);
     expect([base.status, lineOf(base.stdout, 'STOP')]).toEqual([3, behaviorStop]);
+  });
+
+  // Value: protects=gbrain's restamp of the PR's own `since: 'TBD'` row to the new version routes as metadata when the
+  //   policy declares TBD in stamp_placeholders (GST-1026, gbrain #8444); an undeclared placeholder, a base row moved the
+  //   same way, a duplicated base copy, or a line no stamp_pattern matches still stops; fails_when=stampedFiles reads the
+  //   move as behavior (gbrain #8444) or accepts it off the branch's own rows; seam=lib/ship-bin-common.ts stampedFiles
+  test('a declared placeholder on the branch row is metadata; undeclared, a base row or no template stops (GST-1026)', () => {
+    const declared = (placeholders: string[] | undefined, templates = ["since: '{version}'"]) => JSON.stringify({ stamp_files: ['VERSION', 'src/notice.ts'], stamp_patterns: templates,
+      ...(placeholders ? { stamp_placeholders: placeholders, min_gstack_version: STAMP_PLACEHOLDERS_KEY_VERSION } : {}) });
+    const restamped = (pol: string, baseRows: [string, string][], ownRows: [string, string][], rows: [string, string][]) => {
+      const f = fx({ '.gstack/ship-policy.json': pol, VERSION: '1.0.0.0\n', 'src/notice.ts': notice(...baseRows) },
+        { VERSION: '1.0.1.0\n', 'src/notice.ts': notice(...baseRows, ...ownRows) });
+      const reviewed = wtree(f);
+      const post = snapshot(f);
+      f.write({ VERSION: '1.0.2.0\n', 'src/notice.ts': notice(...rows) }); f.commit('restamp: TBD rows to 1.0.2.0');
+      return finish(f, reviewed, post, ['--reviewed-base', mergeBase(f)]);
+    };
+    const base: [string, string][] = [['0.9.0.0', 'old'], ['TBD', 'base']];
+    const metadata = / behavior=0 docs=0 metadata=2 tests=0 /;
+    const own = restamped(declared(['TBD']), base, [['TBD', 'mine']], [...base, ['1.0.2.0', 'mine']]);
+    expect(lineOf(own.stdout, 'ROUTE'), own.stdout).toEqual(expect.stringMatching(metadata));
+    const undeclared = restamped(declared(undefined), base, [['TBD', 'mine']], [...base, ['1.0.2.0', 'mine']]);
+    expect([undeclared.status, lineOf(undeclared.stdout, 'STOP')]).toEqual([3, behaviorStop]);
+    const other = restamped(declared(['WIP']), base, [['TBD', 'mine']], [...base, ['1.0.2.0', 'mine']]);
+    expect([other.status, lineOf(other.stdout, 'STOP')]).toEqual([3, behaviorStop]);
+    const baseRow = restamped(declared(['TBD']), base, [['TBD', 'mine']], [['0.9.0.0', 'old'], ['1.0.2.0', 'base'], ['1.0.2.0', 'mine']]);
+    expect([baseRow.status, lineOf(baseRow.stdout, 'STOP')]).toEqual([3, behaviorStop]);
+    const dup = restamped(declared(['TBD']), base, [['TBD', 'base']], [['0.9.0.0', 'old'], ['1.0.2.0', 'base'], ['TBD', 'base']]);
+    expect([dup.status, lineOf(dup.stdout, 'STOP')]).toEqual([3, behaviorStop]);
+    const noTemplate = restamped(declared(['TBD'], ['version: {version}']), base, [['TBD', 'mine']], [...base, ['1.0.2.0', 'mine']]);
+    expect([noTemplate.status, lineOf(noTemplate.stdout, 'STOP')]).toEqual([3, behaviorStop]);
   });
 });
 
@@ -757,3 +789,177 @@ describe('finish with an owner-accepted edit after a fix-check (GST-965, GBRA-27
   });
 });
 
+
+// Value: protects=a granted fix-check's clean read clears the paths it reviewed at Step 16, a gate-edited test included, so
+//   finish does not send them back through Steps 5–11.5 (GEVA-218, gstack-evals#168); fails_when=finish routes a path inside
+//   the fix-check's range as behavior, counts a path edited after the fix-check, or counts a row that is not a completed clean
+//   fix-check with a range base; seam=finish's route reading the review log; no_claim=Step 11.5's binding
+describe('finish after a completed fix-check (GST-1130, GEVA-218)', () => {
+  const TEST_V1 = "import { expect, test } from 'bun:test';\ntest('a', () => { expect(2).toBe(2); });\n";
+  const TEST_V2 = "import { expect, test } from 'bun:test';\ntest('a', () => { expect(2).toBe(2); }, 1_000);\ntest('b finishes fast', () => { expect(1 + 1).toBe(2); }, 1_000);\n";
+  const logFixCheck = (f: ShipFx, row: Record<string, unknown>) => {
+    const start = f.run(path.join(BIN, 'gstack-review-log'), ['--start', 'review-fix-check']);
+    expect(start.status).toBe(0);
+    return f.run(path.join(BIN, 'gstack-review-log'), [JSON.stringify({ skill: 'review-fix-check', timestamp: '2026-11-02T00:00:00Z', via: 'ship', review_scope: 'frozen', status: 'clean', issues_found: 0, critical: 0, ...row }), '--finish', start.stdout.trim()]);
+  };
+  const grant = (f: ShipFx, stopHead: string) => {
+    const a = f.run(path.join(BIN, 'gstack-approvals'), ['add', '--ask', `Owner grant: one scoped fix-check after round 2 (review_loop_grant ${stopHead.slice(0, 12)})`, '--words', 'one scoped fix-check after round 2', '--by', 'GStack Minder', '--scope', 'this /ship invocation', '--json'], { GSTACK_APPROVALS_MIRROR: '0' });
+    expect(a.status).toBe(0);
+    return JSON.parse(a.stdout).added[0] as string;
+  };
+  const afterFixCheck = () => {
+    const f = fx({ 'src/x.ts': 'export const x = 1;\n' }, { 'src/x.ts': 'export const x = 2;\n', 'test/x.test.ts': TEST_V1 });
+    const passHead = f.git('rev-parse', 'HEAD').stdout.trim();
+    const reviewed = wtree(f);
+    f.write({ 'src/x.ts': 'export const x = 3;\n', 'test/x.test.ts': TEST_V2 }); f.commit('fix the round-2 blocker and bound its case');
+    return { f, passHead, fixHead: f.git('rev-parse', 'HEAD').stdout.trim(), reviewed, post: snapshot(f) };
+  };
+
+  test('paths inside a completed clean fix-check range count as reviewed, a gate-edited test included; a later edit still stops', () => {
+    const { f, passHead, fixHead, reviewed, post } = afterFixCheck();
+    const plain = finish(f, reviewed, post);
+    expect([plain.status, plain.stdout.includes('STOP: behavior, tests or build inputs changed since review (src/x.ts,test/x.test.ts)')]).toEqual([3, true]);
+    const id = grant(f, passHead);
+    expect(logFixCheck(f, { completed: true, converged: true, range_base: passHead }).status).toBe(0);
+    const r = finish(f, reviewed, post);
+    expect(lineOf(r.stdout, 'FIX_CHECK')).toBe(`FIX_CHECK: reviewed src/x.ts,test/x.test.ts (fix-check at ${fixHead.slice(0, 12)}, range from ${passHead.slice(0, 12)}, grant ${id})`);
+    expect(lineOf(r.stdout, 'ROUTE')).toMatch(/ behavior=0 docs=0 metadata=0 tests=0 base=unknown context=0 fix_checked=2$/);
+    expect([r.status, lineOf(r.stdout, 'EVIDENCE')]).toEqual([0, expect.stringMatching(/^EVIDENCE: FRESH label=tests /)]);
+    f.write({ 'src/x.ts': 'export const x = 4;\n' }); f.commit('an edit after the fix-check');
+    const late = finish(f, reviewed, post);
+    expect(lineOf(late.stdout, 'FIX_CHECK')).toStartWith('FIX_CHECK: reviewed test/x.test.ts (');
+    expect([late.status, late.stdout.includes('STOP: behavior, tests or build inputs changed since review (src/x.ts)')]).toEqual([3, true]);
+  });
+
+  test('a clean fix-check row with no recorded review_loop_grant for a stop head in its range is not counted', () => {
+    const { f, passHead, reviewed, post } = afterFixCheck();
+    expect(logFixCheck(f, { completed: true, converged: true, range_base: passHead }).status).toBe(0);
+    const ungranted = finish(f, reviewed, post);
+    expect(lineOf(ungranted.stdout, 'FIX_CHECK')).toBe('FIX_CHECK: not counted (no approved review_loop_grant names a stop head inside its range_base..commit)');
+    expect([ungranted.status, ungranted.stdout.includes('STOP: behavior, tests or build inputs changed since review (src/x.ts,test/x.test.ts)')]).toEqual([3, true]);
+    grant(f, mergeBase(f));
+    const elsewhere = finish(f, reviewed, post);
+    expect([elsewhere.status, lineOf(elsewhere.stdout, 'FIX_CHECK')]).toEqual([3, 'FIX_CHECK: not counted (no approved review_loop_grant names a stop head inside its range_base..commit)']);
+  });
+
+  test('a fix-check row that did not finish clean, or names no range base, is not counted', () => {
+    const { f, passHead, reviewed, post } = afterFixCheck();
+    expect(logFixCheck(f, { completed: false, converged: false, range_base: passHead }).status).toBe(0);
+    const incomplete = finish(f, reviewed, post);
+    expect(lineOf(incomplete.stdout, 'FIX_CHECK')).toBe('FIX_CHECK: not counted (missing start capture or incomplete/nonconverged pass)');
+    expect([incomplete.status, incomplete.stdout.includes('STOP: behavior, tests or build inputs changed since review (src/x.ts,test/x.test.ts)')]).toEqual([3, true]);
+    expect(logFixCheck(f, { completed: true, converged: true }).status).toBe(0);
+    const unranged = finish(f, reviewed, post);
+    expect(lineOf(unranged.stdout, 'FIX_CHECK')).toBe('FIX_CHECK: not counted (the row names no range_base commit on this branch)');
+    expect(unranged.status).toBe(3);
+    const fork = mergeBase(f);
+    expect(logFixCheck(f, { completed: true, converged: true, range_base: fork }).status).toBe(0);
+    const early = finish(f, reviewed, post);
+    expect(lineOf(early.stdout, 'FIX_CHECK')).toBe(`FIX_CHECK: not counted (range_base ${fork.slice(0, 12)} does not hold the reviewed tree)`);
+    expect(early.status).toBe(3);
+  });
+
+  // Value: protects=a base merge after the granted fix-check that also edits a fix-checked file keeps that file's credit when its
+  //   patch against the base is the one the fix-check read (#3916 open note, merge 131a856); fails_when=finish compares the
+  //   fix-check commit's tree with the current tree path by path and prints FIX_CHECK: reviewed none, or credits a branch edit
+  //   made after the merge; seam=finish's route reading the review log; no_claim=a conflict resolution's meaning
+  test('a base merge that also edits a fix-checked file keeps the credit while the branch patch is unchanged', () => {
+    const f = fx({ 'src/x.ts': lines(9) }, { 'src/x.ts': lines(9, { 5: 'export const l5 = 50;' }), 'test/x.test.ts': TEST_V1 });
+    const passHead = f.git('rev-parse', 'HEAD').stdout.trim();
+    const reviewed = wtree(f);
+    const reviewedBase = mergeBase(f);
+    f.write({ 'src/x.ts': lines(9, { 5: 'export const l5 = 51;' }), 'test/x.test.ts': TEST_V2 }); f.commit('fix the round-2 blocker and bound its case');
+    const fixHead = f.git('rev-parse', 'HEAD').stdout.trim();
+    const post = snapshot(f);
+    const id = grant(f, passHead);
+    expect(logFixCheck(f, { completed: true, converged: true, range_base: passHead }).status).toBe(0);
+    f.advanceBase({ 'src/x.ts': lines(9, { 1: 'export const l1 = 100;' }), 'src/y.ts': 'export const y = 1;\n' });
+    mergeMain(f);
+    expect(f.git('show', 'HEAD:src/x.ts').stdout).toBe(lines(9, { 1: 'export const l1 = 100;', 5: 'export const l5 = 51;' }));
+    const r = finish(f, reviewed, post, ['--reviewed-base', reviewedBase]);
+    expect(lineOf(r.stdout, 'FIX_CHECK')).toBe(`FIX_CHECK: reviewed src/x.ts,test/x.test.ts (fix-check at ${fixHead.slice(0, 12)}, range from ${passHead.slice(0, 12)}, grant ${id})`);
+    expect([r.status, lineOf(r.stdout, 'ROUTE'), lineOf(r.stdout, 'DOCS')]).toEqual([0, expect.stringMatching(/ behavior=0 docs=0 metadata=0 tests=0 base=1 context=0 fix_checked=2$/), expect.stringMatching(/^DOCS: fresh .*carried: tests=0 base=1 /)]);
+    f.write({ 'src/x.ts': lines(9, { 1: 'export const l1 = 100;', 5: 'export const l5 = 52;' }) }); f.commit('an edit after the merge');
+    const late = finish(f, reviewed, post, ['--reviewed-base', reviewedBase]);
+    expect(lineOf(late.stdout, 'FIX_CHECK')).toStartWith('FIX_CHECK: reviewed test/x.test.ts (');
+    expect([late.status, late.stdout.includes('STOP: behavior, tests or build inputs changed since review (src/x.ts)')]).toEqual([3, true]);
+  });
+
+  // Value: protects=the docs audit carries a path only on the tree finish checks, so a --build that rewrites an audited doc after
+  //   the commit check is still stale (#3970 outside voice); fails_when=the carry compares HEAD and prints DOCS: fresh;
+  //   seam=finish's docsFresh; no_claim=push's own working-tree guard
+  test('a build that rewrites an audited doc after the commit check keeps the docs audit stale', () => {
+    const f = fx({ 'README.md': '# Fx\n' }, { 'README.md': '# Fx, from the branch\n' });
+    const reviewed = wtree(f);
+    const post = snapshot(f);
+    const r = finish(f, reviewed, post, ['--reviewed-base', mergeBase(f), '--docs-rechecked', '--build', "printf '# Generated replacement never audited\\n' > README.md"]);
+    expect([r.status, lineOf(r.stdout, 'DOCS')]).toEqual([3, 'DOCS: stale (README.md)']);
+  });
+
+  test('a fix-check logged on uncommitted content is not counted', () => {
+    const { f, passHead, reviewed, post } = afterFixCheck();
+    f.write({ 'src/x.ts': 'export const x = 9;\n' });
+    expect(logFixCheck(f, { completed: true, converged: true, range_base: passHead }).status).toBe(0);
+    f.git('checkout', '--', 'src/x.ts');
+    const r = finish(f, reviewed, post);
+    expect(lineOf(r.stdout, 'FIX_CHECK')).toBe('FIX_CHECK: not counted (the row was logged on content no branch commit holds)');
+    expect(r.status).toBe(3);
+  });
+});
+
+// Value: protects=a base merge that puts lines already merged at base next to the branch's reviewed, unchanged hunk reaches
+//   the scoped read even when those base lines push a packet section past PACKET_SECTION_CAP (founderstar#515, #3923); only the
+//   branch's own lines count toward the cap; fails_when=finish forces the behavior route for a section that is over only
+//   because of base lines, or lets a section the branch's own lines push over reach the scoped read; seam=contextPacket's count
+describe('base lines do not count toward the scoped-review cap (GST-1226, founderstar#515, #3923)', () => {
+  const block = (name: string, n: number) => Array.from({ length: n }, (_, i) => `export const ${name}${i + 1} = ${i + 1};`);
+  const join = (rows: string[]) => rows.join('\n') + '\n';
+  const at = (n: number, after: number, add: string[]) => { const rows = lines(n).trimEnd().split('\n'); rows.splice(after, 0, ...add); return rows; };
+  const scoped = (r: { status: number | null; stdout: string }) => [r.status, lineOf(r.stdout, 'ROUTE').replace(/^.* behavior=/, 'behavior='), r.stdout.includes('STOP: base context moved next to the reviewed hunks in src/shots.ts'), r.stdout.includes('SCOPED_REVIEW: too large')];
+
+  test('210 lines another PR merged at base next to the branch\'s 76 reviewed lines reach the scoped read', () => {
+    const pr = block('pr', 76), other = block('other', 210);
+    const f = fx({ 'src/shots.ts': lines(20) }, { 'src/shots.ts': join(at(20, 10, pr)) });
+    const reviewed = wtree(f), reviewedBase = mergeBase(f), post = snapshot(f);
+    f.advanceBase({ 'src/shots.ts': join(at(20, 11, other)) });
+    const merged = at(20, 11, other); merged.splice(10, 0, ...pr);
+    mergeMain(f, { 'src/shots.ts': join(merged) });
+    expect(f.git('show', 'HEAD:src/shots.ts').stdout).toBe(join(merged));
+    expect(scoped(finish(f, reviewed, post, ['--reviewed-base', reviewedBase]))).toEqual([3, 'behavior=0 docs=0 metadata=0 tests=0 base=0 context=1', true, false]);
+  });
+
+  test('a changed trailing context line with the same +/- lines reaches the scoped read beside a 221-line base rewrite', () => {
+    const pr = block('pr', 76);
+    const f = fx({ 'src/shots.ts': lines(300) }, { 'src/shots.ts': join(at(300, 10, pr)) });
+    const reviewed = wtree(f), reviewedBase = mergeBase(f), post = snapshot(f);
+    const edits: Record<number, string> = { 12: 'export const l12 = 120;' };
+    for (let i = 60; i <= 280; i++) edits[i] = `export const l${i} = ${i * 10};`;
+    f.advanceBase({ 'src/shots.ts': lines(300, edits) });
+    const merged = lines(300, edits).trimEnd().split('\n'); merged.splice(10, 0, ...pr);
+    mergeMain(f, { 'src/shots.ts': join(merged) });
+    expect(f.git('show', 'HEAD:src/shots.ts').stdout).toBe(join(merged));
+    expect(scoped(finish(f, reviewed, post, ['--reviewed-base', reviewedBase]))).toEqual([3, 'behavior=0 docs=0 metadata=0 tests=0 base=0 context=1', true, false]);
+  });
+
+  test('a section the branch\'s own 230 lines push past the cap still takes the behavior route', () => {
+    const pr = block('pr', 230), other = block('other', 5);
+    const f = fx({ 'src/shots.ts': lines(20) }, { 'src/shots.ts': join(at(20, 10, pr)) });
+    const reviewed = wtree(f), reviewedBase = mergeBase(f), post = snapshot(f);
+    f.advanceBase({ 'src/shots.ts': join(at(20, 11, other)) });
+    const merged = at(20, 11, other); merged.splice(10, 0, ...pr);
+    mergeMain(f, { 'src/shots.ts': join(merged) });
+    const r = finish(f, reviewed, post, ['--reviewed-base', reviewedBase]);
+    expect(scoped(r)).toEqual([3, 'behavior=1 docs=0 metadata=0 tests=0 base=0 context=0', false, true]);
+    expect(r.stdout.includes('STOP: behavior, tests or build inputs changed since review (src/shots.ts)')).toBe(true);
+  });
+
+  test('a base change past BASE_SECTION_CEILING counts in full again and takes the behavior route', () => {
+    const pr = block('pr', 76), other = block('other', 2100);
+    const f = fx({ 'src/shots.ts': lines(20) }, { 'src/shots.ts': join(at(20, 10, pr)) });
+    const reviewed = wtree(f), reviewedBase = mergeBase(f), post = snapshot(f);
+    f.advanceBase({ 'src/shots.ts': join(at(20, 11, other)) });
+    const merged = at(20, 11, other); merged.splice(10, 0, ...pr);
+    mergeMain(f, { 'src/shots.ts': join(merged) });
+    expect(scoped(finish(f, reviewed, post, ['--reviewed-base', reviewedBase]))).toEqual([3, 'behavior=1 docs=0 metadata=0 tests=0 base=0 context=0', false, true]);
+  });
+});
