@@ -74,7 +74,7 @@ the byte-pinned `/ship` renders in `test/fixtures/golden/`).
 
 | Key | Meaning |
 |---|---|
-| `runner` | the local test command with `{files}` (gstack: `bun test --timeout=30000 {files}`, the 30 s per-test timeout CI uses); unset, it is detected (bun, vitest or jest for JS/TS files, pytest when python3 can import it (else `pytest` or `python3` is named missing), `node --test`, and `flutter test`/`dart test` per Dart package root, through fvm when that package or an ancestor pins it with `.fvmrc` or `.fvm/fvm_config.json` and fvm is on PATH; `cargo test -p <name>` per Rust crate, run from the root of the workspace the crate is a member of (Cargo's `members` globs, `exclude` and `package.workspace`), else the crate directory; a JS/TS test whose nearest package.json is a nested package declaring vitest or jest (a dependency or its `test` script) runs from that package, with package-relative paths, through the package manager its `packageManager` field or the nearest lockfile up to the repo root names: `pnpm exec`, `yarn`, `bun x`, else `npx`; a JS/TS test file that imports `@playwright/test` at the start of a line runs as `playwright test --reporter=list` from its nearest package through that same package manager, whatever the unit runner is, a type-only import (`import type …`, or one whose every specifier is `type X`) does not count, file arguments are passed as escaped regexes anchored to the path (Playwright reads them as regexes), and a run where every test fails and Playwright says its browser is not installed is `PREGATE_ENVIRONMENT` (a partial install, where some tests pass, stays the diff's failure); every other test keeps the root detection, split by language when no one runner fits them all, so `.mjs` and `.py` root tests each get their own runner); nothing detected, a Dart SDK, cargo or package manager missing from PATH, a `.dart` file with no `pubspec.yaml` above it, a `.rs` file outside any crate, or one in a crate whose name Cargo would reject (anything but letters, digits, `_` and `-`), is `incomplete` (the runnable groups still run, so a real failure still fails) |
+| `runner` | the local test command with `{files}` (gstack: `bun test --timeout=30000 {files}`, the 30 s per-test timeout CI uses); set, the local lane gives it only the selected files its tool runs, judged by extension (JS/TS files for `bun test`, `node --test`, `deno test`, vitest, jest, mocha, ava or playwright; `.py` files for pytest; each matched as a whole word, so `npx vitest run` counts and `tests/node/run.sh` does not; every file for any other command, such as a `node scripts/run-tests.js` dispatcher, or one naming both), and the lanes detail names each file it cannot run as not run and not counted as covered, so a `*_test.py` never reaches a local `bun test` (no Python lane runs beside a declared runner; the remote gate and `test_backend` commands still receive the whole selection); unset, it is detected (bun, vitest or jest for JS/TS files, pytest when python3 can import it (else `pytest` or `python3` is named missing), `node --test`, and `flutter test`/`dart test` per Dart package root, through fvm when that package or an ancestor pins it with `.fvmrc` or `.fvm/fvm_config.json` and fvm is on PATH; `cargo test -p <name>` per Rust crate, run from the root of the workspace the crate is a member of (Cargo's `members` globs, `exclude` and `package.workspace`), else the crate directory; a JS/TS test whose nearest package.json is a nested package declaring vitest or jest (a dependency or its `test` script) runs from that package, with package-relative paths, through the package manager its `packageManager` field or the nearest lockfile up to the repo root names: `pnpm exec`, `yarn`, `bun x`, else `npx`; a JS/TS test file that imports `@playwright/test` at the start of a line runs as `playwright test --reporter=list` from its nearest package through that same package manager, whatever the unit runner is, a type-only import (`import type …`, or one whose every specifier is `type X`) does not count, file arguments are passed as escaped regexes anchored to the path (Playwright reads them as regexes), and a run where every test fails and Playwright says its browser is not installed is `PREGATE_ENVIRONMENT` (a partial install, where some tests pass, stays the diff's failure); every other test keeps the root detection, split by language when no one runner fits them all, so `.mjs` and `.py` root tests each get their own runner); nothing detected, a Dart SDK, cargo or package manager missing from PATH, a `.dart` file with no `pubspec.yaml` above it, a `.rs` file outside any crate, or one in a crate whose name Cargo would reject (anything but letters, digits, `_` and `-`), is `incomplete` (the runnable groups still run, so a real failure still fails) |
 | `dependencies` | glob → test files for subprocess targets, runtime reads and generated inputs the import graph cannot see; `[]` declares "no lane needed" (docs, licences). A `[]` that matches a deleted test does not skip it: the deleted test still runs its owning suite, and a file naming it that `[]` covers (a durations list) counts as covered. With this key present, even empty, the policy [declares lanes](#lane-requirements) |
 | `empty_lanes` | extra globs for the docs/no-tests empty lane. Any Markdown file already qualifies with no pin file when no test depends on it (the same import graph as other files: a quoted path, a `join()` of path segments, an import, or a `dependencies` entry). reStructuredText and AsciiDoc count as Markdown here. README, CHANGELOG, CONTRIBUTING, LICENSE, AGENTS and CLAUDE qualify even without `.md`, and so does licence text under any vendored name (`roboto-LICENSE.txt`, `LICENSE-MIT`, `licenses/*.txt`). Source code and files under a test directory never qualify. A test that reads the file still selects that test |
 | `selection` | `workflow.yml/job` → a command printing the lane's file list, for matrices a planner computes (gstack: `scripts/test-free-shards.ts --list`) |
@@ -167,6 +167,8 @@ Review each entry before committing the file on the base branch.
 ## `.gstack/always-run.json`
 
 `{ "tests": [globs] }` names whole-tree tests that scan every file of a kind (tripwires, ratchets, conformance and fixture inventories). A diff-selected run never maps a touched file to them, so they used to pass the selected gate and then fail CI (GST-98). When a branch selects any test, owes a lane, or edits this file, the `lanes` selection adds every tracked test file a glob matches. `--explain` prints each one as `<test> (always_run, .gstack/always-run.json)`, and a glob that matches no test as `<glob> matches no test file`. A docs-only branch adds nothing.
+
+The globs are the union of the working tree's list and the merge base's list (GST-233), so a branch can add entries but never drop one main already has. A test only the merge base's list names prints as `<test> (always_run, merge base .gstack/always-run.json)`. `scripts/test-impact.ts` takes the same union with its `--base` ref and never reuses a result for those tests ([test-impact.md](test-impact.md)).
 
 The list lives in its own file, not in `pregate.json`, because older pregate readers reject unknown keys there. A repository that ignores `.gstack/` (gstack does) tracks the file with `git add -f`, as it does `pregate.json`. A missing file means an empty list. A file that is not JSON, or whose `tests` is not a list of non-empty strings, stops the check with that message. gstack's own list matches 16 test files; the 13 with a seed in `scripts/free-test-durations.json` (recorded 2026-10-19) total about 13 s there, and `bun-entry-isolation`, `launch-env-echo-ratchet` and `review-packets-removed` have no seed yet.
 
@@ -775,20 +777,28 @@ once:
   them here. A /ship lane or guard whose inventory names one carries the
   covered files and runs only the skipped ones here, through the runner its
   `ship_lanes_from` entry declares as `per_file` (a command with `{files}`,
-  such as `"per_file": "bun test --timeout=30000 {files}"`, the same form as the
-  tests stage's `runner`). That run is recorded under `<label>.skipped`, the
-  `LANE:` line adds `skipped_here=<n> file(s) tests_ran_here=<n>`, and the CI row
-  is written only after four checks pass. In order, they are the remainder's
-  exit (`skipped_failed`), its test count above zero (`skipped_zero_run`), every
-  carried run again (`run_changed`), and the working tree once more
+  such as `"per_file": "bun --no-env-file test --timeout=30000 {files}"`, the
+  same form as the tests stage's `runner`). It runs one file at a time, each path
+  anchored with `./` because Bun reads a bare relative path as a substring
+  filter. Those runs are recorded under `<label>.skipped`, the `LANE:` line adds
+  `skipped_here=<n> file(s) tests_ran_here=<n>`, and the CI row is written only
+  after four checks pass. In order, they are each file's exit
+  (`skipped_failed`), each file's test count above zero (`skipped_zero_run`),
+  every carried run again (`run_changed`), and the working tree once more
   (`tree_changed`, for an edit made during those checks). An edit made while the
   remainder itself runs leaves its ledger row without a tree, so it shows as
-  `skipped_zero_run`. Any of these refusals runs the whole lane here. An entry with no `per_file` refuses as
+  `skipped_zero_run`. One exception to the count check (GST-1314): a file whose
+  Bun summary registered tests and skipped every one of them here too, the way
+  an env-gated or tool-gated file skips by design, is not owed. The CI row lists
+  it under `skipped_here.not_owed` and the `LANE:` line adds
+  `not_owed_here=<n>`. A file that registers no test here still refuses, and so
+  does a file whose log hit the 2 MB cap, since a cut log's last summary may not
+  be the run's. Any of these refusals runs the whole lane here. An entry with no `per_file` refuses as
   `inventory_skipped`, naming the files, and the lane runs here whole. A partly
-  skipped file ran tests and stays covered. gstack's own Free Tests writer does
-  not emit the list yet: it starts in the same follow-up pull request that
-  declares `per_file` for gstack's `bun run test` lane, so gstack's carry does not
-  change until both switch on together. A `tree.json`
+  skipped file ran tests and stays covered. gstack's `bun run test` lane
+  declares `per_file`, and its Free Tests writer starts emitting the list in a
+  follow-up pull request, so the runner is in place on the base before any run
+  lists a skipped file. A `tree.json`
   without the key (older writers, other repos) is read as before, with every
   listed file counted as run; add the list to your writer to close that gap.
   The remote gate's clearance does not use it: that gate runs on a Linux runner

@@ -458,7 +458,7 @@ and matching is token-bounded: `costume` never reads as cost.
 | money | a path segment naming cost, spend, budget, ledger, billing, price, fee or invoice; or a changed line with an identifier ending in `_usd` or `Usd`, unless every such name on the line is a reported cost (made only of words like cost, total, per, trial, mean or sum) and the line has no cap, limit, budget, spend, price, fee, charge, refund, amount, reservation or estimate word (the full list is `MONEY_USD_WORDS` in `lib/review-risk.ts`), no `<` or `>` comparison and no number set on it: summing or printing `cost_usd` is not money (GST-962); any `spend_cap` spelling; or a call to a paid provider `lib/pricing.ts` prices. A data file no code reads (the same consumer scan the depth uses) under a `doc/`, `docs/`, `wiki/`, `results/` or `reports/` directory counts as money only for a `spend_cap` or paid-provider line, never for its name, a `_usd` or `Usd` identifier (reported cost or not) or a metering word (GST-961); every other class still reads it |
 | gate | a hunk the gate scan tagged: a relaxed threshold, a skipped test, a loosened check |
 | auth | `SCOPE_AUTH` from `gstack-diff-scope`, on a code path with an auth, session, jwt, permission or role token in its name; a data file named for sessions (`recovered-sessions.jsonl`) outside a config location does not set `SCOPE_AUTH`, and `SCOPE_AUTH` fails safe: any name token containing auth sets it (`auth.ts`, `/auth/`, `oauth`, `useAuth.ts`, `nextauthmiddleware.ts`) except the authorship words `author`, `authors`, `authored`, `authoring`, `authorship`, `authority`, `authorities`, `coauthor` and `coauthors` |
-| secret | a secrets, credentials, keychain or token path, or a changed line that reads a key-named environment variable (`OPENAI_API_KEY`, `GH_TOKEN`) or a credential store |
+| secret | a secrets, credentials or keychain path, a dotenv file (`.env`, `.env.production`; not `.env.example`), an SSH private key (`id_rsa`) or a key-store extension (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.ppk`), by name alone; a token-named path by name too, except a style or engine file (`token.gd`, `tokens.css`, `.scss`, `.sass`, `.less`, `.styl`), which counts only when its changed lines hold a value the credential scanner reads as a secret or have no text to read, since design and lexer tokens share the name (GST-1350); or a changed line that reads a key-named environment variable (`OPENAI_API_KEY`, `GH_TOKEN`) or a credential store |
 
 An input the classifier cannot read (the diff, `gstack-diff-scope`, the gate
 scan) fails closed to all four classes. `TARGETED_RULES` hashes the patterns.
@@ -524,6 +524,59 @@ Independently of the key, no reader is handed more than 2,000,000 bytes of
 diff: `gstack-review-dispatch` stops with `REVIEW_DIFF_TOO_LARGE` before it writes
 anything, instead of a review of the part a reader happened to see.
 
+## What readers may fetch
+
+Every reader brief closes with the fetch rule, before the workspace paragraph:
+review only this checkout and its local git history (the diff base is already
+local), and never clone, fetch, pull or download another repository, dataset or
+archive. The rule names each forbidden shape from one table in
+`lib/review-fetch.ts`: `git clone`, `fetch`, `pull`, `ls-remote` or `submodule
+update` against a network remote; `gh repo clone`, `gh api` tarball, zipball or
+contents, `gh release download`; dataset or model downloads; `curl` or `wget` of
+an archive or a raw repository file; package installs from a git URL. A clone of
+a local path or a `file://` URL is fine, and so is reading a single
+documentation page. No brief asks for a fetch today. A repository's
+[`readers` key](ship-policy.md#readers) adds hosts, repositories and paths no
+reader may reach at all, and a one-line note every brief carries.
+
+`gstack-review-dispatch audit-fetch --events <jsonl>` scans one reader's tool
+calls (inputs only, never results) against the same table and the pass's policy.
+It splits each command into words and flags only a known download tool aimed at
+a network target, so a reader that greps for `git clone` or reads the scanner's
+source is not a hit, while `bash -c`, wrappers such as `timeout` and `command:`
+strings inside a program are read through. A fetch of the checkout's own remote
+by name is a note. The result is recorded on the reader in the pass manifest as
+a note (`fetch_audit`, `enforced: false`): Capy gives a pass no way to read a
+reader's own tool calls, so the scanner serves hosts that can hand it a
+transcript.
+
+The rule is enforced per stage. Before a stage's readers start, the pass program
+runs `gstack-review-dispatch sweep --phase start`, an inventory of git
+repositories and files of 100 MB or more under the workspace, home and the temp
+dir (bounded at depth 6, 200,000 entries and 20 seconds; past a bound the sweep
+is `partial`, a note). After the stage's last reader is collected,
+`--phase end` diffs against it. A new repository with a network remote, or a
+new big file, is a violation. Every reader of that stage is quarantined (reply
+under `<out>/quarantine/`, findings out of `merged.jsonl`, never shown to the
+Red Team or returned), `verify` refuses with `FETCH_VIOLATION`, and each slot
+reruns once as `<reader>#2`, which is not a review round. The rerun starts only
+once every path the first attempt found is gone: while one exists, a rerun reader
+could open it and still sweep clean, so no reader of any stage, Step 11's voices included, starts and the pass stops
+(`FETCH_RERUN_BLOCKED`). A fetch on the rerun stops the pass (`FETCH_RERUN_SPENT`), and resuming it starts no later stage. Nothing is deleted for you, and no delete
+command is printed: each found path gets a `KEEP:` line to inspect and leave alone. A remote URL is read through git's own config parser and printed and recorded without its `user:token@` part or query; a value that does not parse as a URL reads `<redacted>`.
+Attribution is per stage until the platform exposes reader ids: a violation
+names the stage and its readers, never the one reader that fetched, and a clean
+reader of that stage reruns with the rest. The sweep sees only repositories that
+keep a network remote and files of 100 MB or more, outside `node_modules` and
+outside other repositories. An extracted archive, a smaller raw download, a fetch
+with no remote, a clone nested in another repository and a clone deleted before
+the stage ends all go unseen until the platform exposes reader transcripts.
+
+What this protects: the readers' findings, the merged review and PR text never
+carry a sealed file a reader fetched or opened. What it cannot protect: data that
+is already public may be in a model's training set, and the rule does nothing
+about that.
+
 ## What the receipt records
 
 `gstack-review-scope summary --since <REVIEW_SINCE> --run <run dir>` reads this invocation's
@@ -533,7 +586,7 @@ puts in the receipt:
 
 | Field | Meaning |
 |---|---|
-| `review_loop.passes` | full review passes this ship ran (1 or 2; up to 3 under `review_scope: all`) |
+| `review_loop.passes` | full review passes this ship ran (1 or 2; up to 3 under `review_scope: diff-plus-blocking` or `all`) |
 | `review_loop.blocking_found` | every blocker found (GST-951): the rows' blocking findings (classified, or an unclassified CRITICAL), plus each ledger CRITICAL (as collected or judged) that no row finding from the same reviewer at the same path:line accounts for (each row finding pairs with one per ledger), so an adversarial, outside-voice or not-yet-classified blocker counts and one whose newest classification is below the floor does not. An unreadable ledger, merged file or judged set, or a judged set changed since `judge`, is `REVIEW_SCOPE_LEDGER`, never a count |
 | `review_loop.unrecorded` | blockers found that no row gives a disposition (fixed, deferred, noted, skipped, a gate answer); absent when 0 |
 | `review_loop.unbound` | what could not bind (GST-1168), each printed as `REVIEW_SCOPE_UNBOUND: <what>: <why>`: a row with no start token and no readable time, a `pN` ledger with no review row of pass N, a row finding's `ledger_id` no ledger collected, a `Review-Finding` trailer naming nothing; absent when 0 |
@@ -595,6 +648,49 @@ refuses a `review-fix-check` row without boolean `completed` and `converged`,
 before it consumes the start token, because without them the row reads
 `UNVERIFIED` and finish cannot count it.
 
+<a id="bounded-post-review-edits"></a>
+### Bounded post-review edits (GST-1276, GST-1311)
+
+Some edits are required after the review binds: the Step 14.5 docs audit
+corrects stale policy text, pregate asks for a lane mapping, and a verify
+step renames rows in a size baseline. Finish proves each one's kind from
+the diff and sends it to one scoped reader instead of Steps 5–11.5. That
+read is not a review round under R51 (Garry, 2026-11-04: "Do it."), so it
+needs no grant. It is the same stage 2.1 reader that test code changed
+after review already takes. A path is bounded when finish runs with
+`--reviewed-base`, the path changed at most 20 lines since review, its
+diff is readable text, the gate scan tags none of its hunks, and it is one
+of these kinds:
+
+- **audit prose**: `docs/*.md` or the root `AGENTS.md` or `CLAUDE.md`,
+  never a gate path, whose bytes now are the ones the post-audit snapshot
+  (`--docs-post`) recorded. An edit made after the snapshot isn't the
+  audit's.
+- **lanes**: `.gstack/pregate.json` changes that pregate's own
+  `headPolicyDiff` reads as added tests only, over the reviewed copy. A
+  removed mapping, a new `[]` declaration or any other key stops.
+- **bookkeeping**: a path matching a `bookkeeping` glob in the base
+  branch's ship policy ([ship-policy.md#bookkeeping](ship-policy.md#bookkeeping)),
+  first touched after review or not, a `.txt` table included, never a gate
+  path or a path under `.gstack/` or `.github/`.
+
+`ROUTE:` prints `bounded=<n>`, and finish writes the packet with every
+bounded hunk, a reading note per kind and the targeted brief for every
+class. The reader's clean record must carry the packet's `packet_sha256`,
+which the STOP line prints. A candidate that fails a proof stays behavior,
+and finish prints `ROUTE_BOUNDED_REFUSED: <path> <reason> (fix: …)`
+([troubleshooting](troubleshooting.md#route-bounded-refused)). A lane
+change whose other top-level keys differ from the reviewed copy stops too. A
+targeted record read before the edits does not carry to the new head:
+receipt write still asks for the targeted reader on HEAD. A test file whose only removed lines are swapped
+one for one with lines that differ inside plain quoted strings, in
+statements with no assertion or test call, takes the plain test route (the
+scoped reader) instead of behavior. A changed expected value in the
+assertion's own statement (a multi-line one too) or in a template literal,
+code inside an interpolated or prefixed string, or a deleted assertion still
+stops. A value in a case table that a later test reads takes the scoped
+reader.
+
 The receipt's summary line prints `passes=<n> blocking_found=<k> deferred=<m>`,
 which is what a scorecard tracks (target: a median of 1 pass per PR). A
 receipt carried across a base merge or a test-only fix
@@ -609,13 +705,13 @@ difference passed a scoped review.
 | Value | Pass 1 | Blocking finding in unchanged code | Pass 2+ | Cap |
 |---|---|---|---|---|
 | `frozen` (default) | the diff | filed as an issue, listed as deferred | the range since the previous pass, blocking only | 2 rounds (a fix-check is one) |
-| `diff-plus-blocking` | the diff | fixed in this PR | the range since the previous pass, blocking only | 2 rounds (a fix-check is one) |
+| `diff-plus-blocking` | the diff | fixed in this PR | the range since the previous pass, blocking only | 3 fix cycles (Step 9.4 runs the review plan's two-round cap only under `frozen`) |
 | `all` | everything | fixed in this PR | the whole diff, every finding | 3 fix cycles |
 
 `diff-plus-blocking` is the fallback for a repository where deferred issues pile
 up; `all` is the loop as it ran before the key existed. A value other than
 `frozen` needs `min_gstack_version` at or past the release that added the key
-(`REVIEW_SCOPE_KEY_VERSION` in `lib/ship-policy.ts`) so an older gstack refuses
+(`REVIEW_SCOPE_KEY_VERSION` in `lib/ship-policy-keys.ts`) so an older gstack refuses
 the file by name instead of ignoring the key.
 
 ## Reviewer fan-out
@@ -712,11 +808,26 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    `Severity` or `Blocks` line comes, so those fields never split off as a second record (GST-1031). An unnumbered, unlabeled bullet with no file:line
    under a paragraph finding whose Severity or Blocks line has not come yet is that finding's detail, so the field line after it
    lands on the finding; a numbered item is its own finding.
-   A negated severity word still collects at its label ("found nothing CRITICAL", "No P0/P1 issues"), so a reader's
-   closing summary is a known phantom: it collects at that label. When it is a summary candidate (no lead label, no
+   A reader's own no-defect closing sentence is no finding at the label it denies (GST-435): a prose line with no
+   list, heading, bold or lead label, no `Severity` or `Blocks` field, no FIXABLE or INVESTIGATE, no file:line or path
+   and no exception clause, with no line above it in its paragraph that runs on (no closing period) or names an
+   exception, and whose every labelled sentence is
+   wholly a denial ("I found nothing CRITICAL.", "I found no defect that is CRITICAL.", "No P0/P1 issues.", "Neither
+   finding is CRITICAL."), a count ("I found three INFORMATIONAL issues and nothing CRITICAL" collects at
+   INFORMATIONAL) or "nothing blocks", with labels spelled as collect spells them. Such a line collects nothing when it
+   is only those sentences; when it also holds an unlabelled sentence ("Here is what I checked:", or one that may
+   describe a defect) it stays on record at INFORMATIONAL, never as a blocker. A quantifier that points at a finding
+   elsewhere ("nothing else", "no other", "remaining", "new"), a named defect in the same sentence ("No auth check
+   guards the admin route, so nothing CRITICAL") or any other labelled sentence on the line keeps the whole line at its
+   label, and a reply whose only text is a no-defect sentence, with no clean marker, is still no review. Any other negated severity word
+   still collects at its label, so a closing summary with a clause of its own ("I checked these against the post and
+   found nothing CRITICAL") is a known phantom: it collects at that label. When it is a summary candidate (no lead label, no
    `Severity` or `Blocks` field, and no file:line or exception clause in any sentence naming a label: "so nothing is
    CRITICAL", "the test covers the CRITICAL fix"), collect marks it `summary_candidate` and lead judgment may lower it
-   with a reason, which judge records as `dismissed` (GST-1031); otherwise lead judgment can fold it only into a finding
+   with a reason, which judge records as `dismissed` (GST-1031). A native adversarial finding whose own text states
+   `Blocks: no` and one `Severity` field may also be lowered with a reason to that Severity, never below it, and is
+   recorded as `dismissed` too (GST-1406): collect keeps the FIXABLE raise when those fields follow prose, because it
+   can't tell a finding's own fields from another subject's. Otherwise lead judgment can fold it only into a finding
    at least as severe, and it counts toward what blocks. GST-766 skipped negated labels and lost
    real blockers named in an exception clause ("No CRITICAL issues except the token leak in log.ts:3"); GSTA-167
    reverted that. Each prose finding's line also
@@ -754,7 +865,7 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    byte-exact before anything was collected is void and counted (`voided=N` on the
    verdict line); one that produced an output stays `MISMATCH`. Then output hashes
    against the merged lines they produced, and each merged line against the finding collect
-   parses at that id's index from the unchanged output file, label and raw text byte for byte
+   parses at that id's index from the unchanged output file, its reader, label and raw text byte for byte
    (`merged_line_differs` on the OUTPUT and JUDGE rows otherwise, GST-541), so an edited
    merged.jsonl cannot lower a finding or swap its text. A recorded output file that is missing
    (`output_file_missing`), a judgment run on a merged file collect did not write
@@ -784,7 +895,9 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    checked-in program `lib/capy-review-pass.js`, served by `program` and loaded
    unchanged by the gstack Capy skill. A full repeat pass takes `--diff-base` (RANGE_BASE; a scoped pass, none), a
    fix-check plan renders its reader from `--fix-list`, `--hunks`, `--tests` and `--callers`,
-   `--audit-only` runs just the `--extras` readers (Step 14.5's docs audit), and the fork
+   `--audit-only` runs just the `--extras` readers (Step 14.5's docs audit), `--voices`
+   keeps only the plan's voices for Step 11 on its own `--out` (it takes no `--extras`, and a
+   reviewer pass refuses to resume that manifest, GST-1368), and the fork
    point is found against `origin/<base>` first, as preflight does.
 7. Every brief, audit readers' included, opens with a fingerprint step and ends with a
    workspace paragraph naming the checkout the bins run in (GST-482): a reader on a shared

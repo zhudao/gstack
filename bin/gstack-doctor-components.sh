@@ -350,6 +350,7 @@ gstack_result_anchor() {
     QUEUE_LAND_STAMPED) printf '%s' 'queue-land-stamped' ;;
     QUEUE_LAND_PIN_MOVED) printf '%s' 'queue-land-pin-moved' ;;
     QUEUE_LAND_CHECKS) printf '%s' 'queue-land-checks' ;;
+    QUEUE_LAND_MERGED_CHECKS) printf '%s' 'queue-land-merged-checks' ;;
     QUEUE_LAND_NOT_CLEAN) printf '%s' 'queue-land-not-clean' ;;
     QUEUE_LAND_UNVERIFIED) printf '%s' 'queue-land-unverified' ;;
     RELEASE_STAMP_EMPTY) printf '%s' 'release-stamp-empty' ;;
@@ -360,6 +361,9 @@ gstack_result_anchor() {
     REVIEW_DIFF_TOO_LARGE) printf '%s' 'review-diff-too-large' ;;
     REVIEW_DIFF_UNREADABLE) printf '%s' 'review-diff-unreadable' ;;
     REVIEW_EXCLUDE_REFERENCE) printf '%s' 'review-exclude-reference' ;;
+    FETCH_VIOLATION) printf '%s' 'fetch-violation' ;;
+    FETCH_RERUN_BLOCKED) printf '%s' 'fetch-rerun-blocked' ;;
+    FETCH_RERUN_SPENT) printf '%s' 'fetch-rerun-spent' ;;
     APPROVAL_RECORD_INVALID) printf '%s' 'approval-record-invalid' ;;
     APPROVAL_RECORD_SECRET) printf '%s' 'approval-record-secret' ;;
     APPROVAL_RECORD_NO_BRANCH) printf '%s' 'approval-record-no-branch' ;;

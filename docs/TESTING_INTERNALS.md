@@ -324,13 +324,9 @@ changes are explicitly deferred, not counted as PR passes. Weekly/manual runs of
 runs the broad gate. This deliberately moves some defect detection later.
 
 `scripts/eval-input-cache.ts` accepts only complete, clean, first-attempt passes
-with matching before/after inputs. The audited workflow-judge adapter hashes the
-actual expanded prompt, source/fixture/rubric/runner closure, installed SDK,
-model parameters and runtime. Missing/unknown inputs force execution. Receipts
+with matching before/after inputs. Missing/unknown inputs force execution. Receipts
 are scoped to the same repository and PR, expire after 24 hours, and contain
-public scores and provenance rather than prompts or secrets. Of the 17 cases
-using `runWorkflowJudge`, 16 are eligible; the cookie workflow's custom input
-does not match the cache adapter and stays fresh, as do the other 11 quality cases.
+public scores and provenance rather than prompts or secrets.
 CI supplies the scoped cache/runtime configuration; local runs are fresh by
 default. Cached scores must
 pass current assertions; reused records retain their original source and time
@@ -455,7 +451,7 @@ and the kind fixes its trials before the run:
   non-JSON, a malformed field) fails the panel and is never resampled; a
   refusal counts as an unscored panel only when every sample refused.
   `callJudge`'s 429 backoff happens before any model output and is transport,
-  not a verdict retry. The workflow-judge cache stores whole panels only.
+  not a verdict retry.
   The `rule` case auq-matrix uses the same panel inside its one execution: each
   skill's single native capture has its recommendation substance scored by 3
   judge samples, gated on their median against the unchanged minimum of 4, and a
@@ -840,11 +836,6 @@ cleanup. No per-case budget grows. Overlay wrappers
 have a 1,830-second minimum shard wall and run without Bun retries; see the
 [overlay contract](OVERLAY_BENCHMARK_CONTRACT.md) for their unchanged work budget.
 
-The quality file reserves its whole-file wall (3,170 seconds) for every case run
-once, plus cleanup. Each still has 120 seconds of model work. Its 17 workflow
-judges own their deadline and abort signal, with five seconds for terminal
-recording inside a ten-second Bun grace; the other 11 retain their existing
-120-second Bun timeout. Late responses cannot create records or cache passes.
 When a judge's abort signal cancels its request, `callJudge`
 (`test/helpers/llm-judge.ts`) prints one `llm-judge-aborted` JSON line to
 stderr: elapsed time, wrapper `attempts` and `retryWaitsMs` (429 waits),
@@ -1444,7 +1435,7 @@ once and reused from there. It prints:
 Screening figures are labelled `screen-provisional`: the rule's preamble
 detector is a line-commonality heuristic, not T2's hunk classifier, so they
 stay heuristic until T2 lands. A `package.json` change that only moves the
-version is neither selected nor a canary trigger, and all 24 judges always run.
+version is neither selected nor a canary trigger.
 The selectors are this checkout's, so an old merge is replayed against today's
 maps. A shallow checkout says which `git fetch --shallow-since` to run. Logic:
 `lib/gate-cost.ts`; tests: `test/gate-cost.test.ts`.
@@ -1470,11 +1461,9 @@ integration tests, the Aside contract pins, and the render-wrapper pins.
 `bun run test:pr` runs the selected short live behaviors and quality judges.
 It reports deferred broad coverage; unknown dependencies restore the full gate,
 and an unmapped prompt without registered coverage blocks planning. Full free
-acceptance and required PR checks must pass before publishing. CI can reuse the
-16 workflow-judge passes for 24 hours when their complete consumed inputs and
-runtime match; records preserve original provenance. The cookie workflow's custom
-input, the other 11 judge cases, dynamic agent tests, and local runs without
-scoped cache configuration stay fresh.
+acceptance and required PR checks must pass before publishing. The quality
+judges, dynamic agent tests, and local runs without scoped cache configuration
+stay fresh.
 Scheduled/manual full coverage and `test:release` always run fresh.
 See [testing policy](../CONTRIBUTING.md#test-tiers) for commands and measured targets.
 Anything that needs Aside
@@ -1564,7 +1553,10 @@ Free-suite flake rules:
   replacement env never sees the backstop. Neither does the receiving side of
   a push to a local path: git's local transport drops `GIT_CONFIG_*` from the
   `receive-pack` it starts, so every push into a fixture's bare origin still
-  leaves a detached maintenance run in that origin. A fixture that clones such
+  leaves a detached maintenance run in that origin unless the origin's own
+  config turns it off (`maintenance.auto=false` and `gc.auto=0` on the bare
+  origin, as `test/helpers/pregate-fixture.ts` and
+  `test/helpers/restamp-fixture.ts` do). A fixture that clones such
   an origin passes `--no-local` (`coordinatorClone` in
   `test/helpers/ship-queue-fixture.ts`), so the clone reads it through git's
   transport instead of copying `objects/` entry by entry.
@@ -1695,6 +1687,58 @@ per file inside a multi-file child and leaves the console stream unchanged.
 `complete: false` (with a `problem`) means the report was missing or did not add
 up to bun's own test count. Counts are evidence for comparing k values; they
 never decide a verdict.
+
+### Trunk Dynamic CI (learning only)
+
+Since GST-1400, free-tests.yml has a `trunk-dynamic-ci` job ("Trunk Dynamic CI
+(learning only)") that runs Trunk's `trunk-io/dynamic-ci` action on every
+pull request from a branch in this repository. For each run, Trunk records
+whether it would have run or skipped `free-suite` and
+`macos-named-regressions`, and why. It is one verdict per job, so the ten
+free-suite shards share one verdict. The verdicts show up in the job summary,
+on the pull request's Dynamic CI tab and at app.trunk.io/dynamic-ci.
+
+It never skips anything. No job needs the observer, no condition reads its
+verdicts, and it exports no outputs. Switching Trunk to enforcement in its
+dashboard would still skip nothing, because nothing in this workflow reads
+the verdicts. Every test runs, and every required check keeps its name and
+its result. Merge evidence never reads Trunk: the `free-tests` aggregate,
+the CI reuse profile, `gstack-ci-carry`, the pregate, the train gate
+(evals.yml), the main backstop, the release gate and windows-smoke are
+unchanged.
+
+A Trunk problem never turns the run or any required check red. The action
+never fails its own step. The step also continues on error and has a 3-minute
+timeout, and the job continues on error, so the run's conclusion and the
+`free-tests` aggregate keep their own results. One case still shows red: if
+GitHub can't fetch the pinned action at "Set up job" (the action's repository
+or commit disappears), the observer's own check reports failure, and
+`gstack-ship-queue ready` counts every check at the head. Rerun it once;
+if it fails again, delete the job. Fork pull requests, pushes and dispatches
+skip the job. A missing token skips only its step, so the job still fetches
+the action. It is the only job in the workflow that sees a secret
+(`TRUNK_API_TOKEN`), so it checks out nothing and runs none of the pull
+request's code. It holds no GITHUB_TOKEN scopes (`permissions: {}`). At the
+pinned commit (`src/config.ts`, `src/changed-files.ts`), the action makes one
+network call: a request for verdicts to
+`api.trunk.io/v2/dynamic-ci/generate-plan`, at most 3 attempts with a
+30-second budget each. Telemetry is off. With no checkout and an empty
+`github-token`, the action sends no file list, and Trunk reads the diff itself
+through its GitHub App.
+`test/free-tests-workflow-wiring.test.ts` and
+`test/ci-reuse-workflow-wiring.test.ts` lock that shape in place.
+
+**Review date: one week after it merges (2026-11-12 if it merges on
+2026-11-05).** Compare Trunk's would-skip verdicts with what the jobs it
+would have skipped actually found, and look hardest at any would-skip on a run
+where that job failed. Leave out runs where `reuse` skipped the suite: Trunk
+still records a verdict there, but there is no result to compare it with.
+Trunk's `required-check` vote treats both jobs as not
+required, because branch protection names the `free-tests` aggregate and
+not the jobs under it. But `free-tests` needs both jobs and every shard
+receipt, so discount that vote when you judge the would-skip rate. Any skip
+added later also has to pass the aggregate's receipt check. Turning on
+skipping is a separate decision for Garry, made after that review.
 
 ### Windows free lane
 

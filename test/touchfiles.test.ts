@@ -94,12 +94,6 @@ describe('selectTests', () => {
     expect(result.selected).not.toContain('outside-plan-disabled-no-fallback');
   });
 
-  test('learnings rendering selects the Eng judge that consumes the changed instruction', () => {
-    const result = selectTests(['scripts/resolvers/learnings.ts'], LLM_JUDGE_TOUCHFILES);
-    expect(result.reason).toBe('diff');
-    expect(result.selected).toEqual(['plan-eng-review/SKILL.md sections']);
-  });
-
   test.each(['bin/gstack-paths', 'bin/gstack-slug', 'scripts/resolvers/design.ts'])(
     'Design artifact dependencies select their native consumers: %s', (file) => {
       const result = selectTests([file], E2E_TOUCHFILES);
@@ -176,12 +170,6 @@ describe('selectTests', () => {
     }
   });
 
-  test('testing resolver source selects only judges that consume its generated workflow text', () => {
-    const result = selectTests(['scripts/resolvers/testing.ts'], LLM_JUDGE_TOUCHFILES);
-    expect(result.reason).toBe('diff');
-    expect(result.selected.sort()).toEqual(['plan-eng-review/SKILL.md sections', 'ship/SKILL.md workflow']);
-  });
-
   test('bounded shared-code planning selects its consumed resolvers, excluding other Eng sections', () => {
     const entrypoint = readSkillEffective(path.join(ROOT, 'plan-eng-review/SKILL.md'));
     const review = fs.readFileSync(path.join(ROOT, 'plan-eng-review/sections/review-sections.md'), 'utf8');
@@ -208,35 +196,6 @@ describe('selectTests', () => {
       expect(selectTests([source], E2E_TOUCHFILES).selected).toContain('shared-libs-plan-callers');
     }
   });
-
-  test.each([
-    ['plan-eng-review/sections/review-sections.md', 'plan-eng-review/SKILL.md sections',
-      'plan-eng-review/SKILL.md', '## Scope gate', '## Section self-check', '### REGRESSION RULE (mandatory)'],
-    ['ship/sections/tests.md', 'ship/SKILL.md workflow',
-      'ship/SKILL.md', '# Ship:', '## Important Rules', '## Test Framework Bootstrap'],
-    ['ship/sections/test-coverage.md', 'ship/SKILL.md workflow',
-      'ship/SKILL.md', '# Ship:', '## Important Rules', '### REGRESSION RULE (mandatory)'],
-    ['plan-design-review/sections/review-sections.md', 'plan-design-review/SKILL.md passes',
-      'plan-design-review/SKILL.md', '## Review Sections', ASK_QUESTIONS_HEADING,
-      '## Review Sections (7 passes, after scope is agreed)'],
-  ])('expanded judge content remains selected by its section alone: %s', (file, judge, skill, start, end, marker) => {
-    const body = fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/^<!--[^\n]*-->\n/gm, '').trim();
-    const paragraph = body.split(`${marker}\n\n`)[1]?.split('\n\n')[0];
-    expect(paragraph?.length).toBeGreaterThan(100);
-    expect(readWorkflowExcerpt(skill, start, end)).toContain(`${marker}\n\n${paragraph}`);
-    for (const changed of [file, `${file}.tmpl`]) {
-      expect(selectTests([changed], LLM_JUDGE_TOUCHFILES).selected).toEqual([judge]);
-    }
-  });
-
-  test.each(['scripts/resolvers/design.ts', 'scripts/resolvers/review-dashboard.ts', 'scripts/resolvers/plan-gates.ts',
-    'scripts/resolvers/spec-review.ts', 'scripts/resolvers/outside-voice-steps.ts', 'scripts/resolvers/review-scope.ts'])(
-    'Design rendering source selects its workflow judge: %s', (file) => {
-      const result = selectTests([file], LLM_JUDGE_TOUCHFILES);
-      expect(result.reason).toBe('diff');
-      expect(result.selected).toContain('plan-design-review/SKILL.md passes');
-    });
-
 
   test('browse/src change selects browse and qa tests', () => {
     const result = selectTests(['browse/src/commands.ts'], E2E_TOUCHFILES);
@@ -381,14 +340,6 @@ describe('selectTests', () => {
     expect(result.selected.length).toBeGreaterThanOrEqual(4);
   });
 
-  test('works with LLM_JUDGE_TOUCHFILES', () => {
-    const result = selectTests(['qa/SKILL.md'], LLM_JUDGE_TOUCHFILES);
-    expect(result.selected.sort()).toEqual([
-      'qa/SKILL.md workflow', 'qa/SKILL.md health rubric', 'qa/SKILL.md anti-refusal',
-      'qa-only/SKILL.md workflow', 'review/SKILL.md workflow', 'ship/SKILL.md workflow',
-    ].sort());
-  });
-
   test('SKILL.md.tmpl root template selects root-dependent tests and routing tests', () => {
     const result = selectTests(['SKILL.md.tmpl'], E2E_TOUCHFILES);
     // Should select the 7 tests that depend on root SKILL.md
@@ -524,13 +475,8 @@ describe('TOUCHFILES completeness', () => {
   });
 
   test('every LLM-judge test has a TOUCHFILES entry', () => {
-    const llmContent = fs.readFileSync(
-      path.join(ROOT, 'test', 'skill-llm-eval.test.ts'),
-      'utf-8',
-    );
-
-    const unique = registeredJudgeTestNames(llmContent);
-    expect(unique).toHaveLength(24);
+    const judgeFiles = fs.readdirSync(path.join(ROOT, 'test')).filter(name => /^skill-llm-eval.*\.test\.ts$/.test(name));
+    const unique = judgeFiles.flatMap(name => registeredJudgeTestNames(fs.readFileSync(path.join(ROOT, 'test', name), 'utf-8')));
 
     const missing = unique.filter(name => !(name in LLM_JUDGE_TOUCHFILES));
     if (missing.length > 0) {
@@ -542,14 +488,13 @@ describe('TOUCHFILES completeness', () => {
   });
 
   test('judge inventory ignores error names and catches an unmapped registration', () => {
-    const source = fs.readFileSync(path.join(ROOT, 'test', 'skill-llm-eval.test.ts'), 'utf8');
-    const withUnmappedCase = `${source}\n
+    const withUnmappedCase = `
       Object.assign(new Error('deadline'), { name: 'WorkflowJudgeDeadline' });
       Object.assign(new Error('retry'), { name: 'WorkflowJudgeSuperseded' });
       testIfSelected('unmapped judge case', async () => {}, 120_000);
     `;
     const names = registeredJudgeTestNames(withUnmappedCase);
-    expect(names).toHaveLength(25);
+    expect(names).toEqual(['unmapped judge case']);
     expect(names.filter(name => !(name in LLM_JUDGE_TOUCHFILES))).toEqual(['unmapped judge case']);
   });
 

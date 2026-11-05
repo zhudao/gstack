@@ -350,8 +350,9 @@ it; `gstack-outside-voice run` sends that default to Anthropic only.
 ### `... outside review unavailable: the response lacks the markers this gate requires (...)`
 
 **Meaning.** The answer did not contain what the gate checks: a
-`Recommendation: ... because ...` line, a `SCORE:`/`AMBIGUITIES:` pair, or
-severity tags.
+`Recommendation: ... because ...` line (or a `## Recommendation` heading whose
+next non-blank line is a plain sentence with a `because` reason), a
+`SCORE:`/`AMBIGUITIES:` pair, or severity tags.
 
 **Fix.** Re-run the review.
 
@@ -2807,6 +2808,12 @@ exact tokens it finds in these positions:
 
 - a 12-digit value right after `tree`, `gated_tree`, `head` or `predecessor`
   with `=` or a space (`tree=704992822996`, `tree 704992822996`);
+- an all-digit sha right after `review_loop_grant` or `review_loop_exception`
+  with a space, `=` or `:` (`review_loop_grant 367120488513`), so the owner's
+  grant records through `gstack-approvals add`. The scanner itself exempts it
+  (`isReviewLoopSha` in `lib/redact-patterns.ts`), and only that position
+  counts: the same digits elsewhere, or a number with a `+`, spaces or dashes
+  after the token, still report;
 - an 11-digit id inside an `/actions/runs/<id>` URL or as that link's text;
 - any id inside an `actions/runs/<id>` path, with or without a host, when
   `actions/runs/` starts the line or follows whitespace, `/`, `(`, `[`,
@@ -3136,6 +3143,29 @@ table above and end each error line with a code in parentheses. The policy
 file is described in [docs/ship-policy.md](ship-policy.md); the queue flow in
 [docs/ship-policy.md#stamp-at-merge](ship-policy.md#stamp-at-merge).
 
+<a id="route-bounded-refused"></a>
+### `ROUTE_BOUNDED_REFUSED: <path> <reason> (fix: …)`
+
+**Meaning.** `gstack-ship-release finish` found a post-review edit of a
+bounded kind (audit prose, a `.gstack/pregate.json` lane change, or a
+declared bookkeeping file) that failed one of its proofs, so the path stays
+behavior and finish stops for Steps 5–11.5
+([review-policy.md#bounded-post-review-edits](review-policy.md#bounded-post-review-edits)).
+The reason names the failed proof: `needs --reviewed-base`, `changed <n>
+lines since review (at most 20)`, `is binary or unreadable`, `carries a
+hunk the gate scan tagged`, `could not be gate-scanned`, `is not a doc the Step 14.5 audit snapshot
+recorded`, `is not the bytes the post-audit snapshot recorded (edited after
+the audit)`, `does not parse at both the reviewed and the current tree`,
+`loosens the reviewed policy: <what>`, `changes <key>; a lanes edit changes
+only dependencies`, `adds no lane`, or `is a gate path or under .gstack/ or
+.github/, never bookkeeping`.
+
+**Fix.** Do what the line's `fix:` says. Rerun finish with the merge base
+saved with the reviewed tree. Restore the audited bytes, or the mapping a
+lane change removed (a `[]` declaration lands on the base first). Or take
+Steps 5–11.5 for the edit. Never shrink an edit to get under the cap by
+moving its lines into another file.
+
 <a id="policy-source-unavailable"></a>
 ### `policy source unavailable — fix: git fetch origin <base> --depth=1 (POLICY_SOURCE_UNAVAILABLE)`
 
@@ -3228,10 +3258,12 @@ nothing.
 <a id="repo-commands-not-allowed"></a>
 ### `repo commands not executed (pass --allow-repo-commands) (REPO_COMMANDS_NOT_ALLOWED)`
 
-**Meaning.** The policy declares a command (`release_tool`), and the tool was
-run standalone. File presence never authorizes execution: outside `/ship` and
-`/land-and-deploy` a repo-declared command runs only with
-`--allow-repo-commands`. The commands were listed and nothing was written.
+**Meaning.** The policy declares a command (`release_tool`, or
+`land.merged_checks` for `gstack-ship-queue land --pin` on a stale base), and
+the tool was run without consent. File presence never authorizes execution:
+outside `/ship` and `/land-and-deploy` a repo-declared command runs only with
+`--allow-repo-commands`. The commands were listed and nothing was written or
+merged.
 
 **Fix.** Pass `--allow-repo-commands` when you mean to execute the repo's
 code (you already do when you run its tests), or drop the release tool.
@@ -3465,6 +3497,10 @@ run `gstack-review-dispatch verify --ledger <ledger>`, which prints
 `REVIEW_EXCLUDE_RECORD: digest=<d>` from the briefs the readers got, then
 `gstack-ship-receipt write --pr <n> --review-exclude <d> --body <body>`.
 
+The queue's check skips a receipt with `recorded=none` (written before the base gained
+`review_exclude_paths`) when no file the head changes matches any current pattern, so
+this line then means the PR touches a pattern, or the recorded digest differs.
+
 <a id="review-diff-too-large"></a>
 ### `REVIEW_DIFF_TOO_LARGE`
 
@@ -3517,6 +3553,58 @@ does, so readers see that code without the files it reads.
 
 **Fix.** Nothing for the review itself. If the code's correctness depends on the
 excluded files, narrow the pattern on the base so they stay in the diff.
+
+<a id="fetch-violation"></a>
+### `FETCH_VIOLATION`
+
+**Meaning.** A reader broke [the fetch rule](review-policy.md#what-readers-may-fetch):
+between the start and the end of one review stage, a git repository with a
+network remote, or a file of 100 MB or more, appeared under the workspace, home
+or the temp dir. `gstack-review-dispatch sweep --phase end` prints one line per
+path (`kind=repo|download`, the remote, the size and the stage's readers). Capy
+exposes no reader id, so the stage is the unit: every reader of that stage is
+quarantined. Its reply moves to `<out>/quarantine/` (mode 0600), its findings
+leave `merged.jsonl`, and it never reaches the Red Team, the judge, the
+returned output or PR text. `verify` prints `FETCH_VIOLATION:` and refuses
+until the stage has rerun and swept clean.
+
+**Fix.** Nothing to rerun by hand: the pass plans one fresh attempt per slot
+(`RERUN:`, readers named `<reader>#2`; not a review round) and the pass program
+dispatches them next. Each path gets a `KEEP:` line and never a delete command:
+the sweep goes by time alone, and no transcript can tie a path to a reader, so a
+clone another process on the machine made in the same window looks the same.
+Inspect each path and leave it alone, then write a decision-trail row and tell
+your Captain. A sweep that hit its bounds (depth 6, 200,000 entries or 20 seconds)
+prints `FETCH_SWEEP: partial`, a note that is never a refusal.
+
+<a id="fetch-rerun-blocked"></a>
+### `FETCH_RERUN_BLOCKED`
+
+**Meaning.** A path a stage's first attempt found (a `FETCH_VIOLATION:` line)
+still exists when that stage's rerun, or any other stage of the same pass
+(Step 11's voices included), starts. A reader could open that clone or
+download and still sweep clean, so no reader is dispatched, the pass stops
+(exit 3) and `verify` keeps refusing with the first attempt's
+`FETCH_VIOLATION`.
+
+**Fix.** Stop and report the printed path to your Captain. Leave it alone: no
+transcript ties it to a reader, so never move or delete it yourself. Once the
+path is gone, rerunning the same pass program resumes the rerun from its
+manifest.
+
+<a id="fetch-rerun-spent"></a>
+### `FETCH_RERUN_SPENT`
+
+**Meaning.** The stage's one rerun fetched too, so the pass stopped (exit 3).
+Its readers are quarantined like the first attempt's, nothing they wrote is
+merged, and `verify` refuses. Running the same pass program again stops at
+once: it starts no later stage (no Red Team beside the kept paths) and returns
+no reader output.
+
+**Fix.** Deal with the paths the `FETCH_VIOLATION:` lines name as above. Then
+find out why readers keep fetching (a brief or a checklist that sends them to
+another repository, or a sealed path the policy does not list yet) and start a
+fresh pass under a new `--pass` and `--out`. A third attempt is never automatic.
 
 <a id="execution-unknown"></a>
 ### `EXECUTION_UNKNOWN`
@@ -4989,13 +5077,16 @@ uses it while a slot cannot merge yet: checks on the stamp commit are not
 green, a name in `changelog_fragments.required_checks` is missing or not green
 there, the PR's base is no longer the train's base, the stamp push failed while
 the branch still read the pin, `gh pr merge` refused, or the merge is not yet
-visible on main.
+visible on main. `land` also uses it when a land lock push to origin failed and
+origin's lock ref could not be read to tell whether the push landed.
 
 **Fix.** Commit and push, wait for CI on that head, rerun
 `gstack-pregate run --allow-repo-commands` when the tree changed, then rerun
 `gstack-ship-queue ready --pr <n>`. The block it prints before refusing shows
 which line is not yet true. For `train land`, do what `NEXT:` says, then rerun
-the same `train land` command; it adopts its own journaled stamp commit.
+the same `train land` command; it adopts its own journaled stamp commit. For an
+unreadable land lock, rerun the same `land` command once origin answers; it
+resumes its own lock.
 
 <a id="queue-proof-missing"></a>
 ### `QUEUE_PROOF_MISSING`
@@ -5138,6 +5229,10 @@ released by the verify that clears the freeze
 next `land` or `train land` takes the lock over once the freeze record it fetches
 shows the freeze cleared after the lock was written; `--break-lock` never does.
 
+A lock push that GitHub applied but answered with an error (an HTTP 502) is
+checked against origin's ref and counts as written, so a rerun resumes this
+run's own lock without `--break-lock`.
+
 <a id="queue-train-unstamped"></a>
 ### `QUEUE_TRAIN_UNSTAMPED`
 
@@ -5241,11 +5336,24 @@ ran there. Nothing was merged.
 the lane fixes it at a new head (a flaky case gets its one rerun under rule
 16). Missing: dispatch that workflow on the branch, then rerun land.
 
+<a id="queue-land-merged-checks"></a>
+### `QUEUE_LAND_MERGED_CHECKS`
+
+**Meaning.** `origin/main` moved since the pin's merge base, and a
+`land.merged_checks` command failed on the pin merged onto main's tip. The
+message names the command, its exit and its last output lines. Nothing was
+merged.
+
+**Fix.** The lane merges `origin/main` into the branch, fixes what the
+command names, pushes, waits for the required checks, runs /ship and `ready`
+at the new head, and sends a new READY.
+
 <a id="queue-land-not-clean"></a>
 ### `QUEUE_LAND_NOT_CLEAN`
 
-**Meaning.** GitHub doesn't report the PR `MERGEABLE` and `CLEAN`. Nothing
-was merged.
+**Meaning.** GitHub doesn't report the PR `MERGEABLE` and `CLEAN`, or, on a
+stale base, the pin conflicts with main's tip (the message names the files).
+Nothing was merged.
 
 **Fix.** `CONFLICTING`: the lane merges the base into its branch, resolves,
 runs /ship and `ready` at the new head. `UNKNOWN`: GitHub is still
@@ -5257,10 +5365,16 @@ rule it names.
 
 **Meaning.** GitHub merged the PR, but the base branch's merge commit tree
 isn't the pin merged onto that commit's parent, so something besides the
-reviewed pin reached main. No land note was written.
+reviewed pin reached main, or the merge commit's parent is neither in the pin
+nor the base land checked, so main moved between land's check and the merge,
+and `land.merged_checks` then failed on the landed tree or the base policy
+lists none. No land note was written.
 
-**Fix.** Compare the merge commit with `git merge-tree --write-tree <parent>
-<pin>`, revert what doesn't belong to the PR, and report it to the Captain.
+**Fix.** For a tree mismatch, compare the merge commit with `git merge-tree
+--write-tree <parent> <pin>`, revert what doesn't belong to the PR, and report
+it to the Captain. For a parent the pin doesn't contain, run the free checks on
+main at the merge commit; if one is red, fix forward or revert the PR, and
+report it to the Captain.
 
 <a id="release-stamp-empty"></a>
 ### `RELEASE_STAMP_EMPTY`
@@ -5616,6 +5730,51 @@ trains and other trains' merges are refused until a repair lands.
 **Fix.** Admit one repair PR at its exact head (`train build --repair --prs
 <n>@<sha>`). The freeze clears when verify finds main's tree after that merge
 in a green record; `NEXT:` then builds a train of the PRs still unmerged.
+
+Under `merge: direct` trains are off, and a red main backstop (`train
+backstop` in the line) freezes `land --pin` the same way. Land the one repair
+with `gstack-ship-queue land --pr <n> --pin <sha> --repair`. It runs every
+normal pin check, then records the repair on the freeze under the land lock
+(`REPAIR: #<n>@<sha> admitted under the land lock`) and lands it; the freeze
+stays active. The next main backstop clears it when its gate is green on that
+main (`BACKSTOP: freeze cleared (repair #<n>; backstop <run> green on <sha>)`).
+A second `--repair` is refused while the admitted one has merged at its
+recorded pin and no backstop has judged it; one that never merged there gives
+way. See
+[direct freeze](ship-policy.md#direct-freeze).
+
+<a id="backstop-freeze-stands"></a>
+### `BACKSTOP: green, but the freeze stands`
+
+**Meaning.** The main backstop gated main green, but the active freeze
+lacks the evidence to clear: no repair was admitted, the admitted repair has no
+`land` note (it was merged outside `land --pin --repair`), main doesn't contain
+that merge, main isn't at or after the freeze's main, or main moved past the
+gated commit (that push's backstop judges it). A train's freeze clears through
+its repair train's verify instead.
+
+**Fix.** Land the repair with `gstack-ship-queue land --pr <n> --pin <sha>
+--repair`. A repair that merged at its recorded pin but has no `land` note (the
+post-merge tree check could not finish) gets the note when you rerun that
+command, which goes straight to the tree check. Main doesn't move while
+frozen, and the backstop runs only on a push, so then gate the same commit
+again with the command the line names: `gh run rerun <backstop run id> -R
+<owner/repo>`. Nothing else clears the freeze.
+
+<a id="backstop-red-frozen"></a>
+### `BACKSTOP: red, and the queue is already frozen`
+
+**Meaning.** A red gate on main never writes a second freeze. On a backstop
+freeze it rewrites the reason with this red run and keeps `frozen since main
+<sha>`. When main contains the admitted repair's merge and the gate concluded
+`failure`, the reason adds `repair #<n> did not turn main green` and the repair
+slot is freed. A gate that never judged it (no run, cancelled, past the
+deadline) adds `repair #<n> was not judged` and keeps the slot: gate that main
+again with `gh run rerun <backstop run id> -R <owner/repo>`, as the reason
+says.
+
+**Fix.** Land the next repair (revert or fix-forward) with `land --pin
+--repair`.
 
 <a id="queue-wave-conflict"></a>
 ### `QUEUE_WAVE_CONFLICT`
@@ -6276,7 +6435,10 @@ on the new head. `gstack-ship-release finish` stops the same way with
 write that record beside the packet, outside the worktree, so it does not change
 the tree it is bound to. Finish also stops this way for test code changed since
 review with no gate edit (`tests=N`): the packet holds those test hunks, and the
-reviewer checks that each test still tests what it did. A packet that cannot be
+reviewer checks that each test still tests what it did. It stops this way for
+[bounded post-review edits](review-policy.md#bounded-post-review-edits) too
+(`bounded=N`): one scoped reader, not a review round, reads the packet, and
+its clean record must also carry the `packet_sha256` the STOP line prints. A packet that cannot be
 written (an unwritable `.git`) is a STOP or `RECEIPT_CARRY_REFUSED` naming the path.
 `carry --dry-run` reports this code without writing the packet, and only when
 none of carry's other checks would refuse; carry without `--dry-run` writes it.

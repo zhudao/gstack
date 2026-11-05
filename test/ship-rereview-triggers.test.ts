@@ -446,7 +446,7 @@ describe('test-only and audit-requested edits after the docs audit (GST-391, gbr
     f.write({ 'test/b.test.ts': `${spec('b')}test('b is even', () => expect(2 % 2).toBe(0));\n` }); f.commit('test: add a case');
     const ask = finish(f, reviewed, post, ['--reviewed-base', mergeBase(f)]);
     expect(lineOf(ask.stdout, 'ROUTE')).toMatch(/ behavior=0 docs=0 metadata=0 tests=1 /);
-    expect([ask.status, lineOf(ask.stdout, 'STOP')]).toEqual([3, expect.stringContaining('STOP: test code changed since review in test/b.test.ts: one fix-check reviewer reads ')]);
+    expect([ask.status, lineOf(ask.stdout, 'STOP')]).toEqual([3, expect.stringContaining('STOP: test code changed since review in test/b.test.ts: one scoped reader (not a review round) reads ')]);
     const packet = /reads (\S+\.md), then/.exec(ask.stdout)![1]!;
     expect(fs.readFileSync(packet, 'utf8')).toContain("test('b is even'");
     const record = path.join(f.root, 'tests-reviewed.json');
@@ -464,7 +464,7 @@ describe('test-only and audit-requested edits after the docs audit (GST-391, gbr
       const pw = snapshot(w);
       w.write({ 'test/gate.test.ts': after }); w.commit(`test: ${name}`);
       const out = finish(w, rw, pw, ['--reviewed-base', mergeBase(w)]);
-      expect([name, out.status, lineOf(out.stdout, 'STOP')]).toEqual([name, 3, expect.stringContaining('STOP: test code changed since review in test/gate.test.ts: one fix-check reviewer reads ')]);
+      expect([name, out.status, lineOf(out.stdout, 'STOP')]).toEqual([name, 3, expect.stringContaining('STOP: test code changed since review in test/gate.test.ts: one scoped reader (not a review round) reads ')]);
     }
 
     const long = fx({}, { 'src/b.ts': 'export const b = 2;\n', 'test/b.test.ts': spec('b') });
@@ -603,6 +603,24 @@ describe('preflight carry route for an adjacent base edit (GST-442)', () => {
     expect(fs.existsSync(path.join(f.work, '.git', 'gstack', `scoped-review-${head.slice(0, 12)}.md`))).toBe(false);
     const wrote = f.run(path.join(BIN, 'gstack-ship-receipt'), ['carry', '--pr', '9', '--base', 'main']);
     expect([wrote.status, fs.existsSync(path.join(f.work, '.git', 'gstack', `scoped-review-${head.slice(0, 12)}.md`))]).toEqual([EXIT.refused, true]);
+  });
+
+  // Value: protects=the would-carry NEXT line names the push before the carry, since carry --pr refuses a HEAD that is not the
+  //   PR's pushed head (bin/gstack-ship-receipt), and the early push's secrets scan and CI wait come before the pregate;
+  //   fails_when=the NEXT line sends the agent from the pregate straight to carry; seam=gh; no_claim=the carry itself
+  test("preflight's would-carry route commits, pushes early and waits for CI before the pregate and the carry", () => {
+    const src = (edit: Record<number, string> = {}) => Array.from({ length: 12 }, (_, i) => edit[i + 1] ?? `exports.v${i + 1} = ${i + 1};`).join('\n') + '\n';
+    const f = fx({ 'lib/rows.js': src() }, { 'lib/rows.js': src({ 6: 'exports.v6 = 600;' }) });
+    const reviewed = f.git('rev-parse', 'HEAD').stdout.trim();
+    f.advanceBase({ 'lib/other.js': 'exports.other = 1;\n' });
+    mergeMain(f);
+    const head = f.git('rev-parse', 'HEAD').stdout.trim();
+    const view = path.join(f.root, 'view.json');
+    fs.writeFileSync(view, JSON.stringify({ body: placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any), headRefOid: head }));
+    f.gh(`case "$1 $2" in "pr list") echo 9 ;; "pr view") cat '${view}' ;; *) exit 1 ;; esac`);
+    const r = f.run(PREFLIGHT, ['--base', 'main']);
+    expect(lineOf(r.stdout, 'CARRY')).toMatch(/^CARRY: would carry/);
+    expect(r.stdout).toMatch(/^NEXT: carry route \(Step 1\.4\): .*commit, gstack-ship-release push --branch \S+ --early, gstack-ci-carry wait --base main \(CI_CARRY: none is not a stop\), gstack-pregate --allow-repo-commands, then gstack-ship-receipt carry --pr 9 --base main --pregate/m);
   });
 
   // Value: protects=the dry run offers the scoped route only when nothing else would refuse the carry, so preflight never sends

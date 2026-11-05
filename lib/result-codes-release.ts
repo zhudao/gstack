@@ -179,8 +179,8 @@ export const RELEASE_RESULT_CODES = {
   },
   QUEUE_TRAIN_FROZEN: {
     anchor: 'queue-train-frozen',
-    summary: 'a train stopped partway through publication, so main holds a prefix no gate covered on its own; ordinary trains are refused until a repair lands',
-    fix: 'admit one repair PR at its exact head (train build --repair --prs <n>@<sha>); the freeze clears when verify finds main’s tree after that merge in a green record',
+    summary: 'a train stopped partway through publication, or the main backstop was red, so main holds a tree no gate passed; ordinary trains and lands are refused until a repair lands',
+    fix: 'admit one repair PR at its exact head (train build --repair --prs <n>@<sha>; under merge: direct, land --pr <n> --pin <sha> --repair); the freeze clears when verify finds main’s tree after that merge in a green record, or, under merge: direct, when the main backstop is green on a main that contains it',
   },
   // Wave PRs (Garry R46, GST-574; docs/ship-policy.md#wave-prs): 3-6 same-area PRs in one train slot.
   QUEUE_WAVE_CONFLICT: {
@@ -488,6 +488,11 @@ export const RELEASE_RESULT_CODES = {
     summary: 'a check at the pin is red or pending, or a required check never ran there',
     fix: 'wait for pending checks (gstack-pr-wait <n> --until green), fix a red one at a new head, or dispatch a missing required workflow on the branch; then rerun land',
   },
+  QUEUE_LAND_MERGED_CHECKS: {
+    anchor: 'queue-land-merged-checks',
+    summary: 'the base moved past the pin\'s merge base, and a land.merged_checks command failed on the pin merged onto the base tip (GST-1316: a stale-base PR pushed a budgeted file past its cap on main); nothing merged',
+    fix: 'merge the base into the branch, fix what the failing command names, push, wait for the required checks, run /ship and gstack-ship-queue ready at the new head, then land it',
+  },
   QUEUE_LAND_NOT_CLEAN: {
     anchor: 'queue-land-not-clean',
     summary: 'GitHub does not report the PR mergeable and clean (a conflict, a branch rule, or a state GitHub is still computing)',
@@ -540,5 +545,21 @@ export const RELEASE_RESULT_CODES = {
     anchor: 'review-exclude-reference',
     summary: 'informational: a kept code file names an excluded folder (a directory reference, not a full file path), so its files stay excluded and readers see that code without the files it reads',
     fix: 'nothing to do for the review; if that code\'s correctness depends on the excluded files, narrow review_exclude_paths on the base so they stay in the diff',
+  },
+  // The fetch rule's per-stage sweep (lib/review-sweep.ts, GST-1322).
+  FETCH_VIOLATION: {
+    anchor: 'fetch-violation',
+    summary: 'a git repository with a network remote or a file of 100 MB or more appeared during one review stage, so every reader of that stage was quarantined and verify refuses until the stage reruns clean',
+    fix: 'the pass reruns each slot once as <reader>#2 by itself; inspect each printed KEEP: path and leave it alone (nothing attributes it to a reader, so never delete it), then write a decision-trail row and tell your Captain',
+  },
+  FETCH_RERUN_BLOCKED: {
+    anchor: 'fetch-rerun-blocked',
+    summary: 'a path a stage\'s first attempt found still exists, so no stage of the pass, Step 11\'s voices included, dispatched a reader (one could read that path and sweep clean) and verify keeps refusing',
+    fix: 'stop and report the printed path to your Captain; leave it alone (nothing attributes it to a reader, so never move or delete it yourself)',
+  },
+  FETCH_RERUN_SPENT: {
+    anchor: 'fetch-rerun-spent',
+    summary: 'the stage\'s one rerun fetched too, so the pass stopped with its readers quarantined, resuming it starts no later stage and returns no reader output, and verify refuses',
+    fix: 'deal with the printed paths, find out why readers keep fetching, then start a fresh pass under a new --pass and --out; a third attempt is never automatic',
   },
 } as const satisfies Record<string, ResultCode>;
