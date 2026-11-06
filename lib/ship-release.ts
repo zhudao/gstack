@@ -18,7 +18,10 @@ import { matchesAny } from './ship-policy';
 import { baseHolds, boundedPaths, comparePath, contextPacket, gateEditedPaths, isTestCode, PACKET_SECTION_CAP, readScopedReview, touchedPaths, type BoundedKind, type PatchSides } from './ship-patch';
 import { heldBy } from './ship-receipt';
 import { locate, readRecord } from './approval-record';
+import { mechanicalPaths, writeMechanicalRecord } from './ship-mechanical';
+import type { MechanicalConstant } from './ship-policy-mechanical';
 import { reviewFreshness } from './review-evidence';
+import { readRuledNotes, ruledNoteText } from './ruled-notes';
 import { parseReviewLoopException, type ReviewLoopException } from './ship-receipt-depth';
 import { parseReceiptDocs, type ReceiptDocs } from './ship-receipt-docs';
 import { resolveStateRoot } from './state-root';
@@ -197,13 +200,14 @@ function harnessRepin(cwd: string, from: string, to: string, p: string): boolean
  * Step 16 stage 2's route. With --reviewed-base, a path whose branch patch is the reviewed one counts as base (lib/ship-patch.ts).
  * A code or test path the newest completed clean review-fix-check row read (inside its range_base..commit range, where
  * range_base holds the reviewed tree, and unchanged since) counts as fix_checked when an approved review_loop_grant names a stop
- * head inside range_base..commit: the owner's granted fix-check after Step 11 is a review (GST-1130). Authored docs keep the
- * stage 2.2 recheck.
+ * head inside range_base..commit: the owner's granted fix-check after Step 11 is a review (GST-1130). A finding on that row the
+ * owner ruled a disclosed note (an approved gstack-approvals rule row whose stop head lies inside the row's range_base..commit, never the row's own claim) is closed, and every ruling
+ * prints as RULED_NOTE (GST-1537). Authored docs keep the stage 2.2 recheck.
  */
 type FixCheckException = ReviewLoopException & { fix_check: NonNullable<ReviewLoopException['fix_check']> };
-type Routed = Record<'behavior' | 'docs' | 'metadata' | 'tests' | 'base' | 'context' | 'bounded' | 'accepted' | 'fix_checked', string[]>;
+type Routed = Record<'behavior' | 'docs' | 'metadata' | 'tests' | 'base' | 'context' | 'bounded' | 'mechanical' | 'accepted' | 'fix_checked', string[]>;
 type ReviewedBase = { commit: string; parent: boolean };
-type RouteOpts = { docsRechecked: boolean; contextReviewed?: string; loop?: FixCheckException; audited: Record<string, string | null> | null; bookkeeping: readonly string[]; baseRelease?: string[] };
+type RouteOpts = { docsRechecked: boolean; contextReviewed?: string; loop?: FixCheckException; audited: Record<string, string | null> | null; bookkeeping: readonly string[]; mechanical: readonly MechanicalConstant[]; baseRelease?: string[] };
 
 /**
  * The --reviewed-base commit: one on the base, or a landed stack parent (GST-1399). A child reviewed against its parent
@@ -255,7 +259,7 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
     touched = new Set([...a, ...b]);
     shipped = b;
   }
-  const by: Routed = { behavior: [], docs: [], metadata: [], tests: [], base: [], context: [], bounded: [], accepted: [], fix_checked: [] };
+  const by: Routed = { behavior: [], docs: [], metadata: [], tests: [], base: [], context: [], bounded: [], mechanical: [], accepted: [], fix_checked: [] };
   const onlyShipped = new Set(parent ? [...shipped].filter(p => !changedSet.has(p)) : []);
   for (const p of [...changedSet, ...onlyShipped].sort()) {
     const verdict = sides ? (!touched.has(p) || (parent && !shipped.has(p) && baseHolds(cwd, sides, p)) ? 'same' : comparePath(cwd, sides, p)) : 'changed';
@@ -266,6 +270,9 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
   const gated = new Set([...(gateEditedPaths(cwd, reviewed, now, by.tests.filter(p => !onlyShipped.has(p))) ?? by.tests), ...(gateEditedPaths(cwd, sides?.currentBase ?? reviewed, now, shippedTests) ?? shippedTests)]);
   by.behavior.push(...by.tests.filter(p => gated.has(p)));
   by.tests = by.tests.filter(p => !gated.has(p));
+  const mech = mechanicalPaths(cwd, { sides, base, candidates: parent ? [] : [...by.behavior, ...by.tests, ...by.docs], declared: opts.mechanical });
+  by.mechanical = Object.keys(mech.proven).sort();
+  for (const k of ['behavior', 'tests', 'docs'] as const) by[k] = by[k].filter(p => !Object.hasOwn(mech.proven, p));
   const bounded = boundedPaths(cwd, { sides, reviewed, now, base: baseRef, candidates: parent ? [] : by.behavior, audited: opts.audited, bookkeeping: opts.bookkeeping });
   by.bounded = Object.keys(bounded.kinds).sort();
   by.behavior = by.behavior.filter(p => !by.bounded.includes(p));
@@ -281,11 +288,14 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
   const commitOf = (c: unknown) => typeof c === 'string' && /^[0-9a-f]{7,64}$/.test(c) ? git(cwd, ['rev-parse', '--verify', '--quiet', `${c}^{commit}`]).stdout.trim() : '';
   const onBranch = (c: string) => !!c && git(cwd, ['merge-base', '--is-ancestor', c, 'HEAD']).status === 0;
   const fixCommit = commitOf(fixRow?.commit_full), fixFrom = commitOf(fixRow?.range_base);
-  const fresh = fixRow && reviewFreshness(fixRow, fixRow.wtree);
   const ancestor = (a: string, d: string) => git(cwd, ['merge-base', '--is-ancestor', a, d]).status === 0;
+  const inFixRange = (c: string) => !!fixFrom && !!fixCommit && ancestor(fixFrom, c) && ancestor(c, fixCommit);
+  const rulings = readRuledNotes(cwd).map(n => ({ ...n, applied: !!fixRow && inFixRange(n.head) }));
+  for (const n of rulings) r.add(`RULED_NOTE: ${ruledNoteText(n)}${fixRow && !n.applied ? ' (outside this fix-check\'s range; not applied)' : ''}`);
+  const fresh = fixRow && reviewFreshness(fixRow, fixRow.wtree, new Set(rulings.filter(n => n.applied).map(n => n.finding)));
   const grants = fixRow ? (loc => 'file' in loc ? readRecord(loc).rows : [])(locate({ cwd, env: process.env })) : [];
   const grant = grants.find(g => g.outcome === 'approved' && `${g.ask} ${g.scope}`.includes('review_loop_grant')
-    && (`${g.ask} ${g.scope}`.match(/\b[0-9a-f]{7,40}\b/g) ?? []).some(s => { const c = commitOf(s); return !!c && !!fixFrom && !!fixCommit && ancestor(fixFrom, c) && ancestor(c, fixCommit); }));
+    && (`${g.ask} ${g.scope}`.match(/\b[0-9a-f]{7,40}\b/g) ?? []).some(s => { const c = commitOf(s); return !!c && inFixRange(c); }));
   const notCounted = !fixRow ? '' : fresh?.status !== 'CURRENT' ? fresh?.reason ?? 'not a review row'
     : fixRow.tree !== fixRow.wtree || !onBranch(fixCommit) ? 'the row was logged on content no branch commit holds'
     : !onBranch(fixFrom) ? 'the row names no range_base commit on this branch'
@@ -318,10 +328,14 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
     by.behavior = by.behavior.filter(p => !by.accepted.includes(p));
     by.docs = by.docs.filter(p => !by.accepted.includes(p));
   }
-  r.add(`ROUTE: reviewed=${reviewed.slice(0, 12)} current=${now.slice(0, 12)} behavior=${by.behavior.length} docs=${by.docs.length} metadata=${by.metadata.length} tests=${by.tests.length} base=${sides ? by.base.length : 'unknown'} context=${by.context.length}${by.bounded.length ? ` bounded=${by.bounded.length}` : ''}${counted ? ` fix_checked=${by.fix_checked.length}` : ''}${loop ? ` accepted=${by.accepted.length}` : ''}`);
+  r.add(`ROUTE: reviewed=${reviewed.slice(0, 12)} current=${now.slice(0, 12)} behavior=${by.behavior.length} docs=${by.docs.length} metadata=${by.metadata.length} tests=${by.tests.length} base=${sides ? by.base.length : 'unknown'} context=${by.context.length}${by.bounded.length ? ` bounded=${by.bounded.length}` : ''}${by.mechanical.length ? ` mechanical=${by.mechanical.length}` : ''}${counted ? ` fix_checked=${by.fix_checked.length}` : ''}${loop ? ` accepted=${by.accepted.length}` : ''}`);
   if (loop) r.add(`REVIEW_LOOP_EXCEPTION: accepted ${by.accepted.length ? short(by.accepted) : 'none'} (changed since fix-check ${loop.fix_check.head.slice(0, 12)}; accepted by ${loop.accepted_by} ${loop.date} via ${loop.via})`);
   for (const x of bounded.refused) if (by.behavior.includes(x.path)) r.add(`ROUTE_BOUNDED_REFUSED: ${x.path} ${x.reason} (fix: ${x.fix}; docs/troubleshooting.md#route-bounded-refused)`);
-  if (by.behavior.length) { r.stop(`behavior, tests or build inputs changed since review (${short(by.behavior.sort())}): insert 5–11.5 → 12–14 → 16 before Step 17 (stage 2.1)`); return null; }
+  for (const p of by.mechanical) r.add(`MECHANICAL: ${p} (${mech.proven[p]})`);
+  for (const x of mech.refused) r.add(`ROUTE_MECHANICAL_REFUSED: ${x.path} ${x.reason} (docs/troubleshooting.md#route-mechanical-refused)`);
+  if (by.behavior.length) { r.stop(`behavior, tests or build inputs changed since review (${short(by.behavior.sort())}): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap stops for the owner's grant of one scoped fix-check (stage 2.1)`); return null; }
+  const kept = by.mechanical.length ? writeMechanicalRecord(cwd, now, mech.proven) : null;
+  if (kept) { r.stop(`the mechanical paths cannot be recorded for gstack-ship-receipt write (${kept}): make that directory writable, then rerun finish (stage 2.1)`); return null; }
   const scoped = [...by.context, ...by.tests, ...by.bounded].sort();
   if (scoped.length && sides) {
     const packet = path.resolve(cwd, git(cwd, ['rev-parse', '--git-path', `gstack/scoped-review-${now.slice(0, 12)}.md`]).stdout.trim() || `.git/gstack/scoped-review-${now.slice(0, 12)}.md`);
@@ -473,14 +487,15 @@ async function finishStages(argv: readonly string[], cwd: string): Promise<Repor
   let audited: Record<string, string | null> | null = null;
   try { const h = JSON.parse(fs.readFileSync(flag('--docs-post')!, 'utf8')).hashes; audited = h && typeof h === 'object' && !Array.isArray(h) ? h : null; } catch { audited = null; }
   const bookkeeping = Array.isArray(policy?.bookkeeping) ? policy!.bookkeeping.filter((g: unknown): g is string => typeof g === 'string') : [];
+  const mechanical: MechanicalConstant[] = Array.isArray(policy?.mechanical_retake) ? policy!.mechanical_retake : [];
   const reviewedBaseArg = flag('--reviewed-base');
   const fragments = typeof policy?.changelog_fragments?.dir === 'string' ? [`:(top,exclude,glob)${policy.changelog_fragments.dir.replace(/\/+$/, '')}/*.md`] : [];
   const reviewedBase = reviewedBaseArg === undefined ? undefined : reviewedBaseCommit(cwd, `origin/${base.replace(/^origin\//, '')}`, reviewedBaseArg, [...releasePaths(policy, cwd, flag('--reviewed-tree')!, base, true).map(p => `:(top,exclude,literal)${p}`), ...fragments], r);
   if (reviewedBase === null) return r;
   const baseRelease = reviewedBase?.parent ? releasePaths(policy, cwd, git(cwd, ['merge-base', `origin/${base.replace(/^origin\//, '')}`, 'HEAD']).stdout.trim(), base, true) : undefined;
-  const routed = route(cwd, base, flag('--reviewed-tree')!, reviewedBase, release, { docsRechecked: has('--docs-rechecked'), contextReviewed: flag('--context-reviewed'), loop, audited, bookkeeping, baseRelease }, r);
+  const routed = route(cwd, base, flag('--reviewed-tree')!, reviewedBase, release, { docsRechecked: has('--docs-rechecked'), contextReviewed: flag('--context-reviewed'), loop, audited, bookkeeping, mechanical, baseRelease }, r);
   if (!routed) return r;
-  if (!docsFresh(cwd, base, flag('--docs-post')!, [...routed.base, ...routed.context, ...stampedFiles(policy, cwd, flag('--reviewed-tree')!, base)], all('--docs-requested'), flag('--docs-result'), loop ? routed.accepted : undefined, reviewedBase?.parent ? reviewedBase.commit : undefined, r)) return r;
+  if (!docsFresh(cwd, base, flag('--docs-post')!, [...routed.base, ...routed.context, ...routed.mechanical, ...stampedFiles(policy, cwd, flag('--reviewed-tree')!, base)], all('--docs-requested'), flag('--docs-result'), loop ? routed.accepted : undefined, reviewedBase?.parent ? reviewedBase.commit : undefined, r)) return r;
   if (!list.length && !has('--no-lanes-approved')) return r.stop('no test lanes: require Step 5\'s explicit untested-scope approval (rerun with --no-lanes-approved) or run Steps 5-15');
   const allow = evidenceExempt(release).join(',');
   const check = (l: { label: string; command: string }) => bin(cwd, 'gstack-evidence', ['check', '--label', l.label, '--expect-cmd', l.command, '--max-age', '24', '--allow-paths', allow], 60_000).stdout;

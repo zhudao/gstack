@@ -403,6 +403,14 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
     file: 'test/ship-finish-stack-parent.test.ts',
     reason: 'drives bin/gstack-ship-release, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-rereview-triggers.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 41950236362)',
   },
+  {
+    file: 'test/ship-finish-ruled-notes.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-approvals, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-rereview-triggers.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42139467391)',
+  },
+  {
+    file: 'test/ship-mechanical-retake.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-review-plan, gstack-ship-receipt, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-finish-stack-parent.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42156939158)',
+  },
 ];
 
 // Force-include overrides: files a WINDOWS_FRAGILE_PATTERNS regex excludes for
