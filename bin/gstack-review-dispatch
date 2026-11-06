@@ -24,8 +24,11 @@ import * as path from 'node:path';
 import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
 import { BRIEF_ROLES, BriefError, briefFile, checkReviewedTree, checkoutRoot, checkoutTree, promptHash, renderBrief, sectionTexts, sliceDiff, sliceNote, withWorkspace, type BriefRole, type Slots, type TreeCheck } from '../lib/review-brief';
 import { cleanMarkers, collect, fixableRaises, mayBeUnavailable, parseFindings, readJsonl, readLedger, readerKey, recordJudgment, recordSent, appendEvent, verify, type JudgedLine, type MergedLine, type VerifyRow } from '../lib/review-ledger';
-import { buildManifest, chunkCount, chunkOf, manifestPath, markReader, readManifest, renderStage, writeManifest, STAGES, type Extra, type Manifest, type PassReader, type ReaderState, type Stage } from '../lib/review-pass';
-import type { Dispatch } from '../lib/review-depth';
+import { buildManifest, chunkCount, chunkOf, manifestPath, markReader, readManifest, renderStage, withAuditModel, writeManifest, STAGES, type Extra, type Manifest, type PassReader, type ReaderState, type Stage } from '../lib/review-pass';
+import { diffCommand, type Dispatch } from '../lib/review-depth';
+import { mayExclude, policySelection, selectFor } from '../lib/review-selection';
+import { REVIEW_PLAN_TIMEOUT_MS } from '../lib/review-collect';
+import { resultLine } from '../lib/result-codes';
 import { runScriptSync } from '../lib/script-invocation';
 import { TARGETED_RULES, parseClassList, targetedBriefSha, targetedRead } from '../lib/review-targeted';
 import { resolveBaseBranch } from '../lib/ship-policy';
@@ -144,13 +147,17 @@ function render(): number {
   const checklists = flag('--checklists')?.split(',').map(s => s.trim()).filter(Boolean).map(c => (c.includes('/') ? c : path.join(ROOT, 'review/specialists', `${c}.md`)));
   for (const c of checklists ?? []) if (!fs.existsSync(c)) throw new BriefError(`checklist not found: ${c}`);
   let diff: string | undefined;
-  const keepItems = parseTail(flag('--keep')).filter(s => s !== '--');
-  const policyItems = parseTail(flag('--exclude')).filter(s => s.startsWith(':(top,exclude,glob)'));
+  const readers = readersAt(checkoutRoot(), flag('--base'));
   const resolvable = !!diffBase && git(['rev-parse', '--verify', '--quiet', `${diffBase}^{commit}`]) !== null;
-  if (role !== 'fix-check' && diffBase && (resolvable || role === 'outside-voice')) {
-    const over = ceiling('gstack-review-dispatch render', resolveBaseBranch(process.cwd(), flag('--base')), out, [{ reader: readerKey(role, name), exclude: flag('--exclude'), keep: keepItems }], diffBase, undefined);
+  const reads = role !== 'fix-check' && !!diffBase && (resolvable || role === 'outside-voice');
+  const base = reads ? resolveBaseBranch(process.cwd(), flag('--base')) : undefined;
+  const sel = base && diffBase ? standaloneSelection(readerKey(role, name), base, diffBase, readers) : { reader: readerKey(role, name), exclude: flag('--exclude'), keep: parseTail(flag('--keep')).filter(s => s !== '--'), disclosure: flag('--disclosure') };
+  const policyItems = parseTail(sel.exclude).filter(s => s.startsWith(':(top,exclude,glob)'));
+  if (base && diffBase) {
+    const over = ceiling('gstack-review-dispatch render', base, out, [sel], diffBase, undefined);
     if (over) { process.stderr.write(over.line + '\n'); return over.exit; }
-    if (role === 'outside-voice') diff = branchDiff(diffBase, { exclude: flag('--exclude'), keep: keepItems });
+    settleExcerpt(sel, diffBase, path.resolve(out));
+    if (role === 'outside-voice') diff = branchDiff(diffBase, sel);
   }
   let diffFile: Slots = {};
   if (diff !== undefined) {
@@ -161,17 +168,17 @@ function render(): number {
     diffFile = { diff_file: f, diff_bytes: String(s.bytes), diff_sha256: createHash('sha256').update(s.text).digest('hex'), ...(s.sliced ? { diff_slice: sliceNote(s, REVIEW_DIFF_MAX_BYTES) } : {}) };
   }
   const slots: Slots = {
-    name, diff_base: diffBase, exclude: flag('--exclude'), stack: flag('--stack'), test_fw: flag('--test-fw'),
+    name, diff_base: diffBase, exclude: sel.exclude, stack: flag('--stack'), test_fw: flag('--test-fw'),
     learnings: readFile(flag('--learnings-file'), 'learnings'), checklist, checklists: checklists?.join(','),
     findings: readFile(flag('--findings-file'), 'findings'), specialists: flag('--specialists'), ...diffFile,
     classes: flag('--classes'), brief, ...(merged ? { checklist: path.join(ROOT, 'review/specialists/targeted.md') } : {}),
-    policy_exclude: policyItems.map(quote).join(' ') || undefined, ...(flag('--disclosure') ? { disclosure: flag('--disclosure'), keep: keepItems.map(quote).join(' ') || undefined } : {}),
+    policy_exclude: policyItems.map(quote).join(' ') || undefined, ...(sel.disclosure ? { disclosure: sel.disclosure, keep: sel.keep?.map(quote).join(' ') || undefined } : {}),
+    ...(sel.disclosure && 'excerpt_file' in sel && sel.excerpt_file ? { excerpt_file: sel.excerpt_file.file, excerpt_bytes: String(sel.excerpt_file.bytes), excerpt_sha256: sel.excerpt_file.sha256, excerpt_files: String(sel.excerpt_file.files) } : {}),
     fix_list: readFile(flag('--fix-list'), 'fix list'), hunks: readFile(flag('--hunks'), 'hunks'), tests: readFile(flag('--tests'), 'tests'), callers: readFile(flag('--callers'), 'callers'),
   };
   const workdir = checkoutRoot();
   const tree = checkoutTree(workdir);
   if (!tree) throw new BriefError(`cannot read HEAD^{tree} and the toplevel of ${workdir}; a brief names the checkout its reply must prove`);
-  const readers = readersAt(workdir, flag('--base'));
   const text = withWorkspace(renderBrief(role, slots, sectionTexts(ROOT)), workdir, readers);
   fs.mkdirSync(out, { recursive: true, mode: 0o700 });
   const file = path.join(path.resolve(out), briefFile(role, name));
@@ -179,7 +186,7 @@ function render(): number {
   const ledger = flag('--ledger') ?? path.join(out, 'review-ledger.jsonl');
   const sha = promptHash(text);
   const targeted = brief === undefined ? {} : { classes: parseClassList(flag('--classes')!), rules: TARGETED_RULES, brief_sha: targetedBriefSha(merged ? path.join(ROOT, 'review/specialists/targeted.md') : checklist), diff_base: diffBase ?? null, ...(diffBase ? targetedRead(process.cwd(), diffBase) : { patch_id: 'none', head: null }) };
-  appendEvent(ledger, { event: 'rendered', reader: readerKey(role, name), role, name: name ?? null, file, sha256: sha, bytes: Buffer.byteLength(text), workdir, tree, ...targeted, ...(diffFile.diff_file ? { payload: { file: diffFile.diff_file, sha256: diffFile.diff_sha256 } } : {}), ...(disclosureDigest(flag('--disclosure')) ? { exclude: disclosureDigest(flag('--disclosure')) } : {}), readers: readers.digest });
+  appendEvent(ledger, { event: 'rendered', reader: readerKey(role, name), role, name: name ?? null, file, sha256: sha, bytes: Buffer.byteLength(text), workdir, tree, ...targeted, ...(diffFile.diff_file ? { payload: { file: diffFile.diff_file, sha256: diffFile.diff_sha256 } } : {}), ...(disclosureDigest(sel.disclosure) ? { exclude: disclosureDigest(sel.disclosure) } : {}), readers: readers.digest });
   process.stdout.write(`BRIEF: reader=${readerKey(role, name)} sha256=${sha} bytes=${Buffer.byteLength(text)} file=${file}\n`);
   return EXIT.ok;
 }
@@ -282,27 +289,69 @@ const mergeBaseWith = (base: string) => [`origin/${base}`, base].map(ref => git(
 const readerLine = (m: Manifest, r: PassReader) => `READER: ${r.reader} stage=${r.stage} state=${r.state} title="${r.title}"${r.sha256 ? ` sha256=${r.sha256} bytes=${r.bytes} chunks=${r.chunks}` : ''}${r.path ? ` path=${r.path}` : ''}`;
 /** Each selection is read once per process: the ceiling check and the outside voice's embedded diff share it. */
 const selections = new Map<string, ReaderDiff>();
-const selectionOf = (base: string, exclude: string | undefined, keep: readonly string[] = []) => {
-  const key = JSON.stringify([base, exclude ?? '', keep]);
-  if (!selections.has(key)) selections.set(key, readSelection(process.cwd(), base, parseTail(exclude), keep));
+const selectionOf = (base: string, exclude: string | undefined, keep: readonly string[] = [], excerpt: readonly string[] = []) => {
+  const key = JSON.stringify([base, exclude ?? '', keep, excerpt]);
+  if (!selections.has(key)) selections.set(key, readSelection(checkoutRoot(), base, parseTail(exclude), keep, excerpt));
   return selections.get(key)!;
 };
-const branchDiff = (base: string, r?: Pick<PassReader, 'exclude' | 'keep'>) => {
-  const d = selectionOf(base, r?.exclude, r?.keep);
+const branchDiff = (base: string, r?: Pick<PassReader, 'exclude' | 'keep' | 'excerpt'>) => {
+  const d = selectionOf(base, r?.exclude, r?.keep, r?.excerpt);
   if (!d.ok) throw new BriefError(`git diff ${base} failed`);
   return d.text;
 };
 
 /** The ceiling over every reader about to render: the first one over or unreadable stops the step before it writes anything else. */
-function ceiling(context: string, base: string, outDir: string, readers: ReadonlyArray<Pick<PassReader, 'reader' | 'exclude' | 'keep' | 'diff_base' | 'prompt_file'> & { diff_base?: string }>, diffBase: string, known: PlanExclude | undefined): { exit: number; line: string } | null {
+function ceiling(context: string, base: string, outDir: string, readers: ReadonlyArray<Pick<PassReader, 'reader' | 'exclude' | 'keep' | 'excerpt' | 'diff_base' | 'prompt_file'> & { diff_base?: string }>, diffBase: string, known: PlanExclude | undefined): { exit: number; line: string } | null {
   for (const r of readers) {
     if (r.prompt_file) continue;
     const at = r.diff_base ?? diffBase;
-    const d = selectionOf(at, r.exclude, r.keep);
+    const d = selectionOf(at, r.exclude, r.keep, r.excerpt);
     if (!d.ok) return { exit: EXIT.fail, line: unreadableLine(context, r.reader, d, at, base, outDir) };
     if (d.bytes > REVIEW_DIFF_MAX_BYTES && r.reader !== 'outside-voice') return { exit: EXIT.refused, line: tooLargeLine(context, r.reader, d, ceilingContext(process.cwd(), base, known)).line };
   }
   return null;
+}
+
+/**
+ * Each reader's secret-line excerpt, written once beside the briefs under its sha256 (the brief names the file, its bytes and
+ * hash); a file the excerpt could not be built for moves to the reader's keep list, so its whole diff reaches the reader.
+ */
+function settleExcerpts(m: Manifest): void {
+  for (const r of m.readers) settleExcerpt(r, r.diff_base ?? m.diff_base, path.join(m.out, 'briefs'));
+}
+function settleExcerpt(r: Pick<PassReader, 'reader' | 'exclude' | 'keep' | 'excerpt' | 'excerpt_file'>, diffBase: string, dir: string): void {
+  if (!r.excerpt?.length) return;
+  const d = selectionOf(diffBase, r.exclude, r.keep, r.excerpt);
+  if (!d.ok) throw new BriefError(`git diff ${diffBase} failed for ${r.reader}'s secret-line excerpt`);
+  const whole = r.excerpt.filter(s => d.whole?.includes(s));
+  if (whole.length) r.keep = [...(r.keep ?? []), ...whole];
+  r.excerpt = r.excerpt.filter(s => !whole.includes(s));
+  if (!r.excerpt.length || !d.excerpt) { delete r.excerpt; return; }
+  const sha256 = createHash('sha256').update(d.excerpt).digest('hex');
+  const file = path.join(dir, `secret-excerpt-${sha256.slice(0, 16)}.md`);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, d.excerpt, { mode: 0o600 });
+  r.excerpt_file = { file, sha256, bytes: Buffer.byteLength(d.excerpt), files: r.excerpt.length };
+}
+
+/**
+ * A standalone render's reader with the selection the pass gives its readers (GST-1476): the base policy's review_exclude
+ * from gstack-review-plan --json (only when the base may declare one), merged into --exclude and --keep by selectFor, and its
+ * disclosure line unless --disclosure names one. A plan that fails stops the render: no brief without its selection.
+ */
+function standaloneSelection(reader: string, base: string, diffBase: string, readers: EffectiveReaders): Pick<PassReader, 'reader' | 'exclude' | 'keep' | 'excerpt' | 'excerpt_file'> & { diff_base: string; disclosure?: string } {
+  let x: (Record<string, unknown> & { state: string }) | null = null;
+  if (mayExclude(process.cwd(), base)) {
+    const tail = args.includes('--') ? args.slice(args.indexOf('--') + 1) : [];
+    const p = runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...tail, '--json'], { encoding: 'utf8', timeout: REVIEW_PLAN_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+    if (p.status !== 0) throw new BriefError(`gstack-review-plan --base ${base} --json exited ${p.status ?? p.signal}, so the base policy's review selection is unknown and no brief is rendered without it: ${(p.stderr ?? '').trim().slice(-400)}`);
+    x = (JSON.parse(p.stdout) as { review_exclude?: Record<string, unknown> & { state: string } }).review_exclude ?? null;
+  }
+  const given = parseTail(flag('--exclude')).filter(s => s !== '--' && s !== '.');
+  const s = selectFor({ exclude: given, keep: parseTail(flag('--keep')).filter(k => k !== '--') }, policySelection(x, readers));
+  const exclude = s.exclude.length === given.length ? flag('--exclude') : diffCommand({ exclude: s.exclude } as Dispatch).slice('git diff <diff-base> '.length);
+  const disclosure = flag('--disclosure') ?? (x?.state === 'active' ? planExclude(x).disclosure : undefined);
+  return { reader, diff_base: diffBase, exclude, keep: (s.keep ?? []).filter(k => !s.excerpt?.includes(k)), ...(s.excerpt ? { excerpt: s.excerpt } : {}), ...(disclosure ? { disclosure } : {}) };
 }
 
 function pass(): number {
@@ -321,9 +370,9 @@ function pass(): number {
   if (args.includes('--audit-only')) {
     const extrasFile = flag('--extras');
     if (!extrasFile) { process.stderr.write('gstack-review-dispatch pass --audit-only: needs --extras (the audit readers, e.g. Step 14.5\'s docs reader)\n'); return EXIT.usage; }
-    const extras = JSON.parse(readFile(extrasFile, 'extras')!) as Extra[];
+    const { extras, lines } = withAuditModel(JSON.parse(readFile(extrasFile, 'extras')!) as Extra[]);
     const m = buildManifest({ pass: id, out, ledger: flag('--ledger') ?? path.join(out, 'review-ledger.jsonl'), base, diffBase: mergeBaseWith(base) ?? 'HEAD', root: git(['rev-parse', '--show-toplevel'])?.trim() ?? process.cwd(),
-      checklistRoot: flag('--checklist-root') ?? ROOT, dispatches: [], next: 'audit', planLines: ['PASS: audit-only (no reviewer plan; its extras run as one batch)'], extras, voices: args.includes('--voices') });
+      checklistRoot: flag('--checklist-root') ?? ROOT, dispatches: [], next: 'audit', planLines: ['PASS: audit-only (no reviewer plan; its extras run as one batch)', ...lines], extras, voices: args.includes('--voices') });
     fs.mkdirSync(m.out, { recursive: true, mode: 0o700 });
     const t = sectionTexts(ROOT);
     renderStage(m, 'first', t, branchDiff);
@@ -332,10 +381,20 @@ function pass(): number {
     process.stdout.write([...m.plan_lines, `MANIFEST: file=${file} pass=${id} readers=${m.readers.length} audit-only`, ...m.readers.map(r => readerLine(m, r))].join('\n') + '\n');
     return EXIT.ok;
   }
-  const plan = (json: boolean) => runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...planArgs, ...(json ? ['--json'] : [])], { encoding: 'utf8', timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
+  const limit = Number(process.env.GSTACK_REVIEW_PLAN_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : REVIEW_PLAN_TIMEOUT_MS;
+  const plan = (json: boolean) => runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...planArgs, ...(json ? ['--json'] : [])], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+  const stopped = (r: ReturnType<typeof plan>, json: boolean) => {
+    if (r.status !== null || (!r.signal && !r.error)) return false;
+    const reason = (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? 'timeout' : r.signal ? 'signal' : 'spawn';
+    process.stderr.write(`${r.stderr ?? ''}${resultLine('gstack-review-dispatch pass', 'REVIEW_PLAN_STOPPED', `step="gstack-review-plan --base ${base}${json ? ' --json' : ''}" reason=${reason} timeout_ms=${timeoutMs} signal=${r.signal ?? 'none'}`)}\n`);
+    return true;
+  };
   const text = plan(false);
+  if (stopped(text, false)) return EXIT.fail;
   if (text.status !== 0) { process.stdout.write(text.stdout ?? ''); process.stderr.write(text.stderr ?? ''); return EXIT.fail; }
   const j = plan(true);
+  if (stopped(j, true)) return EXIT.fail;
   if (j.status !== 0) { process.stderr.write(j.stderr ?? ''); return EXIT.fail; }
   const p = JSON.parse(j.stdout) as { next: { step: string }; dispatches: Dispatch[]; targeted?: { classes: string[] }; fix_range?: { base: string } | null; review_exclude?: Record<string, unknown> & { state: string; excluded?: number; kept_files?: unknown; references?: unknown }; readers?: EffectiveReaders };
   const step = p.next.step;
@@ -349,7 +408,8 @@ function pass(): number {
   if (!diffBase) throw new BriefError(`no merge base between ${base} and HEAD`);
   const root = git(['rev-parse', '--show-toplevel'])?.trim() ?? process.cwd();
   const extrasFile = flag('--extras');
-  const extras = extrasFile ? JSON.parse(readFile(extrasFile, 'extras')!) as Extra[] : [];
+  const { extras, lines } = withAuditModel(extrasFile ? JSON.parse(readFile(extrasFile, 'extras')!) as Extra[] : []);
+  planLines.push(...lines);
   const m = buildManifest({ pass: id, out, ledger: flag('--ledger') ?? path.join(out, 'review-ledger.jsonl'), base, diffBase, root, checklistRoot: flag('--checklist-root') ?? ROOT,
     dispatches: step === 'fix-check' ? p.dispatches : p.dispatches.filter(d => d.role !== 'fix-check'), next: step, planLines, learnings: readFile(flag('--learnings-file'), 'learnings') ?? null, extras,
     targetedClasses: p.targeted?.classes, mergeBase, rangeBase: flag('--diff-base') ? undefined : rangeBase,
@@ -358,6 +418,7 @@ function pass(): number {
   const over = ceiling('gstack-review-dispatch pass', base, m.out, m.readers, m.diff_base, (m.review_exclude as PlanExclude) ?? null);
   if (over) { process.stdout.write(planLines.join('\n') + '\n'); process.stderr.write(over.line + '\n'); return over.exit; }
   fs.mkdirSync(m.out, { recursive: true, mode: 0o700 });
+  settleExcerpts(m);
   const t = sectionTexts(ROOT);
   renderStage(m, 'first', t, branchDiff);
   renderStage(m, 'specialists', t, branchDiff);

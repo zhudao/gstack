@@ -3496,10 +3496,19 @@ the field without a review. Do not do that. Rerun
 run `gstack-review-dispatch verify --ledger <ledger>`, which prints
 `REVIEW_EXCLUDE_RECORD: digest=<d>` from the briefs the readers got, then
 `gstack-ship-receipt write --pr <n> --review-exclude <d> --body <body>`.
+`recorded=none` with a `no --review-exclude was given` note means the write left the flag out: pass the digest
+`verify` printed. When the only change since the review is Step 14.5's docs audit editing, adding or
+removing files under a pattern, pass that run's `--docs-post <audit-id>-post.json` and its Prepare snapshot as
+`--docs-pre` as well instead of rerunning the review; the refusal's `the docs-audit exception does not apply:` clause says why when it cannot
+([ship-policy.md](ship-policy.md#review-exclude-paths), GST-1429).
 
-The queue's check skips a receipt with `recorded=none` (written before the base gained
-`review_exclude_paths`) when no file the head changes matches any current pattern, so
-this line then means the PR touches a pattern, or the recorded digest differs.
+Write, carry and the queue bind a digest that differs (`recorded=none`, written before the base
+gained `review_exclude_paths`, or a digest from an older policy) when the recorded selection and
+HEAD's give the PR's files the same applied patterns, excluded files and kept files (GST-1434,
+GST-1446). Write rebuilds the recorded selection from the policies the base held and prints
+`REVIEW_EXCLUDE_POLICY_MOVED:` when it binds. So this line means the two selections differ over the
+PR's files, or write could not rebuild the digest from any policy the base held (a shallow clone
+of the base can cause that: fetch its history and rerun write).
 
 <a id="review-diff-too-large"></a>
 ### `REVIEW_DIFF_TOO_LARGE`
@@ -3523,7 +3532,10 @@ the base policy commit.
   files need more than 24,000 argument bytes. Narrow the pattern, move the kept
   files out of it, or split the PR.
 - **Still over after exclusion:** add the printed folders to the base policy, or
-  split the PR.
+  split the PR. Files kept only for a secret line already count as their
+  excerpts ([secret-line excerpts](ship-policy.md#secret-line-excerpts)); one in
+  `DIFF_KEEP:` that still counts whole is kept for another reason or could not
+  be excerpted.
 
 There is no override flag. See [the review ceiling](ship-policy.md#review-diff-ceiling).
 
@@ -3542,6 +3554,21 @@ files `review_exclude_paths` matches.
 exclude its largest data folders on the base; git exit 128 (a missing object or
 an unfetched base), `git fetch origin <base>` and rerun once; anything else, stop
 and ask a person with the log file.
+
+<a id="review-plan-stopped"></a>
+### `REVIEW_PLAN_STOPPED`
+
+**Meaning.** `gstack-review-dispatch pass` runs `gstack-review-plan` before it
+writes a manifest, and that run did not finish, so the pass stopped (exit 1)
+without dispatching a reader. The line names the step (the plan command),
+`reason=timeout` with `timeout_ms` (180,000 ms; `GSTACK_REVIEW_PLAN_TIMEOUT_MS`
+sets it in milliseconds), `reason=signal` with the signal when something else
+killed it, or `reason=spawn` when it could not start. Before this line existed, a
+plan that ran past the limit was killed with no output (GST-1442).
+
+**Fix.** Rerun the pass once unchanged. If it stops again, report the line and the
+repository's file count (`git ls-files | wc -l`) to your Captain. For
+`reason=signal`, check the machine's free memory first.
 
 <a id="review-exclude-reference"></a>
 ### `REVIEW_EXCLUDE_REFERENCE`
@@ -5738,6 +5765,7 @@ normal pin check, then records the repair on the freeze under the land lock
 (`REPAIR: #<n>@<sha> admitted under the land lock`) and lands it; the freeze
 stays active. The next main backstop clears it when its gate is green on that
 main (`BACKSTOP: freeze cleared (repair #<n>; backstop <run> green on <sha>)`).
+Once main's policy declares `release_gate`, the backstop stands down: `land --pin` only warns (`FREEZE: warn only:`) about a backstop freeze left from before and lands, and `release-cut` lets that freeze go once a green release gate sits on a commit that contains the freeze's main ([release_gate](ship-policy.md#direct-freeze)).
 A second `--repair` is refused while the admitted one has merged at its
 recorded pin and no backstop has judged it; one that never merged there gives
 way. See
@@ -7026,6 +7054,16 @@ These codes come from `scripts/ubicloud/ubi-runner.sh` (GST-1220). `RECOVERED`, 
 ### `SINK_FLUSH_FAILED: vm=<name> seq=<n> last_push=<epoch|never> [sink_skipped=size|tar_failed]`
 
 **Meaning.** `down` stopped the VM's pusher and ran one last push, and that push failed, took longer than 150 seconds, or was skipped because the results were over `UBI_SINK_MAX_MB` (`size`) or couldn't be read (`tar_failed`). A skipped snapshot is never uploaded, so the sink keeps the last good one. The VM was destroyed anyway, so the sink holds results only up to the push made at `last_push`. A `run` or `verify` of that VM exits 1 instead of 0. **Fix.** Treat the run's results as incomplete. Check that the presigned URL hasn't expired and still allows a PUT, then rerun. For a tiered `verify`, rerun with `--no-resume`: a plain rerun reuses the tiers that already passed under the same key, creates no VM and pushes nothing, so the sink would still hold the incomplete snapshot.
+
+<a id="ubi-create-unknown"></a>
+### `UBI_CREATE_UNKNOWN`
+
+**Meaning.** `up` or `run` sent a create that Ubicloud answered with a 5xx or not at all, and could not settle whether the VM is this call's: either the lookup by name never answered within `UBI_CREATE_GRACE` seconds, or a VM answers to the name but this call's ssh key did not open it within `UBI_SSH_WAIT` seconds. Another caller can take an explicit `-n` name between the name check and the create, so a VM found after an unanswered create is not destroyed until this call's key proves it is ours. The VM's record and recovery bundle stay, nothing destroys it, and `run` prints `left=unknown`. **Fix.** Run `scripts/ubicloud/ubi-runner.sh list` to see the VM and its owner. Run `down <name>` only when you know the VM is yours, because `down` destroys whatever answers to the name. This owner's reap destroys an unconfirmed VM once its `-t<hours>` TTL ends.
+
+<a id="ubi-attach-unknown"></a>
+### `UBI_ATTACH_UNKNOWN`
+
+**Meaning.** A rerun of `run` found a run record whose VM the Ubicloud API could not check (an answer other than 200 or 404), so it refused to start a second VM that would leave the first one billing. Nothing was created. **Fix.** Rerun once the API answers.
 
 ## Per-repo cleanup (gstack-clean)
 

@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
-import { LAND_KEY_VERSION, MERGE_KEY_VERSION, validatePolicy } from '../lib/ship-policy';
+import { LAND_KEY_VERSION, MERGE_KEY_VERSION, RELEASE_GATE_KEY_VERSION, validatePolicy } from '../lib/ship-policy';
 import { BASE_POLICY, cleanup, makeFixtureRepo, runBin, type FixtureRepo } from './helpers/restamp-fixture';
 import { shippedBody } from './helpers/ship-queue-train-fixture';
 import { persist, repoIdentity } from '../lib/ship-queue-train-record';
@@ -231,6 +231,69 @@ describe('land --pin: direct merge at the PR\'s own green head', () => {
       expect(fx.read().lockAtMerge).toMatchObject({ pr: '87', phase: 'merging' });
       expect(JSON.parse(fx.repo.git('--git-dir', fx.repo.origin, 'show', 'refs/notes/gstack-land:lock.json'))).toMatchObject({ released: true });
     } finally { fs.rmSync(marker, { force: true }); }
+  }, 90_000);
+
+  test.skipIf(process.platform !== 'linux')('GST-1421: a merged check that walks its ancestors\' /proc/<pid>/environ and scans every /proc/*/environ finds no secret from land\'s environment, and land still merges', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-land-environ-'));
+    const marker = path.join(scratch, 'found'), probe = path.join(scratch, 'probe.sh');
+    const secret = `land-secret-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(probe, [
+      'p=$PPID',
+      'while [ "${p:-0}" -gt 1 ]; do',
+      '  if cat /proc/$p/environ >/dev/null 2>&1; then echo "ancestor $p readable"; else echo "ancestor $p denied"; fi',
+      '  tr "\\0" "\\n" < /proc/$p/environ 2>/dev/null | grep "^GSTACK_LAND_SENTINEL=" | sed "s/^/ancestor $p /"',
+      '  p=$(sed -n "s/^PPid:[[:space:]]*//p" /proc/$p/status 2>/dev/null)',
+      'done',
+      'for f in /proc/[0-9]*/environ; do tr "\\0" "\\n" < "$f" 2>/dev/null | grep "^GSTACK_LAND_SENTINEL=" | sed "s|^|scan $f |"; done',
+      'cat /proc/self/environ >/dev/null 2>&1 && echo "self readable"',
+      '',
+    ].join('\n'));
+    const fx = setup({ ...POLICY, land: { merged_checks: [`sh ${probe} > ${marker}`] }, min_gstack_version: LAND_KEY_VERSION });
+    try {
+      const pin = openPr(fx, '88');
+      moveMain(fx, 'other.txt', 'other\n');
+      fx.env.GSTACK_LAND_SENTINEL = secret;
+      const ok = land(fx, '88', pin, ['--allow-repo-commands']);
+      expect(ok.err).toBe('');
+      expect(ok.status).toBe(EXIT.ok);
+      const found = fs.readFileSync(marker, 'utf8');
+      expect(found).toContain('self readable');
+      expect(found).toMatch(/^ancestor \d+ denied$/m);
+      expect(found).not.toContain(secret);
+      expect(fx.read().mergeArgs).toBeDefined();
+    } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+  }, 90_000);
+
+  test.skipIf(process.platform !== 'linux')('GST-1421: a merged check that leaves its process group with setsid, to read the environment of the git and gh processes land starts next, is killed before land starts them', () => {
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-land-stray-'));
+    const marker = path.join(scratch, 'found'), pidFile = path.join(scratch, 'pid'), scan = path.join(scratch, 'scan.sh');
+    const secret = `land-secret-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(scan, [
+      `echo $$ > ${pidFile}`,
+      'i=0',
+      'while [ $i -lt 400 ]; do',
+      `  for f in /proc/[0-9]*/environ; do tr "\\0" "\\n" < "$f" 2>/dev/null | grep "^GSTACK_LAND_SENTINEL=" >> ${marker}; done`,
+      '  i=$((i+1)); sleep 0.05',
+      'done',
+      '',
+    ].join('\n'));
+    const fx = setup({ ...POLICY, land: { merged_checks: [`setsid sh ${scan} </dev/null >/dev/null 2>&1 & while [ ! -s ${pidFile} ]; do sleep 0.05; done`] }, min_gstack_version: LAND_KEY_VERSION });
+    let stray = 0;
+    try {
+      const pin = openPr(fx, '89');
+      moveMain(fx, 'other.txt', 'other\n');
+      fx.env.GSTACK_LAND_SENTINEL = secret;
+      const ok = land(fx, '89', pin, ['--allow-repo-commands']);
+      expect(ok.err).toBe('');
+      expect(ok.status).toBe(EXIT.ok);
+      stray = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      expect(stray).toBeGreaterThan(1);
+      expect(() => process.kill(stray, 0)).toThrow();
+      expect(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '').not.toContain(secret);
+    } finally {
+      if (stray > 1) try { process.kill(stray, 'SIGKILL'); } catch {}
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
   }, 90_000);
 
   test('QUEUE_LAND_NOT_CLEAN: on a stale base the pin conflicts with main, so no merged check runs and nothing merges', () => {
@@ -849,6 +912,18 @@ function backstopOn(fx: Fx, gate: 'success' | 'failure' | 'cancelled', run: numb
 const DIRECT_TRAIN = { ...POLICY, train: TRAIN_BLOCK };
 
 describe('land --pin --repair: the one way through a backstop freeze under merge: direct (GST-1354)', () => {
+  test('GST-1133: with release_gate on the base the backstop stands down, so a backstop freeze left from before adoption warns instead of refusing: a plain land merges and the record is left as it was', () => {
+    const fx = setup({ ...DIRECT_TRAIN, release_gate: { cadence_hours: 8, gate_workflow: 'evals.yml', branch: 'main', stable_ref: 'stable', check_name: 'main-backstop', on_red: 'hold-release', bisect_spend_cap_usd: 40 }, min_gstack_version: RELEASE_GATE_KEY_VERSION });
+    freezeMain(fx);
+    const pin = openPr(fx, '7');
+    const r = land(fx, '7', pin);
+    expect(r.err).toBe('');
+    expect(r.status).toBe(EXIT.ok);
+    expect(r.out).toMatch(/^FREEZE: warn only: train backstop froze main \(backstop red on main [0-9a-f]{12}: .*\); the base policy declares release_gate/m);
+    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin]);
+    expect(freezeOf(fx)).toMatchObject({ train: 'backstop', repair: null, cleared_at: null });
+  }, 90_000);
+
   test('a freeze refuses a plain land and names --repair; --repair with no freeze refuses; nothing merges', () => {
     const fx = setup();
     const pin8 = openPr(fx, '8');

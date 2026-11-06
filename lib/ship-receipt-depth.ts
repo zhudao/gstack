@@ -18,12 +18,14 @@
  * lib/ship-receipt.ts so that module stays under the size ratchet.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { baseContainsHead } from './default-base';
 import type { ShipReceipt } from './headless-artifacts';
 import { collectCommit } from './review-collect';
-import { reviewExclude, type Exclusion } from './review-exclude';
-import { isUnavailable } from './ship-policy';
+import { EMPTY_LIST_SHA256, recordedList, reviewExclude, type ActiveExclusion, type ExcludeRecord, type Exclusion } from './review-exclude';
+import { SHIP_POLICY_PATH, isUnavailable } from './ship-policy';
 import { loadPolicyAt } from './ship-policy-at';
 import { classifyPath, depthOfCommitInput, gateScanNeeded, platformFits, scanNumbers, type Depth } from './review-depth';
 import { AUTH_PATH_PREFIXES, AUTH_PATH_TOKENS, MONEY_PATH_TOKENS, matchRisk, type RiskClass } from './review-risk';
@@ -98,7 +100,7 @@ export function receiptDepthAtHead(repoRoot: string, base: string, binDir: strin
  * receiptDepthAtHead plus the exclusion the head's review read under: the depth classifies excluded paths as docs (GST-508).
  * `declared` (write --declare-risk, GST-1129) joins the detected risk classes and only raises; the record then keeps both lists.
  */
-export function receiptReviewAtHead(repoRoot: string, base: string, binDir: string, head: string, declared: readonly RiskClass[] = []): { depth: ReceiptDepth; exclude: Exclusion } {
+export function receiptReviewAtHead(repoRoot: string, base: string, binDir: string, head: string, declared: readonly RiskClass[] = []): { depth: ReceiptDepth; exclude: Exclusion; tagged: ReadonlySet<string> | null } {
   const branch = base.replace(/^origin\//, '');
   const baseSha = baseCommit(repoRoot, `origin/${branch}`);
   const baseRev = baseSha.ok ? baseSha.out : branch;
@@ -118,7 +120,7 @@ export function receiptReviewAtHead(repoRoot: string, base: string, binDir: stri
   }
   const exclude = exclusionAt(repoRoot, ref, sha, head, c, paths, 'gstack-ship-receipt');
   const d = depthOfCommitInput({ ...c, scope, gateTagged: tagged, ...riskPathsOf(review), declared, ...(exclude.state === 'active' ? { excluded: exclude.excluded } : {}) });
-  return { depth: { depth: d.depth, class: d.class, runtime_lines: d.runtimeLines, rules: d.rules, base: baseRev, registry: c.registry.sha, gate_scan: { tagged, head }, reasons: d.reasons.slice(0, 12), risk: d.risk, mode: modeFor(d.depth, review), ...(d.declared.length ? { declared: d.declared, detected: d.detected } : {}) }, exclude };
+  return { depth: { depth: d.depth, class: d.class, runtime_lines: d.runtimeLines, rules: d.rules, base: baseRev, registry: c.registry.sha, gate_scan: { tagged, head }, reasons: d.reasons.slice(0, 12), risk: d.risk, mode: modeFor(d.depth, review), ...(d.declared.length ? { declared: d.declared, detected: d.detected } : {}) }, exclude, tagged: paths };
 }
 
 /**
@@ -277,22 +279,142 @@ function headInputs(root: string, baseRef: string, head: string, r?: ShipReceipt
   return { baseSha, c, scope: scopeOfRange(root, BIN_DIR, baseRev, head, merged), x: exclusionAt(root, baseRef, baseSha.ok ? baseSha.out : null, head, c, tagged, 'gstack-ship-queue') };
 }
 
+/** The selection's list hash over the PR's files; the empty list's when the base declares no pattern or none matches (GST-1408). */
+const listOf = (x: Exclusion) => (x.state === 'active' ? x.record.list_sha256 : EMPTY_LIST_SHA256);
+type RecordedExclude = Partial<Pick<ExcludeRecord, 'patterns_sha256' | 'list_sha256' | 'digest'>>;
 /**
- * The queue's exclusion check: the digest the receipt recorded (none when absent) against the one `head` has under the current
- * base policy. Only the digest counts (the policy's patterns and the excluded list), so a base merge or a moved base that leaves
- * both unchanged binds; a changed selection needs the review rerun (write checks the same digest and does not read the
- * review ledger). A receipt with no digest also binds when no file the head changed matches any current pattern, excluded
- * or kept (GST-1408): the selection then equals the full diff that receipt's review read, so a pattern the base gained later
- * changes nothing the reviewers saw.
+ * Write's, carry's and the queue's exclusion check: the recorded digest against the one HEAD has under the current base policy,
+ * except that a policy change alone does not void the receipt (GST-1408, GST-1415, GST-1434, GST-1446): when the recorded
+ * selection (none recorded reads as the empty one) and HEAD's give the PR's files the same applied patterns, excluded files and
+ * kept files with their reasons, each reviewer read the diff HEAD's policy gives. A policy that cannot be read, or a record
+ * whose digest is not built from its list hash, never binds.
  */
+export function carryExcludeBinds(x: Exclusion, r: { review_exclude?: RecordedExclude }): boolean {
+  if (x.state === 'refused') return false;
+  const e = r.review_exclude;
+  return (x.state === 'active' ? x.record.digest : 'none') === (e?.digest ?? 'none') || listOf(x) === (e ? recordedList(e) : EMPTY_LIST_SHA256);
+}
+/** The base write reads its policy from: origin/<branch> when it resolves, else the local branch. */
+function writeBase(root: string, base: string): { ref: string; sha: string | null } {
+  const branch = base.replace(/^origin\//, '');
+  const baseSha = baseCommit(root, `origin/${branch}`);
+  return baseSha.ok ? { ref: `origin/${branch}`, sha: baseSha.out } : { ref: branch, sha: git(root, ['rev-parse', '--verify', '--quiet', `${branch}^{commit}`]).out || null };
+}
+/**
+ * The record a reviewed --review-exclude digest stands for, for carryExcludeBinds: none for `none`; with HEAD's list hash when
+ * the review_exclude_paths the base held at a commit that changed the policy file builds the digest from it (the reviewers read
+ * HEAD's selection under an earlier policy); otherwise the digest alone, which binds only an equal one.
+ */
+function reviewedRecord(root: string, base: string, x: Exclusion, given: string): RecordedExclude | undefined {
+  if (given === 'none') return undefined;
+  const { ref, sha } = writeBase(root, base);
+  const log = sha ? git(root, ['log', '--full-history', '--format=%H', sha, '--', SHIP_POLICY_PATH]) : { ok: false, out: '' };
+  for (const commit of log.ok ? log.out.split('\n').filter(Boolean) : []) {
+    const load = loadPolicyAt(root, commit, ref);
+    if (isUnavailable(load) || load.errors.length || !load.policy.review_exclude_paths.length) continue;
+    const record = { patterns_sha256: createHash('sha256').update(JSON.stringify(load.policy.review_exclude_paths)).digest('hex'), list_sha256: listOf(x), digest: given };
+    if (recordedList(record)) return record;
+  }
+  return { digest: given };
+}
+/** How an exclusion treats one path: excluded, the reason it is kept, or absent from the selection. */
+const treatment = (x: ActiveExclusion, p: string) => (x.excluded.has(p) ? 'excluded' : x.kept.find(k => k.path === p)?.reason ?? 'absent');
+/**
+ * Write's exclusion check: the --review-exclude digest the reviewers read against HEAD's. /ship's Step 14.5 docs audit runs after
+ * the review, so a docs file it adds, edits or removes under a pattern can change HEAD's selection (GST-1429). With `docsPost`
+ * (the audit's post snapshot, gstack-docs-candidate) the reviewed digest still binds when every file under a pattern that changed
+ * since the snapshot's HEAD was uncommitted in the snapshot with the content HEAD holds, the reviewed digest is HEAD's selection
+ * with the audit's files reset to their content before the audit, each of them is excluded or kept only because code names it,
+ * and every other file is selected alike on both sides. The audit's files are those whose content differs between `docsPre`
+ * (the Prepare snapshot) and the post snapshot, reset to the Prepare content, so uncommitted docs the reviewers read stay; without
+ * it every such file is an audit file, reset to the snapshot's HEAD. Content compares as git stores it or as it checks out
+ * (autocrlf, filters). Anything else, an unreadable snapshot included, refuses with `why`.
+ */
+export function writeExcludeBinds(root: string, base: string, head: string, review: { exclude: Exclusion; tagged: ReadonlySet<string> | null }, flagged: string | undefined, docsPost: string | undefined, docsPre?: string): { ok: true; line?: string } | { ok: false; why?: string } {
+  const x = review.exclude;
+  const given = flagged ?? 'none';
+  const now = x.state === 'active' ? x.record.digest : 'none';
+  if (now === given) return { ok: true };
+  if (flagged !== undefined && carryExcludeBinds(x, { review_exclude: reviewedRecord(root, base, x, given) })) return { ok: true, line: `REVIEW_EXCLUDE_POLICY_MOVED: reviewed=${short(given)} head=${short(now)} (the base policy changed since the review and gives the PR's files the same selection; the receipt records HEAD's)` };
+  if (docsPost === undefined || x.state !== 'active') return { ok: false };
+  const no = (why: string) => ({ ok: false as const, why: `--docs-post ${docsPost}: ${why}` });
+  const list = (v: unknown): v is string[] => Array.isArray(v) && v.every(p => typeof p === 'string');
+  const snapshot = (file: string): { head: string; audit_id?: unknown; staged: string[]; unstaged: string[]; untracked: string[]; hashes: Record<string, unknown> } | string => {
+    let s: { head?: unknown; audit_id?: unknown; staged?: unknown; unstaged?: unknown; untracked?: unknown; hashes?: unknown };
+    try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return `cannot be read (${(e as Error).message.split('\n')[0]})`; }
+    const h = s?.hashes;
+    if (typeof s?.head !== 'string' || !/^[0-9a-f]{40,64}$/.test(s.head) || !list(s.staged) || !list(s.unstaged) || !list(s.untracked) || !h || typeof h !== 'object' || Array.isArray(h)) return 'is not a gstack-docs-candidate snapshot (head, staged, unstaged, untracked, hashes)';
+    return { head: s.head, audit_id: s.audit_id, staged: s.staged, unstaged: s.unstaged, untracked: s.untracked, hashes: h as Record<string, unknown> };
+  };
+  const post = snapshot(docsPost);
+  if (typeof post === 'string') return no(post);
+  const pre = docsPre === undefined ? null : snapshot(docsPre);
+  if (typeof pre === 'string') return no(`--docs-pre ${docsPre} ${pre}`);
+  if (pre && (pre.head !== post.head || pre.audit_id !== post.audit_id)) return no(`--docs-pre ${docsPre} is not this audit's Prepare snapshot (its HEAD or audit_id differs)`);
+  const at = post.head;
+  if (!git(root, ['merge-base', '--is-ancestor', at, head]).ok) return no(`its HEAD ${short(at)} is not ${short(head)} or an ancestor of it`);
+  const diff = spawnSync('git', ['diff', '--name-only', '-z', '--no-renames', at, head, '--', ...x.record.patterns.map(p => `:(top,glob)${p}`)], { cwd: root, encoding: 'utf8', timeout: 60_000 });
+  if (diff.status !== 0) return no(`git could not list the files under review_exclude_paths that changed since ${short(at)}`);
+  const changed = diff.stdout.split('\0').filter(Boolean).sort();
+  if (!changed.length) return no(`no file under review_exclude_paths changed since its HEAD ${short(at)}, so the docs audit did not change the selection`);
+  const blob = (rev: string, p: string) => { const b = git(root, ['rev-parse', '--verify', '--quiet', `${rev}:${p}`]); return b.ok ? b.out : null; };
+  const holds = (rev: string, p: string, want: unknown) => {
+    const id = blob(rev, p);
+    if (id === want) return true;
+    if (id === null || typeof want !== 'string') return false;
+    const out = spawnSync('git', ['cat-file', '--filters', `${rev}:${p}`], { cwd: root, timeout: 60_000, maxBuffer: 256 * 1024 * 1024 });
+    return out.status === 0 && createHash('sha1').update(`blob ${out.stdout.length}\0`).update(out.stdout).digest('hex') === want;
+  };
+  const named = new Set([...post.staged, ...post.unstaged, ...post.untracked]);
+  for (const p of changed) {
+    if (!named.has(p)) return no(`${p} changed after the snapshot's HEAD ${short(at)}, and the snapshot does not name it as an uncommitted audit file`);
+    if (!holds(head, p, post.hashes[p] ?? null)) return no(`${p} at HEAD is not the content the snapshot recorded (an edit after the audit)`);
+  }
+  const auditFiles = pre ? changed.filter(p => !(p in pre.hashes) || pre.hashes[p] !== post.hashes[p]) : changed;
+  if (!auditFiles.length) return no(`--docs-pre ${docsPre}: the audit changed none of ${changed.join(',')}, so it did not change the selection`);
+  const gitDir = git(root, ['rev-parse', '--absolute-git-dir']).out;
+  const index = path.join(gitDir, `gstack-receipt-${process.pid}-${randomBytes(4).toString('hex')}.index`);
+  const env = { ...process.env, GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: 'gstack-ship-receipt', GIT_AUTHOR_EMAIL: 'ship-receipt@gstack.local', GIT_COMMITTER_NAME: 'gstack-ship-receipt', GIT_COMMITTER_EMAIL: 'ship-receipt@gstack.local', GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' };
+  const run = (args: string[], input?: string) => { const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', env, input, timeout: 60_000 }); return { ok: r.status === 0, out: (r.stdout ?? '').trim() }; };
+  const treeEntry = (rev: string, p: string) => run(['ls-tree', '-z', '--full-tree', rev, '--', p]).out.split('\0').find(l => l.endsWith(`\t${p}`));
+  let reset: string;
+  try {
+    const entries: string[] = [];
+    for (const p of auditFiles) {
+      const want = pre ? pre.hashes[p] : undefined;
+      const atEntry = treeEntry(at, p);
+      if (want === undefined || (atEntry && holds(at, p, want))) entries.push(atEntry ? `${atEntry}\0` : `0 ${'0'.repeat(at.length)}\t${p}\0`);
+      else if (want === null) entries.push(`0 ${'0'.repeat(at.length)}\t${p}\0`);
+      else if (typeof want === 'string' && run(['cat-file', '-e', `${want}^{blob}`]).ok) entries.push(`${(treeEntry(head, p) ?? atEntry ?? '100644').split(' ')[0]} blob ${want}\t${p}\0`);
+      else return no(`${p}'s content before the audit (${short(String(want))} in --docs-pre ${docsPre}) is not in git's object store, so the selection the reviewers read cannot be rebuilt`);
+    }
+    const tree = run(['read-tree', head]).ok && run(['update-index', '-z', '--index-info'], entries.join('')).ok ? run(['write-tree']) : { ok: false, out: '' };
+    const c = tree.ok ? run(['commit-tree', '--no-gpg-sign', tree.out, '-p', head, '-m', 'gstack-ship-receipt: HEAD before the docs audit']) : tree;
+    if (!c.ok) return no(`git could not build HEAD with ${auditFiles.join(',')} reset to before the audit`);
+    reset = c.out;
+  } finally { fs.rmSync(index, { force: true }); }
+  const { ref, sha } = writeBase(root, base);
+  const before = exclusionAt(root, ref, sha, reset, collectCommit(root, sha ?? ref, reset), review.tagged, 'gstack-ship-receipt');
+  if (before.state !== 'active') return no(`the selection with ${auditFiles.join(',')} reset to before the audit cannot be read`);
+  if (before.record.digest !== given) return no(`the reviewed digest ${short(given)} is not the selection HEAD has with the files under review_exclude_paths that changed since the snapshot reset to ${pre ? 'their --docs-pre content' : short(at)} (${short(before.record.digest)}), so more than the docs audit changed what the reviewers read`);
+  for (const p of auditFiles) for (const [side, s] of [['the review', before], ['HEAD', x]] as const) {
+    const t = treatment(s, p);
+    if (!['absent', 'excluded', 'named-by-code'].includes(t)) return no(`${p} is ${t} at ${side}: the docs audit binds only docs the exclusion hides or keeps because code names them`);
+  }
+  const audit = new Set(auditFiles);
+  for (const p of new Set([...before.excluded, ...x.excluded, ...before.kept.map(k => k.path), ...x.kept.map(k => k.path)])) {
+    if (!audit.has(p) && treatment(before, p) !== treatment(x, p)) return no(`${p} is ${treatment(before, p)} at the review and ${treatment(x, p)} at HEAD`);
+  }
+  return { ok: true, line: `REVIEW_EXCLUDE_DOCS_AUDIT: reviewed=${short(given)} head=${short(x.record.digest)} snapshot=${short(at)} files=${auditFiles.join(',')} (the selection changed only by the Step 14.5 docs audit's files under review_exclude_paths; the receipt records HEAD's)` };
+}
+/** The queue's refusal when carryExcludeBinds does not bind the receipt at `head`; null when it does. */
 export function excludeMismatch(x: Exclusion, r: ShipReceipt, head: string, base: string): string | null {
+  if (carryExcludeBinds(x, r)) return null;
   const expected = x.state === 'active' ? x.record.digest : 'none';
   const recorded = r.review_exclude?.digest ?? 'none';
-  if (expected === recorded) return null;
-  if (recorded === 'none' && x.state === 'active' && x.record.unmatched.length === x.record.patterns.length) return null;
   const source = x.state === 'active' ? x.record.source : r.review_exclude?.source ?? base;
   const h = head.slice(0, 12);
-  return `field=review_exclude expected=${expected} recorded=${recorded} source=${source}: the receipt records another selection than ${base}'s review_exclude_paths gives ${h}; the receipt is unchanged; fix: rerun /ship's review on ${h} (gstack-review-dispatch pass --base ${base.replace(/^(refs\/remotes\/)?origin\//, '')}), then gstack-ship-receipt write --pr <n> --review-exclude <d> --body <body> with the digest gstack-review-dispatch verify --ledger <ledger> prints on REVIEW_EXCLUDE_RECORD: (write checks the digest against the base policy and does not read the review ledger, so only the rerun shows the reviewers read this selection)`;
+  return `field=review_exclude expected=${expected} recorded=${recorded} source=${source}: the receipt records another selection than ${base}'s review_exclude_paths gives ${h}, and the two give the PR's files different selections; the receipt is unchanged; fix: rerun /ship's review on ${h} (gstack-review-dispatch pass --base ${base.replace(/^(refs\/remotes\/)?origin\//, '')}), then gstack-ship-receipt write --pr <n> --review-exclude <d> --body <body> with the digest gstack-review-dispatch verify --ledger <ledger> prints on REVIEW_EXCLUDE_RECORD: (write checks the digest against the base policy and does not read the review ledger, so only the rerun shows the reviewers read this selection)`;
 }
 /** The receipt's recorded gate scan when it names this head; otherwise null (unavailable). */
 const boundScan = (r: ShipReceipt, head: string): number | null => {

@@ -284,7 +284,9 @@ costs one cheap pass. Each scan gets one 120-second deadline, set in millisecond
 256 MB, is also `consumer_scan_failed`, and its detail says what stopped it and names
 the deadline. One scan fits a minute inside the 180 seconds /ship gives
 `gstack-review-plan`; a plan that also scans a fix range runs two scans, and if they
-pass that limit the plan fails, which also leads to a full review. Only `classifyDiff` applies the rule (`lib/review-collect.ts`
+pass that limit `gstack-review-dispatch pass` stops with
+[`REVIEW_PLAN_STOPPED`](troubleshooting.md#review-plan-stopped) before any reader
+runs (`GSTACK_REVIEW_PLAN_TIMEOUT_MS` sets the pass's limit in milliseconds). Only `classifyDiff` applies the rule (`lib/review-collect.ts`
 finds the consumers, `gstack-ship-preflight`'s `RUNTIME_LINES` reads the same
 function); every path-only caller (the receipt's gate-scan decision, the Step 16
 post-review route, /autoplan's docs-only scope) keeps data files code. A numeric claim
@@ -515,7 +517,9 @@ every reader (specialists, the Red Team, the native and outside voices, the
 targeted reader) reads the same selection: its `DIFF_CMD:` with one
 `:(top,exclude,glob)` item per applied pattern, the fixture command with the
 same items, and the `DIFF_KEEP:` command for the kept files under those
-patterns. The outside voice's embedded diff is that selection. Each brief says
+patterns. A kept file whose only reason is a secret line reaches pass readers as
+an excerpt of its matched lines in context instead ([secret-line
+excerpts](ship-policy.md#secret-line-excerpts)). The outside voice's embedded diff is that selection. Each brief says
 how many files and bytes were left out and that the reader must not report on
 their absence. Excluded paths count as docs for the depth and never trigger the
 numeric-claim scan or a targeted class; kept files keep their own class.
@@ -778,7 +782,8 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
 1. `render --role <role> [--name <n>] --out <dir>` cuts the brief out of
    `ship/sections/review-army.md` or `ship/sections/adversarial.md` (the fix-check
    from `scripts/resolvers/fix-check.ts`) and fills only declared slots: the
-   literal diff base, the plan's `DIFF_CMD` excludes, stack, test framework,
+   literal diff base, the plan's `DIFF_CMD` excludes (with the base policy's
+   selection added, [as the pass's readers get it](ship-policy.md#one-selection-every-reader)), stack, test framework,
    learnings, checklist paths, the Red Team's merged findings and specialist count,
    and the outside voice's branch diff. A section that lost an anchor or placeholder
    refuses (`BRIEF_RENDER_FAILED`) instead of rendering something else, and so does

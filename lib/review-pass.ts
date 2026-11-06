@@ -14,9 +14,11 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { AgentModelError, resolveAgentModel } from './agent-model';
 import { BriefError, briefFile, checkoutRoot, checkoutTree, promptHash, renderBrief, sliceDiff, sliceNote, withWorkspace, type BriefRole, type SectionTexts, type Slots } from './review-brief';
 import { REVIEW_DIFF_MAX_BYTES, disclosureDigest } from './review-exclude';
 import { appendEvent, readerKey } from './review-ledger';
+import { policySelection, selectFor } from './review-selection';
 import { diffCommand, type Dispatch } from './review-depth';
 import { TARGETED_RULES, parseClassList, targetedBriefSha, targetedRead } from './review-targeted';
 import type { FetchHit } from './review-fetch';
@@ -40,6 +42,8 @@ export interface PassReader {
   file?: string; sha256?: string; bytes?: number; chunks?: number; findings_sha256?: string;
   /** The base policy's `:(top,exclude,glob)` items (review_exclude_paths and readers.forbid_paths), shell-quoted (the fixture command's slot), and the kept files' `:(top,literal)` items. */
   policy_exclude?: string; keep?: string[];
+  /** The kept files whose only reason is a secret line (lib/review-secret-excerpt.ts): readers get the excerpt gstack-review-dispatch pass writes once beside the briefs, not the whole files. */
+  excerpt?: string[]; excerpt_file?: { file: string; sha256: string; bytes: number; files: number };
   /** The fingerprint the reader's reply must report: the checkout's HEAD^{tree} and toplevel when its brief was rendered (GST-482). */
   tree?: string | null;
   /** What the reader fetched, from its own tool calls (gstack-review-dispatch audit-fetch, lib/review-fetch.ts). */
@@ -70,6 +74,28 @@ export interface Manifest {
 }
 export interface FixCheckFiles { fix_list: string; hunks: string; tests: string; callers?: string }
 export interface Extra { name: string; prompt_file: string; first?: boolean; model?: PassModel }
+/** The audit readers' model when no preference is set (their pre-GST-1439 hard-code). */
+export const AUDIT_DEFAULT: PassModel = { model_id: 'anthropic/claude-sonnet-5-5', reasoning_mode: 'low' };
+
+/** The model an audit extra (Steps 7, 8, 14.5) runs on when it names none (GST-1439, GST-1449): the owner's agent_model at low effort,
+ * AUDIT_DEFAULT with no preference or an unusable one; agent_model host leaves it to the lane's own model. */
+export function auditModel(env: NodeJS.ProcessEnv = process.env): { model?: PassModel; line: string } {
+  const fallback = (why: string) => ({ model: AUDIT_DEFAULT, line: `AUDIT_MODEL: ${AUDIT_DEFAULT.model_id} reasoning=low (default; ${why})` });
+  let s;
+  try { s = resolveAgentModel({ env }); } catch (error) {
+    if (!(error instanceof AgentModelError)) throw error;
+    return fallback(`${error.problem}, ignored`);
+  }
+  if (s.source.kind === 'default') return fallback('no agent_model set');
+  if (!s.id) return { line: `AUDIT_MODEL: host (agent_model host in ${s.source.path}: the lane's own model)` };
+  return { model: { model_id: s.id, reasoning_mode: 'low' }, line: `AUDIT_MODEL: ${s.id} reasoning=low (agent_model ${s.value} in ${s.source.path})` };
+}
+
+/** Fills auditModel() into the extras that name no model, and the AUDIT_MODEL: line for the plan when any did. */
+export function withAuditModel(given: Extra[], env: NodeJS.ProcessEnv = process.env): { extras: Extra[]; lines: string[] } {
+  const audit = given.some(e => !e.model) ? auditModel(env) : null;
+  return { extras: given.map(e => (e.model || !audit?.model ? e : { ...e, model: audit.model })), lines: audit ? [audit.line] : [] };
+}
 /** Step 9.2.1's own first line: its probes are the parent's, so a QA subagent only refuses (C4-36, C5-36: "parent-only"). */
 export const PARENT_ONLY_QA = 'Only the parent runs report-only discovery.';
 const qaRefusal = (name: string) => new BriefError(`Step 9.2.1 is the parent's report-only discovery (ship/sections/review-army.md: "${PARENT_ONLY_QA}"), never an audit reader: ${name}`);
@@ -105,12 +131,14 @@ const STAGE_OF: Record<string, Stage> = { specialist: 'specialists', 'fix-check'
 /** The manifest for one pass from the plan's dispatches. A fix-check reader needs decision 3.5's files. `voices` keeps only Step 11's readers. */
 export function buildManifest(o: {
   pass: string; out: string; ledger: string; base: string; diffBase: string; root: string; checklistRoot: string;
-  dispatches: Dispatch[]; next: string; planLines: string[]; learnings?: string | null; extras?: Extra[];
+  dispatches: Array<Dispatch & { excerpt?: string[] }>; next: string; planLines: string[]; learnings?: string | null; extras?: Extra[];
   targetedClasses?: readonly string[]; mergeBase?: string; rangeBase?: string; fixCheck?: FixCheckFiles; reviewExclude?: Record<string, unknown>; disclosure?: string; readers?: EffectiveReaders; voices?: boolean;
 }): Manifest {
   if (o.voices && o.extras?.length) throw new BriefError(`Step 11's voices pass sends no audit reader, so it takes no --extras: ${o.extras.map(e => e.name).join(', ')}`);
   const readers: PassReader[] = [];
-  for (const d of o.dispatches) {
+  const selection = policySelection(o.reviewExclude, o.readers);
+  for (const planned of o.dispatches) {
+    const d = planned.role === 'fix-check' ? planned : selectFor(planned, selection);
     const stage = STAGE_OF[d.role];
     if (!stage) throw new BriefError(`a pass dispatches no ${d.role} reader`);
     if (o.voices && stage !== 'voices') continue;
@@ -120,8 +148,10 @@ export function buildManifest(o: {
     const reader = readerKey(role, name);
     const exclude = d.exclude.length ? diffCommand(d).slice('git diff <diff-base> '.length) : undefined;
     const policy = d.exclude.filter(s => s.startsWith(':(top,exclude,glob)'));
+    const excerpt = (d.excerpt ?? []).filter(s => d.keep?.includes(s));
+    const keep = (d.keep ?? []).filter(s => !excerpt.includes(s));
     readers.push({ reader, stage, title: `ship ${o.pass} ${reader}`, state: 'planned', role, name, effort: d.effort, exclude, checklists: d.checklists,
-      ...(policy.length ? { policy_exclude: policy.map(shellQuote).join(' ') } : {}), ...(d.keep?.length ? { keep: d.keep } : {}),
+      ...(policy.length ? { policy_exclude: policy.map(shellQuote).join(' ') } : {}), ...(keep.length ? { keep } : {}), ...(excerpt.length ? { excerpt } : {}),
       ...(role === 'targeted' ? { classes: [...(o.targetedClasses ?? [])], diff_base: o.mergeBase ?? o.diffBase } : {}),
       ...(role === 'adversarial-native' && d.classes?.length ? { classes: [...d.classes], diff_base: o.mergeBase ?? o.diffBase } : {}),
       ...(d.model === 'cross-family' ? { cross_family: true } : d.model && d.model !== 'lane' ? { model: { model_id: d.model } } : {}),
@@ -188,7 +218,8 @@ export function renderStage(m: Manifest, stage: Stage, t: SectionTexts, diffFor:
     const role = r.role!;
     const slots: Slots = { name: r.name, diff_base: r.diff_base ?? m.diff_base, exclude: r.exclude, stack: m.stack, test_fw: m.test_fw, learnings: m.learnings ?? undefined,
       checklists: r.checklists?.map(n => path.join(m.checklist_root, 'review/specialists', `${n}.md`)).join(','),
-      policy_exclude: r.policy_exclude, ...(m.disclosure ? { disclosure: m.disclosure, keep: r.keep?.map(shellQuote).join(' ') } : {}) };
+      policy_exclude: r.policy_exclude, ...(m.disclosure ? { disclosure: m.disclosure, keep: r.keep?.map(shellQuote).join(' ') } : {}),
+      ...(m.disclosure && r.excerpt_file ? { excerpt_file: r.excerpt_file.file, excerpt_bytes: String(r.excerpt_file.bytes), excerpt_sha256: r.excerpt_file.sha256, excerpt_files: String(r.excerpt_file.files) } : {}) };
     if (role === 'specialist') slots.checklist = path.join(m.checklist_root, 'review/specialists', `${r.name}.md`);
     let findingsSha: string | undefined;
     if (role === 'red-team') {
