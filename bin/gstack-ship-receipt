@@ -50,13 +50,14 @@ import {
 } from '../lib/ship-receipt';
 import { checkDocsCaps, docsCapLine, docsExceptionLine, parseReceiptDocs } from '../lib/ship-receipt-docs';
 import { comparePath, contextPacket, PACKET_SECTION_CAP, readScopedReview, touchedPaths } from '../lib/ship-patch';
-import { planRecheck, readRecheck, recheckPacket } from '../lib/ship-recheck';
+import { planRecheck, readRecheck, recheckPacket, recheckRecordTemplate } from '../lib/ship-recheck';
 import { carryExcludeBinds, deeper, depthBelow, exceptionHead, exceptionLoopProblem, exceptionProblems, parseReviewLoopException, parseReviewTargeted, plainDocsSince, platformReceiptDepth, receiptExclude, receiptReviewAtHead, receiptTargetedAtHead, reviewLoopExceptionLine, targetedClassesSince, writeExcludeBinds } from '../lib/ship-receipt-depth';
 import { RISK_CLASSES, type RiskClass } from '../lib/review-risk';
 import { checkReceiptProse, proseLine } from '../lib/ship-receipt-prose';
 import { resolveStateRoot } from '../lib/state-root';
 import { readPause, receiptBaseRed } from '../lib/base-red';
 import { readRuledNotes, ruledNoteText } from '../lib/ruled-notes';
+import { laneExceptionBodyLines } from '../lib/test-lane-exception';
 import { readMechanicalLines } from '../lib/ship-mechanical';
 import { isRegistryUnavailable, loadRegistryFromBase } from '../lib/regen';
 
@@ -117,6 +118,9 @@ write flags: --pr --head --base --version --gated-tree --predecessor --gate <jso
   with the content HEAD holds, each excluded or kept only because code names it (GST-1429); prints REVIEW_EXCLUDE_DOCS_AUDIT: and
   records HEAD's selection. Any other change, or an unreadable snapshot, refuses as above. --docs-pre <Prepare snapshot> (the same
   audit's first snapshot) narrows the audit's files to those whose content it changed, so uncommitted docs the review read stay.
+  When a run audits twice, the last audit's post snapshot carries the earlier audit (gstack-docs-candidate snapshot --run --pre
+  --carry): files the earlier audit edited reset too, to their content before it, when HEAD holds what it left; a carried audit of
+  another run refuses (GST-1616).
   --no-stop <json|@file> (a JSON array of {class, reason, evidence}: each routine stop the run recorded and went on past, class one of
   scoped-fix-check, test-timeout-fix, pregate-flake-rerun, stamp-only-carry, autoplan-regate); recorded as no_stop.
   --declare-risk <classes> (the same list gstack-review-plan --declare-risk took): joins review_depth's risk and only raises
@@ -265,6 +269,9 @@ function cmdWrite(rest: string[], json: boolean): number {
   const ruledNotes = readRuledNotes(repoRoot);
   const unlisted = bodyFile ? ruledNotes.map(n => `Ruled note: ${ruledNoteText(n)}`).find(l => !bodyText.split(/\r?\n/).some(b => b.trim() === l)) : undefined;
   if (unlisted) { process.stderr.write(resultLine('gstack-ship-receipt write', 'RECEIPT_INVALID', `${bodyFile} does not list ruled note ${JSON.stringify(unlisted)} (gstack-approvals rulings prints each line the body carries); nothing written`) + '\n'); return EXIT.fail; }
+  const carried = ciCarried(base);
+  const unlistedException = bodyFile ? laneExceptionBodyLines(carried).find(l => !bodyText.split(/\r?\n/).some(b => b.trim() === l)) : undefined;
+  if (unlistedException) { process.stderr.write(resultLine('gstack-ship-receipt write', 'RECEIPT_INVALID', `${bodyFile} does not list ${JSON.stringify(unlistedException)} (accept's TEST_LANE_EXCEPTION: line; the body carries it as one line); nothing written`) + '\n'); return EXIT.fail; }
   const mechanical = readMechanicalLines(repoRoot, git(['rev-parse', `${head}^{tree}`], repoRoot) ?? '');
   const unlistedRetake = bodyFile ? mechanical.find(l => !bodyText.split(/\r?\n/).some(b => b.trim() === l)) : undefined;
   if (unlistedRetake) { process.stderr.write(resultLine('gstack-ship-receipt write', 'RECEIPT_INVALID', `${bodyFile} does not list ${JSON.stringify(unlistedRetake)} (finish's MECHANICAL: lines; the body carries each as one line); nothing written`) + '\n'); return EXIT.fail; }
@@ -290,7 +297,7 @@ function cmdWrite(rest: string[], json: boolean): number {
   const product = reviewedProduct(repoRoot, base, head, pregateFile);
   let targeted: ReturnType<typeof parseReviewTargeted> | undefined;
   if (flag(rest, '--review-targeted') !== undefined) {
-    try { targeted = parseReviewTargeted(jsonArg(flag(rest, '--review-targeted')), product.product_patch_id ?? 'none', read => reviewedProduct(repoRoot, base, read, pregateFile).product_patch_id, read => targetedClassesSince(repoRoot, read, headSha ?? head), read => plainDocsSince(repoRoot, read, headSha ?? head)); } catch (e: any) { targeted = { ok: false, message: `--review-targeted: ${e.message}` }; }
+    try { targeted = parseReviewTargeted(jsonArg(flag(rest, '--review-targeted')), product.product_patch_id ?? 'none', read => reviewedProduct(repoRoot, base, read, pregateFile).product_patch_id, read => targetedClassesSince(repoRoot, read, headSha ?? head, base), read => plainDocsSince(repoRoot, read, headSha ?? head, base), read => spawnSync('git', ['merge-base', '--is-ancestor', read, headSha ?? head], { cwd: repoRoot, timeout: 30_000 }).status === 0); } catch (e: any) { targeted = { ok: false, message: `--review-targeted: ${e.message}` }; }
   }
   if (targeted && !targeted.ok) { process.stderr.write(resultLine('gstack-ship-receipt write', 'RECEIPT_INVALID', `${targeted.message}; nothing written`) + '\n'); return EXIT.fail; }
   const approval = approvalForReceipt({ repoRoot, base, head, citationText: [bodyText, ...flags(rest, '--approval')].join('\n'), runDirs: flags(rest, '--approval-run') });
@@ -317,7 +324,7 @@ function cmdWrite(rest: string[], json: boolean): number {
       version: flag(rest, '--version') ?? receiptVersion(repoRoot, head, base), base,
       gated_tree: flag(rest, '--gated-tree') ?? tree?.gated_tree, predecessor: flag(rest, '--predecessor') ?? tree?.predecessor?.recorded_head ?? undefined,
       tree: tree?.tree, gate_reuse: tree ? `${tree.gate_reuse} (${tree.gate_reuse_reason})` : undefined,
-      gate: jsonArg(flag(rest, '--gate')), ci: jsonArg(flag(rest, '--ci')), ci_carried: ciCarried(base),
+      gate: jsonArg(flag(rest, '--gate')), ci: jsonArg(flag(rest, '--ci')), ci_carried: carried,
       spend_usd: flag(rest, '--spend-usd') !== undefined ? (Number.isFinite(Number(flag(rest, '--spend-usd'))) ? Number(flag(rest, '--spend-usd')) : flag(rest, '--spend-usd')) : undefined,
       session_kind: sessionKind, artifacts_consumed: flag(rest, '--artifacts-consumed'), run: flag(rest, '--run'), thread: flag(rest, '--thread'),
       policy: flag(rest, '--policy') ?? tree?.policy, queue_mode: flag(rest, '--queue-mode'), preregistration: flag(rest, '--preregistration'), history: flag(rest, '--history'),
@@ -843,21 +850,24 @@ function cmdCarry(rest: string[], json: boolean): number {
       const fullRange = rangeRaw.status === 0 && inter?.status === 0 ? `${rangeRaw.stdout.trim()}\n${inter.stdout.trim()}` : null;
       const numstat = named.length ? spawnSync('git', ['diff', '--numstat', from, head, '--', ...named.map(p => `:(literal)${p}`)], { cwd: repoRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }) : null;
       const binary = numstat?.status !== 0 || (numstat?.stdout ?? '').split('\n').some(l => l.startsWith('-\t-\t'));
-      const r = planRecheck({ code: 'RECEIPT_CARRY_PRODUCT_CHANGED', ancestor, retarget, rangeDiff: fullRange, unnamedPaths: named.length !== changedProduct.length, legacy: !receipt.review_depth, walkCut, contextPaths: contextPaths.length, binary });
+      // Moved base context composes into the same packet, bound to range_base (GST-1561).
+      const context = contextPaths.length ? contextPacket(repoRoot, { reviewedBase: rangeBase, reviewed: from, currentBase: headBase, current: head }, contextPaths) : undefined;
+      const bound = context ? { rangeBase, context: context.text } : {};
+      const r = planRecheck({ code: 'RECEIPT_CARRY_PRODUCT_CHANGED', ancestor, retarget, rangeDiff: fullRange, unnamedPaths: named.length !== changedProduct.length, legacy: !receipt.review_depth, walkCut, contextPaths: contextPaths.length, context, binary });
       const record = flag(rest, '--recheck');
       if (!r.ok) process.stderr.write(`RECHECK: not eligible (${r.reason}); run /ship on ${head.slice(0, 12)}\n`);
       else if (record) {
-        const read = readRecheck(record, { from, head, sha256: r.sha256 });
+        const read = readRecheck(record, { from, head, sha256: r.sha256, ...bound });
         if (!read.ok) return refused('RECEIPT_CARRY_REFUSED', `--recheck: ${read.message}`);
-        recheck = `scoped re-check by ${read.record.reader} (range-diff ${r.lines} lines)`;
+        recheck = `scoped re-check by ${read.record.reader} (range-diff ${r.lines} lines${context ? `; base context moved in ${contextPaths.join(', ')}; range_base ${rangeBase.slice(0, 12)}` : ''})`;
       } else {
         let where = 'not written (dry run)';
         if (!rest.includes('--dry-run')) {
           const packet = path.resolve(repoRoot, git(['rev-parse', '--git-path', `gstack/recheck-${head.slice(0, 12)}.md`], repoRoot) ?? `.git/gstack/recheck-${head.slice(0, 12)}.md`);
-          try { fs.mkdirSync(path.dirname(packet), { recursive: true }); fs.writeFileSync(packet, recheckPacket({ from, head, plan: r, rangeDiff: fullRange! })); where = packet; }
+          try { fs.mkdirSync(path.dirname(packet), { recursive: true }); fs.writeFileSync(packet, recheckPacket({ from, head, plan: r, rangeDiff: fullRange!, ...bound })); where = packet; }
           catch (e) { where = `unwritable: ${(e as Error).message.split('\n')[0]}`; }
         }
-        process.stderr.write(`RECHECK: eligible range_diff_lines=${r.lines} range_diff_sha256=${r.sha256} packet=${where}; one reader reads it, then carry --recheck <record.json> ({"from":"${from}","head":"${head}","range_diff_sha256":"${r.sha256}","reader":"<model>","verdict":"clean"}); a blocking finding means /ship on ${head.slice(0, 12)}\n`);
+        process.stderr.write(`RECHECK: eligible range_diff_lines=${r.lines} range_diff_sha256=${r.sha256} packet=${where}; one reader reads it, then carry --recheck <record.json> (${recheckRecordTemplate({ from, head, sha256: r.sha256, ...bound })}); a blocking finding means /ship on ${head.slice(0, 12)}\n`);
       }
     }
     plan = planCarry({ from, head, changed, productPatchId: { from: reviewed as string, head: current as string }, testPatchId: { from: testFrom, head: testHead }, changedProduct, mergeCommits: Number(mergeCommits) || 0, rangeDiff, ...(retarget ? { retargetedFrom: reviewedBase } : {}), ...(stackParent ? { stackParent } : {}), ...(scopedReview ? { scopedReview } : {}), ...(stampedRows.length ? { stampedRows } : {}), ...(recheck ? { recheck } : {}) });

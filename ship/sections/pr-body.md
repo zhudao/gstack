@@ -103,7 +103,7 @@ ZERO-RUN lane never reaches this body unresolved.>
 ## Pre-Landing Review
 <findings from Step 9 code review, or "No issues found."; then Step 9.4's `REVIEW_LOOP:` line.>
 <Each `Ruled note: …` line `gstack-approvals rulings` prints, verbatim: a finding the owner ruled a disclosed note,
-with its ruler and reason; finish's `MECHANICAL: x` as `Mechanical retake: x`. `gstack-ship-receipt write --body` refuses a body missing one.>
+with its ruler and reason; finish's `MECHANICAL: x` as `Mechanical retake: x` and its `UID_SIDECAR: x (beside y)` as `Godot UID sidecar: x (beside y)`. `gstack-ship-receipt write --body` refuses a body missing one.>
 <Gate edits: Step 9's latest `Gate edits:` line verbatim — `none detected (...)`,
 `N listed, M read, K findings — J kept, R restored, O open`, `partial (...)` or
 `UNAVAILABLE — ...`; never `none detected` for partial or UNAVAILABLE. Under it, each
@@ -227,6 +227,9 @@ NS=$(~/.claude/skills/gstack/bin/gstack-no-stop list | sed -n 's/^NO_STOP_FILE: 
 ~/.claude/skills/gstack/bin/gstack-ship-receipt write --pr <pr-number> --base <base> --gate @.gstack/tmp/ship-gate.json --pregate .gstack/tmp/pregate.json --issues @.gstack/tmp/issues.json --review-loop @.gstack/tmp/review-loop.json --docs @.gstack/tmp/docs-audit.json $([ -s .gstack/tmp/targeted.json ] && echo --review-targeted @.gstack/tmp/targeted.json) ${NS:+--no-stop "@$NS"} --body "$PR_BODY_FILE"
 ```
 
+If write refuses `review_targeted` for a docs claim added after the read, or after a granted fix round (add its `--grant`), rerun Step 9's plan with `--range-base <its head>
+--targeted-ran <its targeted_patch_id>`; on `NEXT: targeted`, run that one reader (`pass`, its voices stage,
+`verify --targeted-out .gstack/tmp/targeted.json`) and write again.
 A Step 5 red-base pause adds `--base-red <pause file>` (a conditional receipt the queue
 refuses, `QUEUE_RECEIPT_CONDITIONAL`). `--docs` reads the record Step 14.5 saved (`{status, scope[, exception]}`): the
 receipt carries it as `docs`, and a `blocked` status without the owner's exception,
@@ -238,7 +241,7 @@ A finding the owner rules a disclosed note instead of a fix is closed only by th
 `gstack-approvals rule`, recorded outside this run, never by this run or a review-log field
 (docs/ship-policy.md#ruled-notes); the receipt lists each one as `ruled_notes`.
 When `gstack-review-dispatch verify` printed `REVIEW_EXCLUDE_RECORD: digest=<d>`, add `--review-exclude <d>`
-and Step 14.5's `--docs-post <audit-id>-post.json` and `--docs-pre <its Prepare snapshot>`; a digest that no longer matches HEAD is
+and the last Step 14.5 audit's `--docs-post <audit-id>-post.json` and `--docs-pre <its Prepare snapshot>`; a digest that no longer matches HEAD is
 `RECEIPT_INVALID field=review_exclude`: rerun the review, not the write, unless only the docs audit's
 files under `review_exclude_paths` changed it, which `--docs-post` binds (`REVIEW_EXCLUDE_DOCS_AUDIT:`).
 

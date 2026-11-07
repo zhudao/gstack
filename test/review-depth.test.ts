@@ -111,6 +111,34 @@ describe('GST-967: the round cap limits fix rounds, not the gate-class voices; a
     expect(nextStep({ ...h, gate: true, adversarialRan: true }).step).toBe('fix-check');
     for (const o of [{ fixChecks: 2 }, { fixChecks: undefined }, { blockingOpen: true }, { granted: undefined }, { fullPasses: FULL_PASS_CAP }]) expect([o, nextStep({ ...h, ...o }).step]).toEqual([o, 'stop']);
   });
+  // Value: protects=after a fix-check, edits after the review bound (--post-review) with a new recorded grant plan one more fix-check,
+  //   the next link of finish's chain, in either panel and after Step 11 on gate class; without a grant, with a blocker open, or
+  //   outside --post-review it stays a stop; fails_when=the planner tells the lane to get a grant and then ignores it (GST-1676);
+  //   seam=nextStep; no_claim=the CLI's binding of the grant to a stop head after the last fix-check's commit
+  test('a new grant after a fix-check plans the next chained fix-check for edits after the review bound (GST-1676)', () => {
+    const h = { fullPasses: FULL_PASS_CAP, last: 'fix-check', touchedGate: true, fixedBelow: false, granted: 'a-060fed2b73ee', fixChecks: 2, postReview: true } as const;
+    expect(nextStep(h)).toMatchObject({ step: 'fix-check', reason: expect.stringContaining('a-060fed2b73ee') });
+    expect(nextStep({ ...h, lean: true }).step).toBe('fix-check');
+    expect(nextStep({ ...h, fullPasses: 1, fixChecks: 1 }).step).toBe('fix-check');
+    expect(nextStep({ ...h, gate: true }).step).toBe('voices');
+    expect(nextStep({ ...h, gate: true, adversarialRan: true }).step).toBe('fix-check');
+    for (const o of [{ granted: undefined }, { blockingOpen: true }, { postReview: false }, { postReview: undefined }]) expect([o, nextStep({ ...h, ...o }).step]).toEqual([o, 'stop']);
+    expect(nextStep({ ...h, last: 'full', fullPasses: 1, fixedBelow: true }).step).toBe('full');
+  });
+  // Value: protects=in the loop, a grant the CLI bound to the last fix-check's own stop head (`chained`) plans one more fix-check
+  //   after any number of fix-checks (GEVA-363's third round), after Step 11 on gate class; without that binding a fix-check still
+  //   never earns another; fails_when=the planner prints stop for a new grant (GST-1681) or plans one for an unbound grant;
+  //   seam=nextStep; no_claim=the CLI's binding (test/review-plan-cli.test.ts)
+  test('a new grant bound to the last fix-check\'s stop plans the next chained fix-check in the loop (GST-1681)', () => {
+    const h = { fullPasses: 1, last: 'fix-check', fixedBlocking: true, granted: 'a-5214be46db1e', fixChecks: 2, chained: true } as const;
+    expect(nextStep(h)).toMatchObject({ step: 'fix-check', reason: expect.stringContaining('a-5214be46db1e') });
+    expect(nextStep({ ...h, lean: true }).step).toBe('fix-check');
+    expect(nextStep({ ...h, fullPasses: FULL_PASS_CAP }).step).toBe('fix-check');
+    expect(nextStep({ ...h, gate: true }).step).toBe('voices');
+    expect(nextStep({ ...h, gate: true, adversarialRan: true }).step).toBe('fix-check');
+    for (const o of [{ chained: false }, { chained: undefined }, { granted: undefined }, { blockingOpen: true }]) expect([o, nextStep({ ...h, ...o }).step]).toEqual([o, 'stop']);
+    expect(nextStep({ ...h, fixedBlocking: false }).step).toBe('done');
+  });
   test('docs/review-policy.md\'s transitions table and rule 3 say both', () => {
     const doc = fs.readFileSync(path.join(ROOT, 'docs', 'review-policy.md'), 'utf8');
     const table = doc.slice(doc.indexOf('<a id="transitions"></a>'), doc.indexOf('A **fix-check** is one reviewer'));

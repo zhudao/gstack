@@ -709,7 +709,7 @@ plan; the audit is `not run`.
 <a id="plan-eng-review-not-persisted"></a>
 ### `PERSISTED: no` / `PERSIST: gstack-review-log '{...}'` / `no saved Eng Review: run the PERSIST: line ...`
 
-**Meaning.** /plan-eng-review ran where the caller forbids writes (for example
+**Meaning.** The eng review methodology (`/autoplan`'s eng phase) ran where the caller forbids writes (for example
 a delegating agent keeps the reviewer read-only, so it cannot edit the plan it
 judges). The review completed: it ends `DONE` with `PERSISTED: no`, records
 telemetry `success`, and returns the full report and decision ledger in its
@@ -727,7 +727,7 @@ review-log command with this review's values.
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-eng-review",...}'
 ```
 
-Or rerun /plan-eng-review where it may write its report and log.
+Or rerun /autoplan where it may write its report and log.
 
 **Expected result.** `gstack-review-read` lists the `plan-eng-review` entry and
 /ship's dashboard shows the Eng Review row (CLEAR when its status is `clean`).
@@ -1706,11 +1706,23 @@ the row is a WARN and the trailer stays `gstack: ok` with a `floor=<f>
 (<file>)` note and a `fix:` note; only the supported minimum
 (`REVISION_BELOW_MINIMUM`) fails a session for being old.
 
-**Fix.** Run the fix before the first workflow: on Capy, `bash
+The row compares the version this checkout reads policies as, the same one
+`validatePolicy` uses: VERSION, or the newest policy key the checkout knows
+when that is later, so an unstamped main checkout that already reads the
+floor's keys passes (`installed <v>, reads policies as <r>`).
+
+When the floor is also above the newest stable gstack release, the row says
+`and no release meets this floor yet: the newest stable gstack is <s>` and
+offers no fast-forward, and the trailer note is `floor=<f> (<file>; no release
+meets this floor yet)` with no `fix:`: upgrading cannot clear it.
+
+**Fix.** Run the fix once before the first workflow: on Capy, `bash
 <skill>/scripts/install.sh --for <skill>` fast-forwards a clean checkout to
 origin and reinstalls in one step (`SELF_UPGRADE: done`); elsewhere
-`bin/gstack-upgrade`. If the floor is above gstack's latest release, lower it
-in the project.
+`bin/gstack-upgrade`. If the row says no release meets the floor, run nothing:
+the project lowers `min_gstack_version` to the stable release named
+(`gstack-ship-policy validate` refuses a floor above stable,
+[POLICY_FLOOR_ABOVE_STABLE](#policy-floor-above-stable)).
 
 <a id="project-node-pin-unmet"></a>
 ### `WARN pins — node <v> outside <pin> (<file>); node read from <path> (node pin only; bun pins pass); fix: ... (PROJECT_NODE_PIN_UNMET)`
@@ -1734,7 +1746,8 @@ yourself; or change the pin in the project.
 **Meaning.** An install-mode session start above the supported minimum found
 the checkout behind origin and could not fast-forward it: the checkout is
 dirty, diverged or pinned (`UPGRADE_REFUSED`), another live session holds a
-lease (`UPGRADE_BUSY`), `bin/gstack-upgrade` is missing, or the session is a
+lease or a /ship or review run is open on the state root (`UPGRADE_BUSY`,
+[deferred](#upgrade-busy)), `bin/gstack-upgrade` is missing, or the session is a
 `--for review-voice` reviewer, which never moves a checkout a lane may share
 (`UPGRADE_SKIPPED`). Nothing was changed, the doctor certified the installed
 revision, and the trailer stays `gstack: ok` with the notes above: a gap
@@ -1746,6 +1759,26 @@ landed upstream), clear the named cause and run the fix: `bin/gstack-upgrade`
 after the refusal is resolved, or the Capy skill installer again once the
 lease holder finishes. Below the supported minimum the bootstrapper fails
 `revision` instead (`REVISION_BELOW_MINIMUM`).
+
+<a id="pin-unreasoned"></a>
+### `SELF_UPGRADE: pin overridden (<pin>, with no recorded reason, and the oldest commit this checkout lacks is <h>h old; ...) (PIN_UNREASONED)` / trailer note `stale=<h>h`
+
+**Meaning.** Capy threads run gstack's latest main at least daily (R75). A Capy
+session start in install mode (`--for <skill>`, a workflow boundary) found the
+checkout more than 24 hours behind origin's default branch, by the commit time
+of the oldest commit it lacks, and pinned by `GSTACK_CAPY_SELF_UPGRADE=off`,
+`GSTACK_CAPY_AUTO_UPGRADE=0`, a detached HEAD (`--revision`) or another branch,
+with no recorded reason. It checked out the default branch where needed and
+fast-forwarded. A dirty or diverged checkout is still never moved, and a live
+workflow lease, eval run or open /ship or review run still defers the upgrade
+(`UPGRADE_BUSY`). On
+`--check` the trailer carries `stale=<h>h` with the install as its fix; unlike a
+bare `behind=`, run that fix before the first workflow.
+
+**Fix.** Nothing, when the pin was not deliberate. To keep a pin, record why:
+`GSTACK_PIN_REASON=<why>` in the session's environment, or
+`git -C <checkout> config gstack.pinReason "<why>"`; the trailer then reads
+`stale=<h>h (pinned: <why>)` and the checkout stays where it is.
 
 <a id="upgrade-refused"></a>
 ### `gstack-upgrade: <cause>; nothing was changed; fix: <command> (UPGRADE_REFUSED)`
@@ -1795,6 +1828,14 @@ this checkout (UPGRADE_BUSY))` and leaves the
 checkout where the run started. Each `gstack-skill-start` renews the lease
 and opens a run that its `gstack-skill-end` closes; a lease whose runs are all
 closed is idle and never counts (GST-1205).
+A run open on the state root defers the Capy install-mode upgrade whatever
+its lease's age (GST-1677): `SELF_UPGRADE: deferred (/ship run <id>
+(<ledger>) is open on this machine, so gstack stays at <version> until it
+ends (R75: upgrades wait for the workflow boundary); fix: <install> once the
+run ends (UPGRADE_BUSY))`, for a ship-budget ledger with no `closed_at`
+written in the last 6 hours, or `review run <token> (<file>)` for a review
+start under 120 minutes old that `gstack-review-log --finish` has not
+consumed.
 
 **Fix.** Wait for those sessions to finish (`bin/gstack-lease list` shows
 every lease with its age and `alive|idle|dead|stale`; a holder is named as
@@ -1940,8 +1981,17 @@ The guide is `capy/skill/gstack/captain.md`.
 `--by`), holds a value outside its enum (`--outcome approved|rejected|pending|standing`,
 a `--date` that is not a real `YYYY-MM-DD` day) or exceeds a length cap (ask, scope and
 pending 300 characters, words 2,000). Exit 2. Nothing was written.
+`rule` and `lane-exception` refuse with this code too: a `--head` that is not
+a commit in the repository, a reason that is missing or holds a newline or
+control character, a `--by` naming gstack, any record while this checkout
+holds an open /ship run, and for `lane-exception` a `--files` list that is
+empty or holds whitespace. `add` refuses a `ruled_note` or
+`test_lane_exception` scope ([ruled notes](ship-policy.md#ruled-notes),
+[test-lane exceptions](ship-policy.md#test-lane-exceptions)).
 
-**Fix.** Rerun with every required flag inside the caps the line names.
+**Fix.** Rerun with every required flag inside the caps the line names. A
+ruling or a test-lane exception is the owner's: record it from the owner's
+session, outside the lane's /ship run.
 
 <a id="approval-record-secret"></a>
 ### `gstack-approvals: ... (APPROVAL_RECORD_SECRET)`
@@ -2093,7 +2143,9 @@ of the same epoch, `--prior-reading` or `--dispatched-at` is above `--reading`, 
 reads its own source (Claude Code journals, the estimate). Exit 2; nothing changed.
 
 **Fix.** Pass the counter the run started with (the BUDGET line names meter, unit and epoch).
-A different meter opens a new epoch that keeps prior usage:
+A successor thread's counter opens a new epoch that keeps prior usage:
+`gstack-ship-budget resume --run <id> --meter-source <its jam id> --reading <n> --credits <c>`
+([Successor handoff](ship-budget.md#successor-handoff)). A different meter opens one too:
 `gstack-ship-budget resume --run <id> --meter <m>`.
 
 <a id="budget-meter-unavailable"></a>
@@ -2116,7 +2168,8 @@ the path, the schema version and the parse location. Exit 2.
 
 **Fix.** After a machine change, `gstack-ship-budget resume --run <id>` restores the ledger and
 record from the Drive checkpoint. Otherwise rebuild:
-`resume --record <path> --rebuild-from-record --reading <n>`; open reservations are charged as unknown.
+`resume --record <path> --rebuild-from-record --reading <n>`, plus `--credits <c>` when the run
+metered credits (every `ship/DRIVER.md` run does); open reservations are charged as unknown.
 
 <a id="budget-check-skipped"></a>
 ### `gstack-review-log: ... (BUDGET_CHECK_SKIPPED)` / `gstack-ship-budget: ... role=<r> step=<s> started=<t> spend=unknown (BUDGET_CHECK_SKIPPED)`
@@ -3188,6 +3241,26 @@ files (or ship it through Steps 5–11.5), write the constant's new value into
 every changed field, and rerun the regen entry's command and commit its output.
 A behavior STOP that remains is planned with `gstack-review-plan --post-review`.
 
+<a id="route-sidecar-refused"></a>
+### `ROUTE_SIDECAR_REFUSED: <path> <reason>`
+
+**Meaning.** `gstack-ship-release finish` found a `.uid` file changed after
+review that failed a Godot UID sidecar proof, so it keeps its old route,
+usually behavior ([ship-policy.md#uid-sidecar](ship-policy.md#uid-sidecar)).
+The reason names the failed proof: `needs --reviewed-base`, `could not be
+compared with the reviewed range`, `has no sibling <path> that the reviewed
+range added or modified or the review-loop exception accepted`, `has no
+sibling <path> at the current tree`, `existed at the reviewed tree or the
+current base`, `is not a regular non-executable file (mode <mode>)`, `is not
+exactly one Godot uid://<id> line`, `shares its UID with <paths>`, `could not
+be searched for its UID in the current tree`, or `or its sibling matches the base
+policy's review_exclude_paths or readers.forbid_paths`.
+
+**Fix.** Commit the sidecar exactly as Godot wrote it, beside a script this PR
+added or changed: one `uid://<id>` line, a regular file, no symlink. Keep a
+script's existing UID instead of regenerating it. Otherwise take Steps 5–11.5
+for the file.
+
 <a id="policy-source-unavailable"></a>
 ### `policy source unavailable — fix: git fetch origin <base> --depth=1 (POLICY_SOURCE_UNAVAILABLE)`
 
@@ -3493,13 +3566,24 @@ or when `--review-targeted` names a read commit that is not an ancestor of
 HEAD, or after which a change carries a targeted class (money, gate, auth or
 secret code changed after the targeted reader read it, a test edit the gate
 scan tags included), or whose product patch is not the receipt's and the change
-since it is more than plain docs. A docs-only change after the read carries the
+since it is more than plain docs. The change since the read is the PR's own: a
+base merge after the read that leaves the PR's diff alone never voids the record,
+whatever files it brought in (GST-1593). A release stamp after the read (a path whose
+change is a stamp under the base policy's stamp rule) always carries the record
+(GST-1689). A docs-only change after the read carries the
 record only when it changes no binary file, adds no numeric claim, touches no
 results, prereg or eval path, and names no money, security, secret or auth topic; any other docs change
-needs the reader again (GST-1195).
+needs the reader again (GST-1195). With `--body`, write also refuses, writing
+nothing, a body that does not carry each line the receipt requires as one line,
+word for word: every `Ruled note: …` line `gstack-approvals rulings` prints,
+finish's `MECHANICAL:` lines as `Mechanical retake: …`, and accept's
+`TEST_LANE_EXCEPTION:` lines as `Test-lane exception: …`
+([ruled notes](ship-policy.md#ruled-notes),
+[test-lane exceptions](ship-policy.md#test-lane-exceptions)).
 
 **Fix.** Regenerate it with `gstack-ship-receipt write`; never hand-edit the
-block. For the `--head` refusal, check out that commit and write there. For a
+block. For a missing body line, add the line the refusal quotes to the body and
+write again. For the `--head` refusal, check out that commit and write there. For a
 targeted refusal, run the targeted reader on HEAD, `gstack-review-dispatch verify
 --targeted-out .gstack/tmp/targeted.json`, and write again with
 `--review-targeted @.gstack/tmp/targeted.json`.
@@ -3522,7 +3606,9 @@ run `gstack-review-dispatch verify --ledger <ledger>`, which prints
 `verify` printed. When the only change since the review is Step 14.5's docs audit editing, adding or
 removing files under a pattern, pass that run's `--docs-post <audit-id>-post.json` and its Prepare snapshot as
 `--docs-pre` as well instead of rerunning the review; the refusal's `the docs-audit exception does not apply:` clause says why when it cannot
-([ship-policy.md](ship-policy.md#review-exclude-paths), GST-1429).
+([ship-policy.md](ship-policy.md#review-exclude-paths), GST-1429). When the run audited twice (a re-audit after a base merge),
+pass the last audit's pair; its post snapshot must carry the earlier audit (`--carry <earlier -post.json>`, GST-1616), or the
+earlier audit's files stay in the selection and write refuses as before.
 
 Write, carry and the queue bind a digest that differs (`recorded=none`, written before the base
 gained `review_exclude_paths`, or a digest from an older policy) when the recorded selection and
@@ -4145,6 +4231,14 @@ two routes:
 
 An allowlist entry or a `[]` declaration the branch adds to its own
 `pregate.json` counts only once it is on the base.
+
+/ship's own reruns on the final tree (`gstack-ship-release accept`, and
+`finish` when it reruns the whole pregate) pass `--policy-from head`
+themselves when the branch's copy differs from the one it forked from in
+nothing but added test lanes and `.gstack/generated.json` matches the base
+tip's, and print `POLICY: head (unreviewed) …`; any other difference keeps the
+base policy and prints `POLICY: base … (the branch's copy <what differs> …)`
+([accept's policy choice](pregate.md#accept-head-policy), GST-1595).
 
 <a id="pregate-head-policy-loosens"></a>
 ### `PREGATE_HEAD_POLICY_LOOSENS`
@@ -5112,6 +5206,34 @@ gstack would read differently or not at all, so every ship-policy reader
 raising `min_gstack_version` raises the crew's install floor at the same
 time; `gstack-ship-policy validate` prints `MIN_READER:` for exactly that.
 
+<a id="policy-floor-above-stable"></a>
+### `POLICY_FLOOR_ABOVE_STABLE`
+
+**Meaning.** `.gstack/ship-policy.json` sets `min_gstack_version` above the
+newest stable gstack release (the highest `v<version>` release tag at
+origin's `stable` commit, or the VERSION at the stable ref). Every lane on the stable update channel runs that
+release, so each one refuses the policy (`POLICY_GSTACK_TOO_OLD`), and
+upgrading cannot help until a release at or above the floor is cut; the
+doctor's floor row says `no release meets this floor yet`.
+`gstack-ship-policy validate` and the pregate `policy-floor` check (on a
+branch that changes the policy) refuse it, naming the floor and the release.
+
+**Fix.** Set `min_gstack_version` to the stable release the message names, or
+lower, and leave out the keys that need a newer gstack until a stable release
+carries them. Then rerun `gstack-ship-policy validate`.
+
+<a id="stable-release-unknown"></a>
+### `STABLE_RELEASE_UNKNOWN`
+
+**Meaning.** A warning, never a refusal: `gstack-ship-policy validate` or the
+pregate `policy-floor` check could not resolve the newest stable gstack
+release, so the policy's `min_gstack_version` was not compared with it. The
+release comes from the gstack checkout's origin (its release tags), or, when
+origin cannot be reached, from its local stable ref and release tags.
+
+**Fix.** Run `git fetch origin --tags` in the gstack checkout, or point
+`GSTACK_STABLE_REPO` at a gstack checkout that has the tags, then rerun.
+
 <a id="queue-not-ready"></a>
 ### `QUEUE_NOT_READY`
 
@@ -5249,12 +5371,13 @@ stays on the trusted-branch path.
 
 **Meaning.** A CHANGELOG fragment under the policy's `changelog_fragments`
 directory is not one regular `.md` file directly in that directory with entry
-text, optional `bump:` front matter and no release heading, or it is over
+text, optional `bump:` and `important:` front matter and no release heading, or it is over
 64 KiB, or a fragment of that name already landed with other text. Nothing was
 allocated or written. See [changelog fragments](ship-policy.md#changelog-fragments).
 
 **Fix.** Rewrite the named fragment as a flat `<dir>/<slug>.md` holding only
-the entry text (and optional `bump: minor|major` front matter); rename it if
+the entry text (and optional `bump: minor|major` and
+`important: security|regression|data-loss|blocker` front matter); rename it if
 the name already landed. Then rerun.
 
 <a id="queue-land-locked"></a>
@@ -6464,7 +6587,9 @@ the range-diff evidence ([unattended.md](unattended.md#the-terminal-line)).
 **Meaning.** Every product path the branch touches has the reviewed +/- lines
 in the same places, but the base edited context lines next to some of them, so
 the 3-line patches differ (GST-384: main reworded the line above the PR's
-hunk). The merge may have spliced the two, as in a JSON entry where the branch
+hunk). A hunk whose added lines are unchanged and whose removed lines differ only
+by the base's edit of the lines the branch replaces counts too (GST-1561: the base
+took `SAVE_VERSION := 83` under the branch's `:= 84`). The merge may have spliced the two, as in a JSON entry where the branch
 changed one key and the base the next, so the receipt does not carry silently.
 The refusal names the paths and a packet file with the hunks that differ and
 the base's own change. The same lines moved somewhere else are
@@ -6506,15 +6631,21 @@ against the current one is at most 400 lines (`RECHECK_RANGE_DIFF_CAP` in
 range_diff_lines=N range_diff_sha256=<sha> packet=<file>`: one reader on that
 range-diff can clear it instead of a full second /ship. A rebased branch
 (`RECEIPT_CARRY_TREE_MISMATCH`), a retargeted stack, a receipt with no
-`review_depth`, more than 20 changed product paths, a binary path, base
-context moved next to reviewed hunks, an empty or unreadable range-diff and a
+`review_depth`, more than 20 changed product paths, a binary path, a moved
+base context section over 200 lines, an empty or unreadable range-diff and a
 packet over 400 lines or 64 KB print `RECHECK: not eligible (<why>)` instead.
+When base context also moved next to reviewed hunks in other paths, their
+scoped-review sections join the same packet (GST-1561): the caps count the
+whole packet, `range_diff_sha256` binds all of it, and the RECHECK line's record
+adds `"range_base"`.
 
 **Fix.** Dispatch one reader on the packet (`.git/gstack/recheck-<head12>.md`;
 `--dry-run` writes none). When it comes back clean, write
 `{"from":"<reviewed head>","head":"<HEAD>","range_diff_sha256":"<from the RECHECK line>","reader":"<model>","verdict":"clean"}`
-and rerun `gstack-ship-receipt carry ... --recheck <record.json>`. The carry
-reason records the reader and the range-diff size. Carry still refuses when
+(plus `"range_base"` when the line's record names one; a record without it then
+refuses) and rerun `gstack-ship-receipt carry ... --recheck <record.json>`. The carry
+reason records the reader and the range-diff size, and with moved context the
+context paths and `range_base`. Carry still refuses when
 HEAD needs a deeper review depth or a different risk class than the receipt
 recorded; that, or a blocking finding, means /ship on the new head. In /ship
 Step 1, `gstack-ship-preflight` prints this as `NEXT: carry route (Step 1.4, J1)`.
@@ -6528,9 +6659,10 @@ body that names a counter the receipt records (`passes=3` against
 against `gate.passed: 41`) with a different value. The receipt is written from
 the run; the prose was typed, so a reader of the body would learn a number the
 run did not produce. The `PROSE:` line names each field with both values. The
-`## Approvals` table `gstack-approvals` renders, the `Review-loop exception: …`
-and `Documentation exception: …` lines the receipt's exceptions require, and
-the inside of a closed code fence are never read as claims.
+`## Approvals` table `gstack-approvals` renders, the `Review-loop exception: …`,
+`Documentation exception: …`, `Ruled note: …`, `Mechanical retake: …` and
+`Test-lane exception: …` lines the receipt requires, and the inside of a
+closed code fence are never read as claims.
 
 **Fix.** Correct the body to the receipt's number. When the receipt is the
 stale one (the run was repeated), rerun `/ship` so the receipt is rewritten

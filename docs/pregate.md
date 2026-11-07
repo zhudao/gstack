@@ -39,7 +39,24 @@ read from the branch under `--policy-from head`. So an allowlist entry or a
 `[]` declaration a branch adds counts only once it is on the base, and a lane it
 adds counts on the base policy only once it lands; `PREGATE_NO_LANE`'s fix line
 says so when the branch edits the file
-([troubleshooting](troubleshooting.md#pregate-no-lane-own-policy)). An unresolvable base exits 3 with
+([troubleshooting](troubleshooting.md#pregate-no-lane-own-policy)).
+<a id="accept-head-policy"></a>/ship's reruns on the final tree (`gstack-ship-release accept`, and `finish`
+when it reruns the whole pregate on the stamped tree) choose the policy themselves
+(GST-1595). When the branch's `pregate.json` differs from the copy it forked from
+(the base tip's when the fork has none) in nothing but added test lanes, and
+`.gstack/generated.json` matches the base tip's copy (a head-policy run loads the
+regen registry from the branch, so a copy that main changed after the fork keeps
+the base policy), they pass `--policy-from head` and print
+`POLICY: head (unreviewed) .gstack/pregate.json: adds <n> test lane(s) over
+origin/<base> and changes nothing else, so the gate is only stricter`. So a PR
+that adds a runtime file and its own lane line passes `accept` without a
+lanes-only PR first (gstack-evals #240). Any other difference (a removed or
+shrunk lane, a `[]` declaration, `warn`, `timeout_s`, `ship_lanes_from`, any
+other key, a changed `generated.json`, a file that does not parse) keeps the
+base policy as before, with `POLICY: base origin/<base>:.gstack/pregate.json (the
+branch's copy <what differs>, so it does not count here; land it on <base>
+first)`. A branch that leaves the file alone prints no `POLICY:` line.
+An unresolvable base exits 3 with
 `POLICY_SOURCE_UNAVAILABLE`. Globs are repo-relative (no `..`, no absolute
 paths, at most 64 per list); commands are one line under 512 bytes.
 
@@ -247,6 +264,13 @@ Two stages with separate clocks, both printed:
   this branch` when the merge-base file lacks the marker. The policy has no
   waiver key, so neither a base nor a pushed `pregate.json` can widen it.
 
+- `policy-floor`: on a branch that changes `.gstack/ship-policy.json`, a
+  `min_gstack_version` above the newest stable gstack release fails
+  (`POLICY_FLOOR_ABOVE_STABLE`, naming the floor and the release), since every
+  stable-channel lane would refuse that policy; when the release cannot be
+  resolved (no release tag on gstack's origin, no local stable ref or tag) it
+  warns (`STABLE_RELEASE_UNKNOWN`). The same rule as `gstack-ship-policy
+  validate` ([ship-policy.md](ship-policy.md)).
 - `timing`: added or changed test lines that compare an elapsed wall-clock or
   CPU time against a bound, or sleep and then assert, print
   `TIMING_ASSERTION: <file>:<line> <pattern>` and a
@@ -1110,6 +1134,46 @@ different environment than the key. An alias that repeats a key or another
 entry's alias is invalid config. The ledger row binds the command the lane
 actually ran.
 
+<a id="ship-lanes-remote-gate"></a>**A lane whose inventory refuses its own tree.** A repo's inventory command
+may refuse a tree on purpose: gbrain's `runs_may_attest` exits 1 for a tree
+that changes CI-reuse files (its workflows, `scripts/ci-reuse.ts`), so no CI
+run can attest to it (GBRA-345, gbrain #8727). When the carry refuses as
+`inventory_failed`, /ship's lanes (finish, accept and Step 5, through
+`gstack-evidence record-ci --remote-gate-stands-in`) look for a cleared remote
+gate for the same tree, and it stands in for the lane only when every one of
+these holds (`lib/remote-gate-stand-in.ts`, GST-1688):
+
+- `.gstack/tmp/pregate.json` was recorded for HEAD's exact tree and
+  `gstack-pregate verify` accepts it now;
+- its `pregate.json/remote_gate` obligation holds the gate's own report,
+  `remote-gate tree=<HEAD's tree> tests=<n>` with n above 0 (from
+  `gstack-pregate --remote` or `clear --receipt`), run on that tree rather than
+  accepted from a stamp-only predecessor, cleared within the last 24 hours;
+- that record's `base` and `policy` both name `origin/<base>@`: the pregate
+  run was against the same base branch, under that branch's own
+  `.gstack/pregate.json`, the policy whose `ship_lanes_from` maps the lane.
+
+Then the ledger records the lane as `source=remote_gate` with that receipt and
+the gate's test count, timed at the clear, and accept prints
+`CI_CARRY: remote_gate label=<lane> receipt=<receipt> (inventory_failed: …; the
+cleared pregate.json/remote_gate for this exact tree stands in)` and `LANE: <lane>
+satisfied by remote_gate receipt=<receipt>`. The receipt's `ci_carried` never
+lists it, since no CI run carried it. Otherwise the lane stops as before, and a
+`CARRY_DIAGNOSIS: no cleared pregate.json/remote_gate stands in: <why>` line
+says which rule failed: a gate for an earlier tree, a receipt that names
+another tree, a record `verify` refuses, or none at all. Other refusals
+(`inventory_uncovered`, `no_tests`, …) never fall back to the gate.
+
+One limit: the record cannot say whether the gate ran the whole suite or only
+the files pregate selected and handed it (`PREGATE_FILES_FILE`; gbrain's gate
+runs its whole corpus either way). The receipt carries a test count, not a file
+list, so a gate that ran only the selection can stand in for a full-suite lane.
+
+A run whose `tree.json` lists no files, which is what a rerun of only the
+failed jobs uploads, refuses as `no_tests` and says to dispatch a fresh full
+run of the profile's workflow (`gh workflow run <workflow> --ref <branch>`)
+and carry from that.
+
 **What `tests_ran` means on a carried lane.** No carried lane reports the whole
 run's count. A lane mapped by `inventory` reports how many of its inventory
 files the runs' `tree.json` covers, labeled as a file count (`tests_ran=14
@@ -1200,7 +1264,62 @@ each mapped lane from the green run at that exact tree, reuses or runs the rest,
 checks every lane FRESH and reruns the pregate there, whose tests stage carries
 the same run. `gstack-ship-receipt write` records the carried runs as
 `ci_carried: [{ lane, run, attempt, tree }]`, and the `SHIP_RECEIPT:` line names
-them (`ci_carried=<lane>:<run>/<attempt>`).
+them (`ci_carried=<lane>:<run>/<attempt>`). Each `record-ci` gets the base
+policy's [`ci_record_timeout_s`](ship-policy.md#ci-record-timeout) (600 s by
+default, 3600 s at most), and accept prints it as `CI_RECORD_TIMEOUT:`.
+
+<a id="accept-local-tests"></a>**When accept's final pregate runs the tests here (GST-1606).** The final
+pregate's tests stage carries only under a base run profile whose `os` matches
+this machine and whose workflow holds a lane this machine runs. A lane carried
+through `ship_lanes_from` needs neither, so a profile without `os` carries
+every lane and still leaves the tests stage to run its whole selection here
+(harness-evals #271 ran 3,666 tests that way). accept then prints one line:
+`CI_CARRY: none (<reason>); the final pregate's tests stage ran here instead:
+tests <verdict> in <n>s`. The run is correct, only slower. Adding `"os":
+"Linux"` (or this machine's OS) to the profile on the base branch lets the
+next accept carry the tests stage too, when the run's `tree.json` covers the
+selection.
+
+<a id="same-tree-clears"></a>**A rerun at the same tree keeps its clears (GST-1627).** accept's final
+pregate reran `gstack-pregate` on the tree the lane had already cleared
+`macos-named-regressions` and `windows-smoke` on from CI runs, and the fresh
+record dropped both receipts, so accept stopped on `requires-remote (2
+uncleared)` and never exited 0 (#4063, GST-1595). Now, when `gstack-pregate`
+writes over a record for the same head, tree, policy and base branch, each uncleared
+obligation takes the earlier receipt for the same lane, platform, workflow and
+job, with its `cleared_by`, stamp-only substitution and flaky exception, as long
+as the earlier obligation listed every test the new one needs. Each kept
+receipt prints `PREGATE_CLEAR_KEPT: <lane> receipt=<receipt> (recorded at this
+tree <tree12>; …)` (on stderr under `--json`), and accept relays the lines
+before its `PREGATE:` line. A record for another head or tree keeps nothing,
+so any commit after the clear, even an amend that keeps the tree, needs a new
+clear at the new head: a receipt and its flaky exception were vetted against
+the head they name. A rerun with a
+failed, incomplete or not-installed check also keeps nothing, so a remote gate
+that ran again and timed out stays uncleared. `gstack-pregate verify` checks a
+kept receipt as it checks any other one.
+
+<a id="carry-imported-tests"></a>**An inventory file CI's JUnit tree never lists (GST-1595).** bun registers
+the tests of a test file another test file imports under the importer, so the
+imported file's own JUnit suite never appears in `tree.json` and the carry
+refuses with `inventory_uncovered`. For each such file another inventory file
+imports by a relative path (`import`, `import()`, `require`), the refusal adds
+`CARRY_DIAGNOSIS: bun registers <imported> under <importer>; its JUnit suite
+won't appear` (`lib/ci-carry.ts` `importedTestLines`), printed by `gstack-evidence
+record-ci`, `gstack-ship-preflight` and `accept`; the remote gate's
+`inventory_uncovered` reason carries the same words. The fix is usually to move
+the shared code out of the `.test.` file. When that can't happen in this PR,
+the owner can grant a [test-lane exception](ship-policy.md#test-lane-exceptions)
+for exactly those files at the pushed head: `record-ci` then runs each of them
+here, one file at a time, with the entry's `per_file` runner (label
+`<lane>.excepted`) and carries the lane only when every file's run passes with a
+counted test; the lane's `tests_ran` counts those files beside the ones CI
+covered. A failed or zero-test run of any file refuses with
+`exception_preflight_failed`, and a grant at another head or for another file
+set binds nothing. The CI row and the receipt's `ci_carried` entry
+keep the grant and the preflight (`exception`), and `accept` prints
+`TEST_LANE_EXCEPTION: <files> at <head12>: preflight <label> ran <n> test(s)
+here; granted by <who> at <time>: <reason> (approval <id>)`.
 
 **`gstack-ci-carry`.** `find [--profile <name>]… [--command <exact lane command>
 --allow-repo-commands]` prints the verdict for HEAD; `wait [--timeout <s>]`

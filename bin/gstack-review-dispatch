@@ -36,6 +36,9 @@ import { auditVerdict, eventsDigest, loadReaders, readersLine, scanEvents, type 
 import { effectiveReaders, READERS_POLICY_DEFAULT, type EffectiveReaders } from '../lib/ship-policy-readers';
 import { defaultRoots, foundLines, inventory, quarantineStage, rerunBlocked, sweepResult, type Inventory } from '../lib/review-sweep';
 import { REVIEW_DIFF_MAX_BYTES, ceilingContext, disclosureDigest, disclosureLine, parseTail, readSelection, tooLargeLine, unreadableLine, type PlanExclude, type ReaderDiff } from '../lib/review-exclude';
+import { logShipCall } from '../lib/ship-call-log';
+
+logShipCall('gstack-review-dispatch');
 
 const HELP = `gstack-review-dispatch — verbatim reviewer briefs and loss-free collection for /ship
 
@@ -400,7 +403,7 @@ function pass(): number {
   const step = p.next.step;
   const fixChecks = step === 'fix-check' ? [] : p.dispatches.filter(d => d.role === 'fix-check');
   const planLines = [...text.stdout.trimEnd().split('\n'), ...fixChecks.map(d => `FIX_CHECK: planned effort=${d.effort} (Step 3.5 runs it on its own; not in this manifest)`)];
-  if (step !== 'full' && step !== 'scoped' && step !== 'fix-check') { process.stdout.write([...planLines, `PASS: none next=${step} (no reviewer pass; follow NEXT)`].join('\n') + '\n'); return EXIT.ok; }
+  if (step !== 'full' && step !== 'scoped' && step !== 'fix-check' && step !== 'targeted') { process.stdout.write([...planLines, `PASS: none next=${step} (no reviewer pass; follow NEXT)`].join('\n') + '\n'); return EXIT.ok; }
   const rangeBase = step === 'scoped' ? git(['rev-parse', '--verify', '--quiet', `${p.fix_range?.base ?? ''}^{commit}`])?.trim() : undefined;
   if (step === 'scoped' && !rangeBase) throw new BriefError('a scoped plan names no readable fix range base');
   const mergeBase = mergeBaseWith(base);

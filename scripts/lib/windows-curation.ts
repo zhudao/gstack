@@ -408,8 +408,36 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
     reason: 'drives bin/gstack-ship-release, gstack-approvals, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-rereview-triggers.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42139467391)',
   },
   {
+    file: 'test/ship-accept-head-policy.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-evidence and gstack-pregate (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-ci-carry.test.ts, which windows-latest fails at the first bin spawn (windows-scoped-shard, run 41607840098)',
+  },
+  {
+    file: 'test/ship-accept-lane-exception.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-evidence, gstack-approvals and gstack-ship-receipt (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-ci-carry.test.ts, which windows-latest fails at the first bin spawn (windows-scoped-shard, run 41607840098)',
+  },
+  {
+    file: 'test/ship-accept-record-timeout.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-evidence, gstack-ship-policy and gstack-pregate (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-accept-head-policy.test.ts, which windows-latest fails at the first bin spawn (windows-scoped-shard, run 41607840098)',
+  },
+  {
     file: 'test/ship-mechanical-retake.test.ts',
     reason: 'drives bin/gstack-ship-release, gstack-review-plan, gstack-ship-receipt, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-finish-stack-parent.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42156939158)',
+  },
+  {
+    file: 'test/ship-receipt-carry-mixed.test.ts',
+    reason: 'drives bin/gstack-ship-receipt, gstack-ship-release, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-mechanical-retake.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42167292675)',
+  },
+  {
+    file: 'test/ship-uid-sidecar.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-ship-receipt, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-mechanical-retake.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42205201312)',
+  },
+  {
+    file: 'test/ship-accept-same-tree-clears.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-evidence and gstack-pregate (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-accept-record-timeout.test.ts, which windows-latest fails at the first bin spawn (windows-scoped-shard, run 41607840098)',
+  },
+  {
+    file: 'test/ship-accept-remote-gate-lanes.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-evidence and gstack-pregate (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-accept-same-tree-clears.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42302497169)',
   },
 ];
 

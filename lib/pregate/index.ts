@@ -18,9 +18,10 @@ import { ARTIFACT_SCHEMAS, checkSchema, type PregateException, type PregateFile,
 import { wtreeFingerprint, type WtreeResult } from '../script-invocation';
 import { resolveStateRoot } from '../state-root';
 import { guardsCheck } from './checks/guards';
-import { findCarry } from '../ci-carry';
+import { findCarry, importedTestLines } from '../ci-carry';
 import { clearHint, fromRunProfiles, lanesCheck, parseRemoteReport, REMOTE_GATE_LANE, remoteReportProblem, treeMismatch } from './checks/lanes';
 import { literalsCheck } from './checks/literals';
+import { policyFloorCheck } from './checks/policy-floor';
 import { regenCheck } from './checks/regen';
 import { secretsCheck } from './checks/secrets';
 import { straysCheck } from './checks/strays';
@@ -35,7 +36,7 @@ import { parseRunReceipt, parseRunRef, runChanged, runReceiptFields, uncoveredFi
 import type { CheckDef, CheckResult, PregateContext, Stage } from './types';
 import { displayNamePattern, workflowCallers } from './workflows';
 
-export const CHECKS: readonly CheckDef[] = [regenCheck, secretsCheck, straysCheck, literalsCheck, timingCheck, guardsCheck, lanesCheck];
+export const CHECKS: readonly CheckDef[] = [regenCheck, secretsCheck, straysCheck, literalsCheck, policyFloorCheck, timingCheck, guardsCheck, lanesCheck];
 export const CHECK_IDS = CHECKS.map(c => c.id);
 export const PREGATE_OUT_REL = '.gstack/tmp/pregate.json';
 /** Where `--stage guards` (the pre-push housekeeping guards) writes by default, so it never replaces the full run's file. */
@@ -456,7 +457,8 @@ function clearByRuns(file: PregateFile, lane: string, refs: string[], check: Run
     for (const f of listed) required.add(f);
   }
   const missing = uncoveredFiles([...required], evidence);
-  if (missing.length) return { refused: 'PREGATE_RECEIPT_INVALID', message: `REUSE: refused reason=${isGate ? 'inventory_uncovered' : 'tests_uncovered'} — ${missing.length} of the ${required.size} test file(s) ${lane} must cover appear in no run's tree.json (${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}); ${lane} stays uncleared` };
+  const imported = missing.length ? importedTestLines(repoRoot, missing, [...required]) : [];
+  if (missing.length) return { refused: 'PREGATE_RECEIPT_INVALID', message: `REUSE: refused reason=${isGate ? 'inventory_uncovered' : 'tests_uncovered'} — ${missing.length} of the ${required.size} test file(s) ${lane} must cover appear in no run's tree.json (${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''})${imported.length ? `; ${imported.join('; ')}` : ''}; ${lane} stays uncleared` };
   const granted = red ? flakyDecision(file, lane, check, red, flaky!, repoRoot) : null;
   if (granted && 'refused' in granted) return granted;
   for (const e of evidence) {
@@ -482,4 +484,27 @@ export function clearObligation(file: PregateFile, lane: string, receipt: string
   if (exceptions.length) file.exceptions = exceptions; else delete file.exceptions;
   file.verdict = verdictOf(file);
   return file;
+}
+
+/**
+ * A rerun at the same tree keeps the clears its predecessor recorded (GST-1627): `gstack-ship-release accept` reruns the
+ * pregate on the final tree after the lane cleared macos-named-regressions and windows-smoke from CI runs at that tree, and
+ * a fresh record dropped them, so accept never passed. A receipt carries only into an uncleared obligation for the same
+ * lane, platform, workflow and job whose tests the earlier one covered, at the same head, under the same policy and base
+ * branch, with its flaky exception when it had one. A record for another head or tree (a same-tree amend gets new clears,
+ * since a receipt and its exception were vetted against the head they name), or a rerun with a failed or unfinished check (a remote gate
+ * that timed out this time), keeps nothing. Returns one PREGATE_CLEAR_KEPT line per lane.
+ */
+export function keepSameTreeClears(prev: PregateFile | null, file: PregateFile): string[] {
+  if (!prev || prev.head !== file.head || prev.tree !== file.tree || prev.policy !== file.policy || prev.policy_digest !== file.policy_digest || baseBranchOf(prev.base) !== baseBranchOf(file.base)) return [];
+  if (file.checks.some(c => c.status === 'fail' || c.status === 'incomplete' || c.status === 'not_installed')) return [];
+  const kept: string[] = [];
+  for (const r of file.requires_remote ?? []) {
+    if (r.receipt) continue;
+    const old = prev.requires_remote?.find(o => o.receipt && o.lane === r.lane && o.platform === r.platform && o.workflow === r.workflow && o.job === r.job && r.tests.every(t => o.tests.includes(t)));
+    if (!old?.receipt) continue;
+    clearObligation(file, r.lane, old.receipt, old.cleared_by ?? 'an earlier run at this tree', old.substitution, prev.exceptions?.find(e => e.lane === r.lane));
+    kept.push(`PREGATE_CLEAR_KEPT: ${r.lane} receipt=${old.receipt} (recorded at this tree ${file.tree.slice(0, 12)}; docs/pregate.md#same-tree-clears)`);
+  }
+  return kept;
 }

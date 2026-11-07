@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { bunIsolationArgs } from '../lib/bun-isolation';
-import { gateMarker } from '../lib/skill-gates';
+import { DEADLINE_MAX_MS, DEADLINE_MS, HOOK_MARGIN_MS, HOOK_TIMEOUT_S, deadlineFromEnv, gateMarker } from '../lib/skill-gates';
 import { ROOT, tmpDir } from './helpers/skill-contract-fixture';
 
 const BIN = path.join(ROOT, 'bin', 'gstack-skill-gates');
@@ -58,6 +58,19 @@ describe('settings', () => {
     }
   });
 
+  test('--autoplan registers Stop on the autoplan-stop-gate shim with no matcher and turns its switch on (GST-1666)', () => {
+    const r = cli('settings', '--autoplan');
+    expect(r.status).toBe(0);
+    const s = JSON.parse(r.stdout);
+    expect(s.env).toEqual({ GSTACK_AUTOPLAN_GATE: 'on' });
+    expect(Object.keys(s.hooks)).toEqual(['Stop']);
+    expect(s.hooks.Stop).toHaveLength(1);
+    expect(s.hooks.Stop[0].matcher).toBeUndefined();
+    const cmd = s.hooks.Stop[0].hooks[0].command;
+    expect(cmd).toBe(path.join(ROOT, 'hosts', 'claude', 'hooks', 'autoplan-stop-gate-stop'));
+    expect(fs.statSync(cmd).mode & 0o111).not.toBe(0);
+  });
+
   test('--investigate --ceo-review together: both switches on, Stop runs both gates', () => {
     const r = cli('settings', '--investigate', '--ceo-review');
     expect(r.status).toBe(0);
@@ -86,6 +99,45 @@ describe('settings', () => {
     const r = cli('settings');
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('SKILL_GATES_USAGE');
+  });
+});
+
+describe('hook timeout covers the gate deadline (GST-1615)', () => {
+  test('every hook settings registers for both gates outlives the deadline ceiling plus the margin', () => {
+    const r = cli('settings', '--investigate', '--ceo-review');
+    expect(r.status).toBe(0);
+    const hooks = JSON.parse(r.stdout).hooks as Record<string, Array<{ hooks: Array<{ timeout: number }> }>>;
+    const timeouts = Object.values(hooks).flatMap(entries => entries.flatMap(e => e.hooks.map(h => h.timeout)));
+    expect(timeouts).toHaveLength(6);
+    for (const t of timeouts) {
+      expect(t * 1000).toBeGreaterThanOrEqual(DEADLINE_MAX_MS + HOOK_MARGIN_MS);
+      expect(t).toBe(HOOK_TIMEOUT_S);
+    }
+  });
+
+  test('hook-timeout prints HOOK_TIMEOUT_S, the number ./setup registers', () => {
+    const r = cli('hook-timeout');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(`${HOOK_TIMEOUT_S}\n`);
+  });
+
+  test('a deadline env above the ceiling is clamped to it; zero, negative or junk falls back to the default', () => {
+    expect(deadlineFromEnv({ GSTACK_SKILL_GATE_DEADLINE_MS: String(DEADLINE_MAX_MS * 3) })).toBe(DEADLINE_MAX_MS);
+    expect(deadlineFromEnv({ GSTACK_SKILL_GATE_DEADLINE_MS: '1500' })).toBe(1500);
+    for (const v of [undefined, '', '0', '-1', 'abc']) expect(deadlineFromEnv({ GSTACK_SKILL_GATE_DEADLINE_MS: v })).toBe(DEADLINE_MS);
+  });
+
+  test('runGateHook runs a handler under the clamped deadline, not the raw env value', () => {
+    const script = `import { remainingMs, runGateHook } from ${JSON.stringify(path.join(ROOT, 'lib', 'skill-gates.ts'))};
+await runGateHook('ceo-review-gate', () => true, () => ({ left: remainingMs() }));`;
+    const r = spawnSync(process.execPath, [...bunIsolationArgs(), '-e', script], {
+      env: { PATH: process.env.PATH ?? '', HOME: state, GSTACK_STATE_ROOT: state, GSTACK_SKILL_GATE_DEADLINE_MS: '600000' },
+      input: JSON.stringify({ session_id: 's1', transcript_path: '/t' }), encoding: 'utf8', timeout: 20_000,
+    });
+    expect(r.status).toBe(0);
+    const { left } = JSON.parse(r.stdout);
+    expect(left).toBeLessThanOrEqual(DEADLINE_MAX_MS);
+    expect(left).toBeGreaterThan(DEADLINE_MAX_MS - 5000);
   });
 });
 
