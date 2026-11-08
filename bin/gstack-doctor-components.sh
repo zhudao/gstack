@@ -8,7 +8,7 @@ GSTACK_DOCTOR_COMPONENTS="claude codex patch codex-cli browse-bundle browser cso
 GSTACK_DOCTOR_CORE="runtime pins state-root privacy cores revision floor wrapper"
 GSTACK_DOCTOR_HOSTS="claude codex"
 GSTACK_DOCTOR_OPTIONAL="codex-cli cso"
-GSTACK_DOCTOR_SKILLS="autoplan plan-ceo-review plan-design-review plan-devex-review plan-tune office-hours spec review ship investigate codex cso browse qa qa-only design-review design-consultation design-html design-motion devex-review scrape skillify canary benchmark make-pdf diagram pair-agent open-gstack-browser setup-browser-cookies connect-chrome land-and-deploy benchmark-models captain careful claude-code context-restore context-save design-shotgun deslop-shared-libs document-generate document-release eval-plan freeze gstack-upgrade guard health ios-clean ios-design-review ios-fix ios-qa ios-sync landing-report learn write-skill modernize retro runaway-stopper setup-deploy setup-gbrain sync-gbrain test-audit ubicloud unfreeze verify review-voice"
+GSTACK_DOCTOR_SKILLS="autoplan plan-ceo-review plan-design-review plan-devex-review plan-tune office-hours spec review ship codex cso browse qa qa-only design-review design-consultation design-html design-motion devex-review scrape skillify canary benchmark make-pdf diagram pair-agent open-gstack-browser setup-browser-cookies connect-chrome land-and-deploy benchmark-models captain careful claude-code context-restore context-save design-shotgun deslop-shared-libs document-generate document-release eval-plan freeze gstack-upgrade guard health ios-clean ios-design-review ios-fix ios-qa ios-sync landing-report learn write-skill modernize retro runaway-stopper setup-deploy setup-gbrain sync-gbrain test-audit ubicloud unfreeze verify review-voice"
 GSTACK_BROWSER_LAZY_REASON="lazy; gstack-browser-ensure installs on first use"
 GSTACK_DOCTOR_HELPERS="gstack-pregate gstack-plan-reality gstack-artifact gstack-autoplan"
 GSTACK_DOCTOR_NOT_NEEDED="none"
@@ -65,7 +65,7 @@ gstack_doctor_component_kind() {
 # gstack_doctor_skill_requires SKILL — the non-core ids the skill needs; returns 1 for an unknown skill.
 gstack_doctor_skill_requires() {
   case "$1" in
-    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship|investigate) printf '%s' 'claude codex patch' ;;
+    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship) printf '%s' 'claude codex patch' ;;
     codex) printf '%s' 'claude codex patch codex-cli' ;;
     cso) printf '%s' 'claude cso' ;;
     browse|qa|qa-only|design-review|design-consultation|design-html|design-motion|devex-review|scrape|skillify|canary|benchmark|make-pdf|diagram|pair-agent|open-gstack-browser|setup-browser-cookies|connect-chrome|land-and-deploy) printf '%s' 'claude codex patch browse-bundle browser' ;;
@@ -78,7 +78,7 @@ gstack_doctor_skill_requires() {
 # gstack_doctor_skill_optional SKILL — ids that SKIP when absent; returns 1 for an unknown skill.
 gstack_doctor_skill_optional() {
   case "$1" in
-    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship|investigate) printf '%s' 'codex-cli' ;;
+    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship) printf '%s' 'codex-cli' ;;
     codex) printf '%s' '' ;;
     cso) printf '%s' '' ;;
     browse|qa|qa-only|design-review|design-consultation|design-html|design-motion|devex-review|scrape|skillify|canary|benchmark|make-pdf|diagram|pair-agent|open-gstack-browser|setup-browser-cookies|connect-chrome|land-and-deploy) printf '%s' 'codex-cli' ;;
@@ -338,6 +338,7 @@ gstack_result_anchor() {
     RECEIPT_CARRY_PRODUCT_CHANGED) printf '%s' 'receipt-carry-product-changed' ;;
     RECEIPT_CARRY_SCOPED_REVIEW) printf '%s' 'receipt-carry-scoped-review' ;;
     DOCS_AUDIT_BLOCKED) printf '%s' 'docs-audit-blocked' ;;
+    DOCS_RESULT_INVALID) printf '%s' 'docs-result-invalid' ;;
     RECEIPT_PROSE_MISMATCH) printf '%s' 'receipt-prose-mismatch' ;;
     RECEIPT_CARRY_PREGATE_STALE) printf '%s' 'receipt-carry-pregate-stale' ;;
     RECEIPT_GIT_TOO_OLD) printf '%s' 'receipt-git-too-old' ;;
@@ -383,6 +384,12 @@ gstack_result_anchor() {
     PROJECT_NODE_PIN_UNMET) printf '%s' 'project-node-pin-unmet' ;;
     PIN_UNREASONED) printf '%s' 'pin-unreasoned' ;;
     UPGRADE_SKIPPED) printf '%s' 'upgrade-skipped' ;;
+    PLAN_RECORD_MISSING) printf '%s' 'plan-record-missing' ;;
+    PLAN_UNRESOLVED) printf '%s' 'plan-unresolved' ;;
+    PLAN_NOT_APPROVED) printf '%s' 'plan-not-approved' ;;
+    PLAN_EXEMPT_UNKNOWN) printf '%s' 'plan-exempt-unknown' ;;
+    PLAN_STORE_UNAVAILABLE) printf '%s' 'plan-store-unavailable' ;;
+    QUEUE_PLAN_MISMATCH) printf '%s' 'queue-plan-mismatch' ;;
     BUDGET_CAP_REACHED) printf '%s' 'budget-cap-reached' ;;
     BUDGET_READING_MISSING) printf '%s' 'budget-reading-missing' ;;
     METER_SCOPE_PARENT) printf '%s' 'meter-scope-parent' ;;
@@ -416,6 +423,12 @@ gstack_result_anchor() {
     GSTACK_CLEAN_TARGET_REFUSED) printf '%s' 'gstack-clean-target-refused' ;;
     GSTACK_CLEAN_PARTIAL) printf '%s' 'gstack-clean-partial' ;;
     GSTACK_CLEAN_INTERNAL) printf '%s' 'gstack-clean-internal' ;;
+    PLAIN_TITLE_REFUSED) printf '%s' 'plain-title-refused' ;;
+    PLAIN_BRANCH_REFUSED) printf '%s' 'plain-branch-refused' ;;
+    PLAIN_OPENING_REFUSED) printf '%s' 'plain-opening-refused' ;;
+    PLAIN_CHANGELOG_REFUSED) printf '%s' 'plain-changelog-refused' ;;
+    PLAIN_COMMIT_REFUSED) printf '%s' 'plain-commit-refused' ;;
+    PLAIN_POLICY_INVALID) printf '%s' 'plain-policy-invalid' ;;
     *) return 1 ;;
   esac
 }

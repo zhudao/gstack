@@ -305,9 +305,9 @@ costs one cheap pass. Each scan gets one 120-second deadline, set in millisecond
 256 MB, is also `consumer_scan_failed`, and its detail says what stopped it and names
 the deadline. One scan fits a minute inside the 180 seconds /ship gives
 `gstack-review-plan`; a plan that also scans a fix range runs two scans, and if they
-pass that limit `gstack-review-dispatch pass` stops with
+pass that limit the plan, run by itself or under `gstack-review-dispatch pass`, stops with
 [`REVIEW_PLAN_STOPPED`](troubleshooting.md#review-plan-stopped) before any reader
-runs (`GSTACK_REVIEW_PLAN_TIMEOUT_MS` sets the pass's limit in milliseconds). Only `classifyDiff` applies the rule (`lib/review-collect.ts`
+runs (`GSTACK_REVIEW_PLAN_TIMEOUT_MS` sets the limit in milliseconds). Only `classifyDiff` applies the rule (`lib/review-collect.ts`
 finds the consumers, `gstack-ship-preflight`'s `RUNTIME_LINES` reads the same
 function); every path-only caller (the receipt's gate-scan decision, the Step 16
 post-review route, /autoplan's docs-only scope) keeps data files code. A numeric claim
@@ -654,6 +654,17 @@ keep a network remote and files of 100 MB or more, outside `node_modules` and
 outside other repositories. An extracted archive, a smaller raw download, a fetch
 with no remote, a clone nested in another repository and a clone deleted before
 the stage ends all go unseen until the platform exposes reader transcripts.
+A test run's fixtures are not fetches, and each new one prints a
+`FETCH_IGNORED:` line with its reason instead: a directory below a sweep root
+that carries `.gstack-test-fixture` (test-setup.ts puts every test's temp
+paths under one such root per process and removes it after the last file), and a
+repository whose every network-looking remote resolves to a local path through
+`url.<base>.insteadOf` (the ship fixtures' `https://github.com/fx/fx.git`). A
+marker on a sweep root itself is not honored, insteadOf that sends a local path
+to the network still counts, and a clone made inside a live fixture root goes
+unseen, as does one whose reader writes the marker or an insteadOf line itself.
+A `Bun.spawn` child given no `env` keeps the temp dir its test process started
+with, so its fixtures land outside the marked root and still count.
 
 What this protects: the readers' findings, the merged review and PR text never
 carry a sealed file a reader fetched or opened. What it cannot protect: data that
@@ -672,7 +683,7 @@ puts in the receipt:
 | `review_loop.passes` | full review passes this ship ran (1 or 2; up to 3 under `review_scope: diff-plus-blocking` or `all`) |
 | `review_loop.blocking_found` | every blocker found (GST-951): the rows' blocking findings (classified, or an unclassified CRITICAL), plus each ledger CRITICAL (as collected or judged) that no row finding from the same reviewer at the same path:line accounts for (each row finding pairs with one per ledger), so an adversarial, outside-voice or not-yet-classified blocker counts and one whose newest classification is below the floor does not. An unreadable ledger, merged file or judged set, or a judged set changed since `judge`, is `REVIEW_SCOPE_LEDGER`, never a count |
 | `review_loop.unrecorded` | blockers found that no row gives a disposition (fixed, deferred, noted, skipped, a gate answer); absent when 0 |
-| `review_loop.unbound` | what could not bind (GST-1168), each printed as `REVIEW_SCOPE_UNBOUND: <what>: <why>`: a row with no start token and no readable time, a `pN` ledger with no review row of pass N, a row finding's `ledger_id` no ledger collected, a `Review-Finding` trailer naming nothing; absent when 0 |
+| `review_loop.unbound` | what could not bind (GST-1168), each printed as `REVIEW_SCOPE_UNBOUND: <what>: <why>`: a row with no start token and no readable time, a `pN` ledger with no review row of pass N (a fix-check ledger in a `pN` directory is not a pass ledger, GST-1775), a row finding's `ledger_id` no ledger collected, a `Review-Finding` trailer naming nothing; absent when 0 |
 | `review_loop.ledgers_read` | dispatch ledgers the count read; absent under `--no-ledger` |
 | `REVIEW_SCOPE_VOIDED:` (stderr, not a receipt field) | an abandoned pass (GBEV-3): a `pN` ledger never judged that no row names, replaced by a later `pM` ledger (M > N) that was judged or is named. Its findings are left out of every count above instead of counting as unbound and unrecorded. A fix-check ledger and the last pass are never voided |
 

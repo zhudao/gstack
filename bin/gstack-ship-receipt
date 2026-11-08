@@ -18,7 +18,7 @@
  *
  * `write` validates against `gstack-artifact schema ship-receipt`, prints the
  * fenced block (and SHIP_RECEIPT: <identifiers> on stderr), writes it to --out,
- * and with --body makes it the first section of that PR body file.
+ * and with --body puts it in that PR body file's Agent notes section (lib/agent-notes.ts).
  * `result` is /ship's terminal step: it binds the receipt to HEAD, writes the
  * run record under <state>/ship/runs/ (ship-run.json: a /ship record, not a
  * `run` v1 manifest, so `gstack-artifact validate` does not apply to it) and
@@ -34,6 +34,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ghSpawnSync } from '../lib/gh-poll';
 import { EXIT, exitTableHelp, type ShipReceipt } from '../lib/headless-artifacts';
 import { resultLine, resultLineWithDocs } from '../lib/result-codes';
 import { versionAtRef } from '../lib/restamp';
@@ -45,7 +46,7 @@ import { installedGstackVersion, isUnavailable, loadPolicyFromBase, matchesAny, 
 import { approvalForReceipt } from '../lib/approval-citations';
 import {
   CARRY_METADATA_GLOBS, CARRY_NAMED_PATHS, CARRY_TEST_GLOBS,
-  bindReceipt, carryReceipt, classifyCarryPath, computeCensus, extractReceipt, landedStackParent, missingIssueLines, orderReceipt, parseReviewLoop, placeReceiptFirst, planCarry, planTreeCarry,
+  bindReceipt, carryReceipt, classifyCarryPath, computeCensus, extractReceipt, landedStackParent, missingIssueLines, orderReceipt, parseReviewLoop, placeReceipt, planCarry, planTreeCarry,
   receiptIssuesFrom, receiptSummaryLine, renderCensus, renderReceiptBlock, validateReceipt, type CensusPr,
 } from '../lib/ship-receipt';
 import { checkDocsCaps, docsCapLine, docsExceptionLine, parseReceiptDocs } from '../lib/ship-receipt-docs';
@@ -63,7 +64,7 @@ import { isRegistryUnavailable, loadRegistryFromBase } from '../lib/regen';
 
 const HELP = `gstack-ship-receipt — the \`\`\`gstack-ship-receipt\`\`\` block (docs/ship-policy.md#ship-receipt)
 
-  write [flags]                       compose, validate and print the block; --body <file> puts it first in that PR body;
+  write [flags]                       compose, validate and print the block; --body <file> puts it in that PR body's Agent notes;
                                       --base-red <pause.json> makes it conditional (gstack-base-red classify --pause)
   read --pr <n> [--repo <r>]          parse the block from the PR body through gh (RECEIPT_MISSING / RECEIPT_INVALID)
   read --body <file>                  parse the block from a file
@@ -167,7 +168,7 @@ function git(args: string[], cwd?: string): string | undefined {
   return r.status === 0 ? r.stdout.trim() : undefined;
 }
 function gh(args: string[]): { ok: boolean; out: string; err: string } {
-  const r = spawnSync('gh', args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
+  const r = ghSpawnSync(args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
   return { ok: r.status === 0, out: r.stdout ?? '', err: (r.stderr ?? '').trim() };
 }
 
@@ -331,6 +332,7 @@ function cmdWrite(rest: string[], json: boolean): number {
       ...pregate, issues: issuesFile ? receiptIssuesFrom(issuesFile) : undefined, approval: approval.kind === 'ok' ? approval.approval : undefined,
       review_loop: reviewLoop, ...(docs?.ok ? { docs: docs.docs } : {}), ...product,
       gstack_version: installedGstackVersion(), review_depth: reviewDepth, review_loop_exception: loopException?.ok ? loopException.exception : undefined, ruled_notes: ruledNotes.length ? ruledNotes : undefined, mechanical: mechanical.length ? mechanical : undefined, review_targeted: targeted?.ok ? targeted.targeted : undefined,
+      design: review.frontend ? { mode: 'static', reason: 'no preview declared' } : undefined,
       base_red: pause ? receiptBaseRed(pause) : undefined,
       review_exclude: receiptExclude(review.exclude),
       no_stop: noStopArg(flag(rest, '--no-stop')),
@@ -359,7 +361,7 @@ function cmdWrite(rest: string[], json: boolean): number {
   const block = renderReceiptBlock(receipt);
   const out = flag(rest, '--out');
   if (out) fs.writeFileSync(out, block);
-  if (body) fs.writeFileSync(body, placeReceiptFirst(fs.existsSync(body) ? fs.readFileSync(body, 'utf8') : '', receipt));
+  if (body) fs.writeFileSync(body, placeReceipt(fs.existsSync(body) ? fs.readFileSync(body, 'utf8') : '', receipt));
   process.stderr.write(receiptSummaryLine(receipt) + '\n');
   process.stdout.write(json ? JSON.stringify(receipt) + '\n' : block);
   return EXIT.ok;
@@ -914,7 +916,7 @@ function cmdCarry(rest: string[], json: boolean): number {
   if (errors.length) return refused('RECEIPT_CARRY_REFUSED', `the carried receipt does not validate: ${errors[0]!.message} at ${errors[0]!.path}`);
   const targetedVerdict = receiptTargetedAtHead(repoRoot, baseRef, carried, head);
   if (!targetedVerdict.ok) return refused('RECEIPT_CARRY_REFUSED', `${targetedVerdict.line}: ${targetedVerdict.message}, so the queue refuses it too (#3859); run /ship on ${head.slice(0, 12)}`);
-  const newBody = placeReceiptFirst(body, carried);
+  const newBody = placeReceipt(body, carried);
   const line = receiptSummaryLine(carried);
   if (scopedDryRun) return refused('RECEIPT_CARRY_SCOPED_REVIEW', scopedDryRun);
   if (rest.includes('--dry-run')) {

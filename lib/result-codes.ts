@@ -18,6 +18,7 @@ import { PLAN_RESULT_CODES } from './result-codes-plan';
 import { AUTOPLAN_RESULT_CODES } from './result-codes-autoplan';
 import { BROWSE_RESULT_CODES } from './result-codes-browse';
 import { CLEAN_RESULT_CODES } from './result-codes-clean';
+import { PLAIN_RESULT_CODES } from './result-codes-plain';
 
 export interface ResultCode {
   /** Stable `<a id>` in docs/troubleshooting.md. */
@@ -557,7 +558,7 @@ export const RESULT_CODES = {
   },
   GATE_REC_STALE: {
     anchor: 'gate-rec-stale',
-    summary: 'a `rec` reply was rendered before `gstack-autoplan recommend` changed the recommendations it takes, or the gate predates `rec` (a gate.json without rec_rev, rendered when `all` left changes pending)',
+    summary: 'a `rec` reply was rendered before `gstack-autoplan recommend` changed the recommendations it takes, its `--rec-hash` came from another run\'s gate, or the gate predates `rec` (a gate.json without rec_rev, rendered when `all` left changes pending)',
     fix: 'render the gate again (`gstack-gate render <dir>/gate.json --all`), relay it, and answer with the printed `--rec-hash`',
   },
   CHECKPOINT_INVALID: {
@@ -770,6 +771,7 @@ export const RESULT_CODES = {
   ...AUTOPLAN_RESULT_CODES,
   ...BROWSE_RESULT_CODES,
   ...CLEAN_RESULT_CODES,
+  ...PLAIN_RESULT_CODES,
 } as const satisfies Record<string, ResultCode>;
 
 export type ResultCodeName = keyof typeof RESULT_CODES;

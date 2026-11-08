@@ -80,6 +80,7 @@ branch that changes the policy.
 | `bookkeeping` | glob list | `[]` | <a id="bookkeeping"></a>Root-anchored globs of bookkeeping tables a verify or ratchet step rewrites (size baselines, serial lists, limits), each ending in `.tsv`, `.csv` or `.txt` and never under `.gstack/` or `.github/` (`["scripts/*-baseline.tsv"]`). A matching file changed at most 20 lines after review binds, first touched or not, takes finish's [one scoped reader](review-policy.md#bounded-post-review-edits) instead of Steps 5–11.5; the reader still reads every changed row. Read from the base revision only. Needs `min_gstack_version`. |
 | `mechanical_retake` | `[{ path, template, fields, regen }]` | `[]` | A version or rules constant a branch may have to retake after a base merge, next to `bookkeeping`'s bounded kind: `path` is one literal file, `template` the whole line with one `{n}` (`const RULE_NUMBERS := {n}`), `fields` the `{ glob, field }` fixture fields that carry the same value, and `regen` the [`.gstack/generated.json`](pregate.md#generated) entry ids whose command regenerates its goldens. A post-review edit finish proves to be only that retake routes as `mechanical=`, with no reader and no review round; see [mechanical retakes](#mechanical-retake). At most 8 constants and 16 fields or ids each; no glob, `..`, `.gstack/` or `.github/` path. Read from the base revision only. Needs `min_gstack_version`. |
 | `test_code` | glob list | `[]` | Root-anchored globs of test code the built-in test names miss, never under `.gstack/` or `.github/`, and never matching a file there (`["tests/**/*.gd"]` for GDScript checks). A matching file changed after review routes as test code, one scoped reader of its test hunks, instead of behavior, beside the built-in globs; shared `helpers/` and `fixtures/` files stay behavior. See [test code and Godot UID sidecars](#test-code). Read from the base revision only. Needs `min_gstack_version`. |
+| `plan_record` | `off` \| `warn` \| `require` | `off` | <a id="plan-record"></a>Whether `gstack-ship-queue ready` and `land` (direct, stamp and train land) and `/ship`'s `gstack-ship-release finish --plan "<line>"` check the PR body's `Plan:` line (GST-1751). The line is the brief's (`Plan: approved: <run id or row id>`, `Plan: exempt: <reason>` or `Plan: required`), written under `## Approvals` by `gstack-approvals render --plan`. `ready` resolves it with lib/plan-record.ts against every branch's approval rows on the lane machine: a run id needs the newest gate revision's plan approval answered `approved`, in the owner's words, with no decision of that revision left unanswered; a row id needs an approved row that is not a ruling or grant, and a row from an autoplan run stands for that run's gate the same way; a broken or unreadable store refuses (`PLAN_STORE_UNAVAILABLE`) and never throws, and under `off` changes nothing; an exemption must be one docs/captain.md lists or `crew:<rule>`; a diff of changelog fragments only needs no line. `finish` resolves the brief's line the same way before its first stage. `ready` (train ready included) prints `PLAN:` and writes the resolved record into the READY note; `land` checks that the note carries the PR body's current line and never reads the store. `warn` prints and continues; `require` refuses (`PLAN_RECORD_MISSING`, `PLAN_UNRESOLVED`, `PLAN_NOT_APPROVED`, `PLAN_EXEMPT_UNKNOWN`, `PLAN_STORE_UNAVAILABLE`, `QUEUE_PLAN_MISMATCH`). When this key is `off` or absent, the mode comes from `GSTACK_PLAN_RECORD` (a crew's opt-in), then `plan_record` in `<state root>/config.yaml` (`gstack-config set plan_record off|warn|require`: the untracked source for a repo that commits no `.gstack/`; a typo is rejected, and the `PLAN:` line names the file), then `warn` in a Capy session (`GSTACK_CAPY=1`), then `off`; a machine's key never loosens a tracked `warn` or `require`. A repo with no tracked policy gets the check at `ready` and `finish` only: ready writes no READY note there and `land` refuses before its plan step. Capy's state root does not survive a fresh machine, so a Capy crew that wants more than `warn` sets `GSTACK_PLAN_RECORD` in its project env. On a public or unknown-visibility repository `render --plan` writes `Plan: approved (record r-<12 hex>)`, an opaque id of the approval row (opaque, not secret), so no run id, row id or path reaches the PR body or the READY note pushed to origin; `ready` resolves it by hashing every row id it reads and then applies the row-id rules, and render refuses with no output when an approved line does not resolve. gstack never infers a feature from the diff, title or changelog. Read from the base revision only. Needs `min_gstack_version`. |
 | `ci_record_timeout_s` | integer seconds, at least 60 | `600` | <a id="ci-record-timeout"></a>How long `gstack-ship-release accept` lets one `gstack-evidence record-ci` run before it stops that lane. A value over 3600 is clamped to 3600. accept prints the bound it used as `CI_RECORD_TIMEOUT: <n>s (default)`, `(origin/<base> ci_record_timeout_s)` or `(… <value> is over the 3600s ceiling)`. Raise it when record-ci runs long, for example when it reruns a per_file remainder of CI-skipped files here (harness-evals #271 needed about 745 s). Read from the base revision only, so a branch can't raise its own bound. Needs `min_gstack_version`. |
 | `base_red` | `{ setup, select, timeout_sec }` or `null` | `null` | How `/ship` Step 5 proves a failure is the base branch's own before pausing on it; see [base_red](#base-red). Read from the base revision only. Needs `min_gstack_version`. |
 | `changelog_fragments` | `{ dir, required_checks? }` or `null` | `null` | PRs carry unversioned [CHANGELOG fragments](#changelog-fragments) in `dir` (one flat, repo-relative directory, no `..`) and the merge step ([`land`](#land)) assigns the version (under `merge: direct`, the [release PR](#release-stamp) does). `required_checks` (up to 50 distinct names) are the checks [`train land`](#stamped-trains-under-changelog_fragments-train-land) requires present and green on a stamp commit. `null` keeps `[Unreleased]` sections and per-PR stamps. Needs `min_gstack_version`. |
@@ -112,7 +113,7 @@ hard-code:
   "changelog": "CHANGELOG.md",
   "history": "squash-ok",
   "stamp_sensitive_gates": ["tests"],
-  "changelog_fragments": { "dir": "changelog.d", "required_checks": ["free-tests", "windows-smoke", "Check VERSION is not stale vs queue", "quality", "check-freshness", "actionlint"] },
+  "changelog_fragments": { "dir": "changelog.d", "required_checks": ["free-tests", "windows-smoke", "Check VERSION is not stale vs queue", "quality", "check-freshness", "actionlint", "Plain title"] },
   "min_gstack_version": "1.91.340.0"
 }
 ```
@@ -1255,8 +1256,14 @@ which carry the workflow consequences the skill prose would otherwise spell out:
 | `ship: review_scope …` | Step 9.4 item 0 runs `gstack-review-scope classify` on each pass's findings; see [review_scope](#review-scope) |
 | `ship: changelog_fragments <dir>: …` | Step 12 writes no version; Step 13 writes the entry as `<dir>/<branch-slug>.md` (entry text only, `bump:` front matter only when the change warrants more than the policy bump), never an `[Unreleased]` section, linted with `gstack-prose-lint <file> --gate`; `gstack-ship-queue land` assigns the version; see [changelog fragments](#changelog-fragments) |
 
-The PR body's first section is the ship receipt (`gstack-ship-receipt write … --body`),
-written by the pr-body section of `/ship` after the body is composed.
+The ship receipt (`gstack-ship-receipt write … --body`) goes in the PR body's closing Agent notes
+section, written by the pr-body section of `/ship` after the body is composed. A body from before that
+layout keeps its receipt at the top. That receipt is still read while it opens the body, also after the
+body gains an Agent notes section with no receipt in it; once an edit or a post puts an opening paragraph
+above it, it is no longer read, and the pull request needs a fresh receipt. A receipt posted on its own
+with `gstack-post pr-body` to a body that has the section replaces the receipt inside it. In a body with
+the section, a receipt block quoted in the readable part stays where it is and is never read as the
+receipt; a body without the section is read whole, so there a quoted block can be read as the receipt.
 
 <a id="ship-receipt"></a>
 ## The ship receipt
@@ -1264,8 +1271,8 @@ written by the pr-body section of `/ship` after the body is composed.
 The ```` ```gstack-ship-receipt ```` block is the handoff record: identifiers
 first (`pr`, `head`, `version`, `base`), then the evidence (`gate`, `ci`,
 `head_tree`, `product_patch_id`, `gstack_version`, `review_depth`, `pregate`,
-`issues`, `approval`, `docs`, `review_loop`, `review_loop_exception`, `carry`,
-`no_stop`), validated
+`issues`, `approval`, `docs`, `review_loop`, `review_loop_exception`, `design`,
+`carry`, `no_stop`), validated
 against the `ship-receipt` schema (`gstack-artifact schema ship-receipt`) and
 read back by `gstack-ship-receipt read`, `result`, `carry` and the queue.
 
@@ -1280,6 +1287,16 @@ and `read`, `result`, `gstack-ship-queue ready`, `train build` and `verify
 --train` accept the receipt like any other. A repository that has a CHANGELOG
 but no version source records no `version` at all (the audit still says what
 it looked for); pass `--version` to name one.
+
+**`design`.** On a rendered-UI diff (`gstack-diff-scope` reports
+`SCOPE_FRONTEND=true` for the committed range, which counts CSS, views,
+components and, since GST-1718, Lit or htm tagged templates in .ts/.js files
+whose changed lines sit inside a tagged template or carry markup), write records
+`{ "mode": "static", "reason": "no preview declared" }`: /ship ran only the
+static design-lite check, and the PR body's `## Design Review` line says the
+same. It is advisory and nothing refuses on it. Other diffs record no
+`design` field, and receipts written before it stay valid. A carry copies it
+unchanged.
 
 **`docs`.** Step 14.5's outcome, from `gstack-ship-receipt write --docs
 <json|@file>`: `{ status: updated | current | blocked, scope, exception? }`,
@@ -2378,7 +2395,7 @@ restamping`, GST-1245), so a reset stamp needs no hand cleanup:
    keeps the reviewed pin apart from the last pushed head, so a rerun leases
    on what it pushed and never on a head someone else pushed
    (`QUEUE_TRAIN_MOVED`, never overwritten).
-5. **Wait** for the PR's checks on the stamp commit, polling every 30 seconds
+5. **Wait** for the PR's checks on the stamp commit, polling every 60 seconds or more (lib/gh-poll.ts)
    with the same check read the pin passed (`--timeout <min>`, default 60). `--no-wait`
    stops after the push and prints `gstack-pr-wait <n> --until green &&
    gstack-ship-queue land --pr <n>` to run instead.
@@ -2667,3 +2684,99 @@ recorded predecessor head is no longer the predecessor PR's head (checked
 through `--predecessor-ref` or `gh pr view --predecessor-pr`) the receipt
 prints `PREDECESSOR MOVED <old> -> <new> — fix: gstack-restamp --after <pr>
 again (RESTAMP_PREDECESSOR_MOVED)` and refuses `eligible`.
+<a id="plain-titles"></a>
+## Plain titles: `.gstack/plain-titles.json`
+
+People outside a project read its pull requests and commit log to decide
+whether it is worth using. So PR titles (and the squash commit titles they
+become), branch names, the opening of each PR body, changelog entries and commit
+subjects say in everyday words what changed for someone using the project, for
+example "Stop gstack from hitting GitHub's rate limit while it waits on PRs".
+
+**Front for humans, end for machines.** The rule applies to the readable front.
+A title may end with one group of references, such as `(GST-1713)`,
+`(GST-1808, GST-1809)` or `(#4122)`; that group is never checked. A branch
+may end with one tracker code (`capy/github-rate-limit-gst-1713`). A PR body
+opens with one or two plain sentences (what changed and which goal of the
+project it serves) and keeps tracker codes, the ship record and other
+machine-read lines in the Agent notes section at the end, below the
+`<!-- gstack:agent-notes -->` marker. The checker skips that section.
+
+What the checker refuses in the front:
+
+- a tracker code matching one of the policy's `codes` patterns;
+- a word or phrase from `terms` (whole words, any case; in branch names a
+  hyphen or underscore counts as a space);
+- in titles and commit subjects, a `word(scope):` prefix, since the scope is
+  usually an internal module name. A bare `fix:` or `docs:` is allowed, and so
+  is a leading version such as `v1.98.0.0 release`;
+- in the PR opening, a first block that is a heading, code block, list, table,
+  HTML or image, or a paragraph longer than two sentences;
+- in a changelog entry, a tracker code anywhere, and a listed word in the bold
+  lead. Code spans, code blocks, links and quoted words are skipped.
+
+### The policy file
+
+Each repository opts in by committing `.gstack/plain-titles.json`
+(`gstack-plain-title init` writes an example; `gstack-plain-title validate`
+checks it). Without the file every check passes with
+`PLAIN_TITLE: none (no policy)`, so gstack's own word list never blocks
+another project. The keys:
+
+| Key | Meaning |
+|-----|---------|
+| `codes` | Regex patterns for tracker codes, matched in any case. Keep them narrow: `\\b(?:GST\|GSTA)-\\d+\\b`, not every `ABC-123`, so `UTF-8` stays readable. |
+| `terms` | The project's own words that mean nothing to an outside reader. |
+| `allow` | `{ "text", "reason" }` entries. A refused match inside an allowed phrase passes. Every entry says why. |
+| `since` | A date (`YYYY-MM-DD`, midnight UTC). PRs created before it are exempt, so nothing already open breaks. |
+| `exempt_branch_prefixes` | Branch prefixes that gstack's own tools generate; those branches are not checked. |
+
+gstack's own file lists its tracker prefixes (GST, GSTA, GBRA, GEVA, FOUN, HARN,
+ALPH) and R-numbers (`R76`), the crew and Captain names, and the words last
+week's titles used most: voices, outside voice, pregate, fix-check, ledger,
+receipt, train, wave, lane, restamp and no-stop, with their plurals where
+they were used. It exempts `release/` (the release PR), `wave/` (wave PRs) and
+`gstack-land-repair/` (land's repair PR). The allow list is one entry, kept short
+on purpose:
+
+| Allowed | Why |
+|---------|-----|
+| `R2` | Cloudflare R2, the storage service, not a rules number. |
+
+"merge train" is not allowed: to a reader outside the crew it still names
+gstack's own merge process, so titles say "merge several PRs together" instead.
+
+### Where it runs
+
+1. **/ship, before posting.** /ship writes a plain title and runs
+   `gstack-plain-title check` on the title, the branch (before its first
+   push), the PR opening and the changelog fragment, and rewrites anything it
+   refuses.
+2. **gstack-post, before posting.** `gstack-post pr-title` and `pr-create`
+   run the title check first and post nothing when it refuses.
+3. **The "Plain title" CI check** (`.github/workflows/plain-title.yml`). It
+   runs on every new PR, on each push, and when the title or body is edited.
+   It fails on a refused title and only warns about the branch name, the
+   opening and commit subjects, because those cannot always be fixed in place.
+   It runs on `pull_request_target` with a read-only token and the base
+   repository's checkout, so a PR is checked against the policy and checker
+   already on main and cannot change either; the PR text reaches the checker
+   only as files. The PR that first adds the workflow does not run it for the
+   same reason.
+
+`gstack-plain-title check` exits 0 when everything passes, the policy is
+missing, the PR is exempt or there are only warnings; 1 when something is
+refused; 2 on a usage error; 3 when the policy is invalid. Each finding is
+one `PLAIN_TITLE:` line naming only the matched words, and the last line is
+`PLAIN_TITLE: ok | refused=<n> | warned=<n> | exempt (created before <since>) | none (no policy)`.
+Codes and fixes: [troubleshooting.md](troubleshooting.md#plain-title-refused).
+
+### Making it a required check
+
+The rollout took two merges. The first shipped the checker, the writers and the
+workflow. The second added `"Plain title"` to gstack's
+`changelog_fragments.required_checks`, so `gstack-ship-queue land` refuses a
+PR whose check is red or missing. A PR opened before the workflow existed has no
+run until its title or body is edited or a commit is pushed; do one of those
+before landing it. The workflow reads the PR body from the event file, not an
+environment variable, so a very long body still reaches the checker.

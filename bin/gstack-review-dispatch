@@ -28,13 +28,14 @@ import { buildManifest, chunkCount, chunkOf, manifestPath, markReader, readManif
 import { diffCommand, type Dispatch } from '../lib/review-depth';
 import { mayExclude, policySelection, selectFor } from '../lib/review-selection';
 import { REVIEW_PLAN_TIMEOUT_MS } from '../lib/review-collect';
+import { reviewPlanTimeoutMs } from '../lib/review-collect';
 import { resultLine } from '../lib/result-codes';
 import { runScriptSync } from '../lib/script-invocation';
 import { TARGETED_RULES, parseClassList, targetedBriefSha, targetedRead } from '../lib/review-targeted';
 import { resolveBaseBranch } from '../lib/ship-policy';
 import { auditVerdict, eventsDigest, loadReaders, readersLine, scanEvents, type ToolEvent } from '../lib/review-fetch';
 import { effectiveReaders, READERS_POLICY_DEFAULT, type EffectiveReaders } from '../lib/ship-policy-readers';
-import { defaultRoots, foundLines, inventory, quarantineStage, rerunBlocked, sweepResult, type Inventory } from '../lib/review-sweep';
+import { defaultRoots, foundLines, ignoredLines, inventory, quarantineStage, rerunBlocked, sweepResult, type Inventory } from '../lib/review-sweep';
 import { REVIEW_DIFF_MAX_BYTES, ceilingContext, disclosureDigest, disclosureLine, parseTail, readSelection, tooLargeLine, unreadableLine, type PlanExclude, type ReaderDiff } from '../lib/review-exclude';
 import { logShipCall } from '../lib/ship-call-log';
 
@@ -81,7 +82,8 @@ const HELP = `gstack-review-dispatch — verbatim reviewer briefs and loss-free 
        [--voices] [--checklist-root <dir>] [--fix-list <f> --hunks <f> --tests <f> [--callers <f>]] [-- <gstack-review-plan flags>]
       runs gstack-review-plan and writes <out>/pass-manifest.json: stage first (audit readers marked first in --extras),
       specialists (with the other --extras readers), red-team, voices (Step 11). Renders first and specialists now; prints
-      the plan, MANIFEST: and one READER: line per reader. A plan whose NEXT is not full, scoped or fix-check prints PASS: none.
+      the plan, MANIFEST: and one READER: line per reader. A plan whose NEXT is not full, scoped, fix-check or targeted prints
+      PASS: none, except NEXT: voices under --voices.
       --voices (Step 11 on its own --out) keeps only the plan's voices, so it renders nothing its program never sends; it
       takes no --extras, and a reviewer pass refuses to resume its manifest.
       <id> is letters, digits and dashes, read as lowercase (P1 is p1): the manifest, reader titles and a resume use that form.
@@ -113,7 +115,9 @@ const HELP = `gstack-review-dispatch — verbatim reviewer briefs and loss-free 
   sweep --manifest <f> --stage <first|specialists|red-team|voices> --phase start|end
       the fetch rule's enforcement, per stage. start records an inventory of git repositories and files of 100 MB or more under
       the roots (the checkout's parent, home and the temp dir, or GSTACK_SWEEP_ROOTS; bounded in depth, entries and time) before the stage's readers
-      start. end, once the stage's readers are collected, diffs against it: a new repository with a network remote or a new big file
+      start (a directory below a root carrying .gstack-test-fixture, a test fixture root, is not entered). end, once the stage's
+      readers are collected, diffs against it: a new fixture root, or a repository whose network remote resolves to a local path
+      through url.<base>.insteadOf, prints FETCH_IGNORED: and is not a fetch; a new repository with a network remote or a new big file
       prints FETCH_VIOLATION: per path with a KEEP: line (never a delete command: no transcript attributes the path),
       quarantines every reader of the stage (reply to <out>/quarantine/, findings out of merged.jsonl), plans one rerun per slot as
       <reader>#2 (RERUN:, not a review round) and exits 0; the same on a rerun prints FETCH_RERUN_SPENT (exit 3). A sweep that hit
@@ -264,10 +268,10 @@ function sweep(): number {
   if (s.end) { process.stdout.write(`FETCH_SWEEP: ${s.end.verdict} stage=${stage} attempt=${s.attempt} found=${s.end.found.length} (recorded)\n`); return EXIT.ok; }
   let start: Inventory | null = null;
   try { start = s.start ? JSON.parse(fs.readFileSync(s.start.file, 'utf8')) as Inventory : null; } catch { start = null; }
-  const { found, verdict, partial } = sweepResult(start, start ? inventory(start.roots, checkout) : null);
-  s.end = { at: new Date().toISOString(), verdict, found, ...(partial ? { partial } : {}) };
-  appendEvent(m.ledger, { event: 'fetch-sweep', pass: m.pass, stage, attempt: s.attempt, verdict, found, readers, ...(partial ? { partial } : {}) });
-  const lines = [`FETCH_SWEEP: ${verdict} stage=${stage} attempt=${s.attempt} found=${found.length}${partial ? ` partial=${JSON.stringify(partial)} (a note: the sweep could not cover every root)` : ''}`];
+  const { found, ignored = [], verdict, partial } = sweepResult(start, start ? inventory(start.roots, checkout) : null);
+  s.end = { at: new Date().toISOString(), verdict, found, ...(ignored.length ? { ignored } : {}), ...(partial ? { partial } : {}) };
+  appendEvent(m.ledger, { event: 'fetch-sweep', pass: m.pass, stage, attempt: s.attempt, verdict, found, ...(ignored.length ? { ignored } : {}), readers, ...(partial ? { partial } : {}) });
+  const lines = [`FETCH_SWEEP: ${verdict} stage=${stage} attempt=${s.attempt} found=${found.length}${partial ? ` partial=${JSON.stringify(partial)} (a note: the sweep could not cover every root)` : ''}`, ...ignoredLines(stage, s.attempt, ignored)];
   if (verdict !== 'violation') { writeManifest(file, m); process.stdout.write(lines.join('\n') + '\n'); return EXIT.ok; }
   lines.push(...foundLines(stage, s.attempt, found, readers));
   const q = quarantineStage(m, stage, s.attempt);
@@ -346,7 +350,7 @@ function standaloneSelection(reader: string, base: string, diffBase: string, rea
   let x: (Record<string, unknown> & { state: string }) | null = null;
   if (mayExclude(process.cwd(), base)) {
     const tail = args.includes('--') ? args.slice(args.indexOf('--') + 1) : [];
-    const p = runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...tail, '--json'], { encoding: 'utf8', timeout: REVIEW_PLAN_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+    const p = runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...tail, '--json'], { encoding: 'utf8', timeout: REVIEW_PLAN_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GSTACK_REVIEW_PLAN_BOUNDED: '1' } });
     if (p.status !== 0) throw new BriefError(`gstack-review-plan --base ${base} --json exited ${p.status ?? p.signal}, so the base policy's review selection is unknown and no brief is rendered without it: ${(p.stderr ?? '').trim().slice(-400)}`);
     x = (JSON.parse(p.stdout) as { review_exclude?: Record<string, unknown> & { state: string } }).review_exclude ?? null;
   }
@@ -384,9 +388,8 @@ function pass(): number {
     process.stdout.write([...m.plan_lines, `MANIFEST: file=${file} pass=${id} readers=${m.readers.length} audit-only`, ...m.readers.map(r => readerLine(m, r))].join('\n') + '\n');
     return EXIT.ok;
   }
-  const limit = Number(process.env.GSTACK_REVIEW_PLAN_TIMEOUT_MS);
-  const timeoutMs = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : REVIEW_PLAN_TIMEOUT_MS;
-  const plan = (json: boolean) => runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...planArgs, ...(json ? ['--json'] : [])], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+  const timeoutMs = reviewPlanTimeoutMs();
+  const plan = (json: boolean) => runScriptSync(path.join(ROOT, 'bin', 'gstack-review-plan'), ['--base', base, ...planArgs, ...(json ? ['--json'] : [])], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GSTACK_REVIEW_PLAN_BOUNDED: '1' } });
   const stopped = (r: ReturnType<typeof plan>, json: boolean) => {
     if (r.status !== null || (!r.signal && !r.error)) return false;
     const reason = (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? 'timeout' : r.signal ? 'signal' : 'spawn';
@@ -403,7 +406,7 @@ function pass(): number {
   const step = p.next.step;
   const fixChecks = step === 'fix-check' ? [] : p.dispatches.filter(d => d.role === 'fix-check');
   const planLines = [...text.stdout.trimEnd().split('\n'), ...fixChecks.map(d => `FIX_CHECK: planned effort=${d.effort} (Step 3.5 runs it on its own; not in this manifest)`)];
-  if (step !== 'full' && step !== 'scoped' && step !== 'fix-check' && step !== 'targeted') { process.stdout.write([...planLines, `PASS: none next=${step} (no reviewer pass; follow NEXT)`].join('\n') + '\n'); return EXIT.ok; }
+  if (step !== 'full' && step !== 'scoped' && step !== 'fix-check' && step !== 'targeted' && !(step === 'voices' && args.includes('--voices'))) { process.stdout.write([...planLines, `PASS: none next=${step} (no reviewer pass; follow NEXT)`].join('\n') + '\n'); return EXIT.ok; }
   const rangeBase = step === 'scoped' ? git(['rev-parse', '--verify', '--quiet', `${p.fix_range?.base ?? ''}^{commit}`])?.trim() : undefined;
   if (step === 'scoped' && !rangeBase) throw new BriefError('a scoped plan names no readable fix range base');
   const mergeBase = mergeBaseWith(base);

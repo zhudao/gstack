@@ -11,6 +11,13 @@ Fork it. Improve it. Make it yours. And if you want to hate on free open source 
 - **First-time Claude Code users** — structured roles instead of a blank prompt
 - **Tech leads and staff engineers** — rigorous review, QA, and release automation on every PR
 
+## What gstack is for
+
+- **A whole team's judgment for one builder.** Product, design, engineering, QA, security and release reviews, each from a specialist role.
+- **Catch what CI misses.** Find the bugs that pass tests but break in production, before they ship.
+- **AI-written changes you can trust.** Every change carries its tests, its review and the evidence for both, so you can merge without rereading every line.
+- **Free, open and portable.** MIT-licensed, and it runs on Claude Code and the other major coding agents.
+
 ## Quick start
 
 1. Install gstack (two pastes, about 30 seconds of setup; see below).
@@ -149,7 +156,6 @@ Each skill feeds into the next. `/office-hours` writes a design doc that `/plan-
 | `/deslop-shared-libs` | **Shared Code Reviewer** | Find worthwhile shared-code extractions in recent work. Compares up to five opportunities and recommends the best three, with source evidence, reliability gains, and total code savings. Recommendations only. |
 | `/write-skill` | **Skill Editor** | Write a new agent skill or improve one without bloat. A five-step edit ladder (fix the tool first, add nothing the model already does, edit the line instead of appending, lowest level that reaches the agent, rule not story), `gstack-skill-bill` for size per level and growth since the last diet, a drift check that every gstack command and flag a skill names still exists, and full diets proven by a before/after/no-skill test. |
 | `/test-audit` | **Test Auditor** | Sweep existing tests for ones that cost more than they protect: source greps, duplicates, assertion-free probes, test-only exports. Every candidate carries an evidence card; report-only unless you approve a batch. |
-| `/investigate` | **Debugger** | Systematic root-cause debugging. Iron Law: no fixes without investigation. Traces data flow, tests hypotheses, stops after 3 failed fixes. |
 | `/verify` | **Build Loop** | Run the repo's own checks (typecheck, lint, build) and the tests `/ship`'s pre-gate would pick for your change, fix what breaks, repeat until green, then hand off to `/ship`. Asks once before running repo commands; never calls a change green when no test covers it. |
 | `/design-review` | **Designer Who Codes** | Same audit as /plan-design-review, then fixes what it finds. Atomic commits, before/after screenshots. If you have impeccable installed, its engine runs first and every mechanical finding arrives tagged with its rule id. |
 | `/devex-review` | **DX Tester** | Live developer experience audit. Actually tests your onboarding: navigates docs, tries the getting started flow, times TTHW, triggers CLI errors the way an agent meets them (`gstack-error-capture`: no terminal, contained, redacted). Compares against `/plan-devex-review` scores — the boomerang that shows if your plan matched reality. |
@@ -206,7 +212,7 @@ The same `/qa` and `/qa-only` commands test CLIs, APIs, jobs, workers and webhoo
 | `/setup-gbrain` | **GBrain Onboarding** — from zero to running gbrain in under 5 minutes. PGLite local, Supabase existing URL, or auto-provision a new Supabase project via Management API. MCP registration for Claude Code + per-repo trust triad (read-write/read-only/deny). [Full guide](USING_GBRAIN_WITH_GSTACK.md). |
 | `/sync-gbrain` | **Keep Brain Current** — re-index this repo's code into gbrain via `gbrain sources add` + `gbrain sync --strategy code`, refresh the `## GBrain Search Guidance` block in CLAUDE.md, and auto-remove guidance when the capability check fails. `--incremental` (default), `--full`, `--dry-run`. Idempotent; safe to re-run. |
 | `/gstack-upgrade` | **Self-Updater** — upgrade gstack to latest. Detects global vs vendored install, syncs both, shows what changed. |
-| `/captain` | **Crew Controller** — run many coding agents from one controller: lanes send a READY block and never merge, the controller merges through trains (stamp on call, verify, merge with the expected head), keeps the digest, relays approvals in a fixed shape and runs a daily flaky-fix pass. Also answers to `/crew`. [Team guide](docs/captain.md). |
+| `/captain` | **Crew Controller** (Capy only: [gstack on Capy](#gstack-on-capy)) — run many coding agents from one controller: lanes send a READY block and never merge, the controller merges through trains (stamp on call, verify, merge with the expected head), keeps the digest, relays approvals in a fixed shape and runs a daily flaky-fix pass. Also answers to `/crew`. [Team guide](docs/captain.md). |
 | `/ios-qa` | **iOS Live-Device QA (v1.43.0.0+)** — drive a real iPhone or iPad over USB CoreDevice via an embedded `StateServer` in the app. Read Swift source, codegen typed `@Observable` accessors, run the agent loop. Optional `--tailnet` flag exposes the device to OpenClaw or any HTTP-capable agent on your Tailscale tailnet so remote agents can run iOS QA without ever touching the hardware. Capability-tier allowlist (observe/interact/mutate/restore), per-device session lock, audit log. |
 | `/ios-fix`, `/ios-design-review`, `/ios-clean`, `/ios-sync` | iOS bug-fix loop, designer's-eye HIG audit, debug-bridge cleanup, and accessor resync. See `docs/skills.md`. End-to-end walkthrough: [docs/howto-ios-testing-with-gstack.md](docs/howto-ios-testing-with-gstack.md). |
 
@@ -225,6 +231,10 @@ Beyond the slash commands, gstack ships standalone CLIs (`gstack-egress`, `gstac
 The four setup paths, the per-repo trust policy and memory sync, in brief: [docs/gbrain-quick-tour.md](docs/gbrain-quick-tour.md). **Full monty — every scenario, every flag, every bin helper, every troubleshooting step:** [USING_GBRAIN_WITH_GSTACK.md](USING_GBRAIN_WITH_GSTACK.md)
 
 Other references: [docs/gbrain-sync.md](docs/gbrain-sync.md) (sync-specific guide) • [docs/gbrain-sync-errors.md](docs/gbrain-sync-errors.md) (error index)
+
+## gstack on Capy
+
+On a [Capy](https://capy.ai) machine, `./setup` also loads gstack's crew tools: `/captain` to run many agent threads from one controller, a merge queue that lands verified pull requests, receipts that tie each merge to the head that was reviewed and tested, and spend caps for `/ship` and `/autoplan`. They live in [crew/](crew/README.md) and load only on Capy, so any other install is unchanged by them.
 
 ## Platform notes
 
@@ -257,6 +267,7 @@ On Windows without Developer Mode (MSYS2 / Git Bash), `setup` falls back to file
 | [Privacy & Telemetry](docs/privacy.md) | What is sent, what never is, the update check, outside reviews, egress receipts |
 | [Uninstall](docs/uninstall.md) | The uninstall script and manual removal |
 | [Diagrams & Document Formats](docs/howto-diagrams-and-formats.md) | Mermaid/excalidraw fences in PDFs, image sizing and safety defaults, `--to html\|docx`, `/diagram` triplets |
+| [Preview a frontend](docs/howto-preview-a-frontend.md) | The loopback preview with canned API answers that `/design-review --build` checks, its fixtures, the state inventory, and the `gstack-design-build` receipt |
 | [First Production Deploy](docs/howto-bring-up-a-first-deploy.md) | What to do when `/setup-deploy` says nothing is deployed yet: hosting, env and secrets, DNS, checking it works, then back to `/setup-deploy` |
 | [Builder Ethos](ETHOS.md) | Builder philosophy: Boil the Ocean, Search Before Building, three layers of knowledge |
 | [GBrain quick tour](docs/gbrain-quick-tour.md) | The four setup paths, MCP registration, the per-repo trust policy, memory sync, Conductor env vars |

@@ -1,1 +1,1 @@
-{"blob":"812d84b94328409328020a842696e1a34b22b095","since":6,"nonBehavioral":"narrow screens derive setup and loadouts.json is derived; case selection only, no verdict can change (GST-1575)"}
+{"blob":"36c45c32b6fed41e80255187d1e07e52fd7c32a4","since":6,"nonBehavioral":"test-pr-profile lists the plain-title workflow and gstack's own plain-title policy as files no PR-gate case reads; no case's verdict can change"}
