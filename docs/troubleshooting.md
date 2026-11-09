@@ -1689,6 +1689,26 @@ user-namespace error needs `GSTACK_CHROMIUM_NO_SANDBOX=1`; then re-run
 `<checkout>/bin/gstack-browser-ensure`. `--with-browser` on the installer
 front-loads the install on machines that want it now.
 
+<a id="chromium-sandbox-unavailable"></a>
+### `Chromium could not start its sandbox: this Linux host does not let unprivileged users create user namespaces …`
+
+**Meaning.** Chromium aborted with `No usable sandbox!` (its own line is
+printed below gstack's). The host denies unprivileged user namespaces: stock
+Ubuntu 23.10+ under AppArmor, a container's seccomp profile, or
+`user.max_user_namespaces=0`. browse prints it after `Server failed to
+start:`, and `gstack-design-build preflight` prints it as
+`DESIGN_BUILD: unrendered code=BROWSER_SANDBOX`. gstack never turns the
+sandbox off on its own: it already does so for root, CI, `CONTAINER` and
+Docker's `/.dockerenv`, and everywhere else that is your call.
+
+**Fix.** Either allow unprivileged user namespaces (on Ubuntu,
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` or an
+AppArmor profile for Chromium, per the link in Chromium's line; elsewhere,
+raise `user.max_user_namespaces`), or set `GSTACK_CHROMIUM_NO_SANDBOX=1` in
+the shell that runs gstack. Use the variable only for pages you trust: without
+the sandbox, a page that exploits a Chromium bug can reach your files and
+accounts. Then rerun.
+
 <a id="capy-install-preflight-failed"></a>
 ### `gstack-capy-install: preflight: <tool> not found (INSTALL_PREFLIGHT_FAILED; ...)`
 
@@ -2121,7 +2141,7 @@ all the command prints `SHOT_PNG: unavailable (...)` and exits 0 instead.
 ### `PLAN: ... (PLAN_RECORD_MISSING)`
 
 **Meaning.** The PR body has no `Plan:` line, so the PR reads as `Plan: required`
-(docs/captain.md, Plan before build). gstack never guesses from the diff, title or
+(crew/docs/captain.md, Plan before build). gstack never guesses from the diff, title or
 changelog whether a change is a feature. Under `plan_record: warn` (the Capy crew default)
 `gstack-ship-queue ready` prints the line and continues; under `require` it refuses.
 
@@ -3732,13 +3752,14 @@ the base policy commit.
 - **The branch declares the key but the base does not:** only the base copy
   applies; land that hunk on the base first, as above.
 - **A pattern was not applied** (`skipped=` on the `REVIEW_EXCLUDE:` line): its kept
-  files need more than 24,000 argument bytes. Narrow the pattern, move the kept
-  files out of it, or split the PR.
+  files need more than 24,000 argument bytes on the reader's keep command (files
+  kept only for a secret line are excerpted and do not count). Narrow the
+  pattern, move the kept files out of it, or split the PR.
 - **Still over after exclusion:** add the printed folders to the base policy, or
   split the PR. Files kept only for a secret line already count as their
   excerpts ([secret-line excerpts](ship-policy.md#secret-line-excerpts)); one in
-  `DIFF_KEEP:` that still counts whole is kept for another reason or could not
-  be excerpted.
+  `DIFF_KEEP:` is kept for another reason, and one the excerpt could not be
+  built for moves to the reader's keep command and counts whole.
 
 There is no override flag. See [the review ceiling](ship-policy.md#review-diff-ceiling).
 
@@ -4221,7 +4242,9 @@ anchored pattern and a reason ([docs/pregate.md](pregate.md#allowlist));
 ### `PREGATE_STRAYS`
 
 **Meaning.** A file was added at the repository root, in a new top-level
-directory, or under a scratch name (`zz-*`, `tmp*`, `scratch*`) or an editor
+directory, or under a scratch name (`zz-*`, or `tmp` or `scratch` as the whole
+name stem, optionally numbered: `tmp.js`, `tmp2.js`, `tmp_1.txt`, `scratch.md`,
+but not `tmp-watch.js`, `tmpfs-mount.js`, `scratchpad.ts` or `tmp-repro.ts`) or an editor
 leftover name (`*.orig`, `*.rej`, `*.swp`, `*.swo`, `*.bak`, `*.tmp`, `*~`,
 `.DS_Store`, `Thumbs.db`).
 
@@ -6437,7 +6460,7 @@ ran no slice. evals.yml's `route` job plans nothing when
 between `ready --screen` and the plan) or when the plan selects no case; the
 run then uploads no `paid-plan` artifact (or an empty manifest), every slice
 job is skipped and GitHub shows a green check. On 2026-10-26, 18 of 41 PR
-screens ended this way. The verdict is read from the run (`lib/ship-queue-screen.ts`),
+screens ended this way. The verdict is read from the run (`crew/lib/ship-queue-screen.ts`),
 so such a run is `NOT-RUN`: `verify --pr <n> --screen` prints
 `SCREEN_VERDICT: #<n> run <id> NOT-RUN (<why>)` and refuses with this code, the
 READY receipt records `screen.verdict.outcome: NOT_RUN`, `ready --screen` never
@@ -6735,7 +6758,7 @@ route (Step 1.4)`.
 can't carry as it is. When the history is linear, the base is the one the
 receipt was reviewed against, and `git range-diff` of the reviewed range
 against the current one is at most 400 lines (`RECHECK_RANGE_DIFF_CAP` in
-`lib/ship-recheck.ts`), carry also prints `RECHECK: eligible
+`crew/lib/ship-recheck.ts`), carry also prints `RECHECK: eligible
 range_diff_lines=N range_diff_sha256=<sha> packet=<file>`: one reader on that
 range-diff can clear it instead of a full second /ship. A rebased branch
 (`RECEIPT_CARRY_TREE_MISMATCH`), a retargeted stack, a receipt with no
@@ -7412,3 +7435,11 @@ These codes come from `bin/gstack-plain-title`, which /ship, gstack-post and the
 ### `gstack-plain-title: .gstack/plain-titles.json is not valid JSON or breaks the schema … (PLAIN_POLICY_INVALID)`
 
 **Meaning.** The policy file does not parse, has an unknown key, a `codes` entry that is not a valid regex or matches empty text, an `allow` entry without a reason, or a `since` that is not a date. Exit 3; nothing was checked. **Fix.** Fix the key the line names, then run `gstack-plain-title validate`.
+
+<a id="docs-only-error"></a>
+### `DOCS_ONLY: error (DOCS_ONLY_ERROR: git … ; fix: …)`
+
+**Meaning.** `gstack-docs-only` could not read the change. Usually a ref is missing: CI checked out one
+commit, or `origin/<base>` was never fetched. It exits 2, writes `docs_only=false`, and every caller runs
+the full suites. **Fix.** Fetch both commits (`actions/checkout` with `fetch-depth: 2` on the merge ref, or
+`git fetch origin <base>`), then rerun. See [pregate.md](pregate.md#docs-only).

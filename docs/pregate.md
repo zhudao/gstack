@@ -220,7 +220,9 @@ Two stages with separate clocks, both printed:
   file is read whole from disk. A file over the size limit, or whose full diff
   does not parse, is scanned on its added lines alone, without that context.
 - `strays`: a new file at the repository root, a new top-level directory, or a
-  scratch name (`zz-*`, `tmp*`, `scratch*`) or editor leftover (`*.orig`,
+  scratch name (`zz-*`, or `tmp` or `scratch` as the whole name stem, optionally
+  numbered: `tmp.js`, `tmp2.js`, `tmp_1.txt`, `scratch.md`, but not
+  `tmp-watch.js`, `tmpfs-mount.js`, `scratchpad.ts` or `tmp-repro.ts`) or editor leftover (`*.orig`,
   `*.rej`, `*.swp`, `*.swo`, `*.bak`, `*.tmp`, `*~`, `.DS_Store`, `Thumbs.db`)
   anywhere.
 - `literals`: for every changed exported constant or named timeout/retry
@@ -1429,6 +1431,114 @@ uploads no `tested-tree`, so the main push after the merge finds the source run
 on the head (a branch dispatch) or runs every job. The usual case is a branch
 that already holds main's tip. Dispatch Free Tests on the branch, and the
 pull request run that follows reuses it instead of running the suite again.
+
+<a id="docs-only"></a>
+## Docs-only pull requests (R81)
+
+A pull request whose every changed path is human-facing documentation skips the test
+suites. It runs the docs lane instead: links on the lines it added resolve, generated pages
+are fresh, the credential scan passes, and the tests that read docs by directory run. Pushes
+to the base branch always run the full suites.
+
+**One classifier.** `lib/docs-only.ts` (`bin/gstack-docs-only`) decides the class for CI,
+pregate, `gstack-ci-carry`, /ship's lanes and land. A path is docs only when every one of
+these holds:
+
+- It is a plain file (mode 100644). Executables, symlinks, submodules and type changes refuse.
+- It is on the allowlist, matched case-sensitively: root `README.md`, `docs/**/*.md`, `changelog.d/*.md`, plus the
+  repository's own globs from the base branch's `docs_only.allow` ([below](#repo-docs-paths)).
+- review-depth's `classifyPath` calls it docs, so agent prose, skill directories and policy docs stay code.
+- It matches no denylist entry. The denylist covers agent-instruction names matched case-insensitively
+  (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `ETHOS.md`, `CREW.md`, `captain.md`, `factory.md`, `pregate.md`,
+  `unattended.md` and others), `*-policy.md`, preferences, `sections/`, `templates/`, `skills/`, `prompts/` and
+  `*prompt.md`, `*.tmpl`, hidden directories (`.github/`, `.gstack/`), pinned results (any `evals/` or `inventory/`
+  directory), preregistrations, every output in `.gstack/generated.json`, and the repository's `docs_only.deny`.
+  The list lives in `lib/ship-policy-docs-only.ts`, and no repository setting can override it.
+- No tracked file outside human prose names its path. A script, test, workflow or skill that reads a doc pins it.
+  `CHANGELOG.md`, `TODOS.md` and other allowlisted docs don't pin. The match is a substring match, so it errs
+  toward pinning.
+
+A rename needs both sides to pass, and a deletion needs the old path to pass. An empty diff, an
+unknown ref or any git failure is never docs-only: the CLI prints `DOCS_ONLY: error (DOCS_ONLY_ERROR …)`,
+exits 2 and writes `docs_only=false` ([troubleshooting](troubleshooting.md#docs-only-error)).
+
+**Tests that read docs by directory.** A literal-path scan can't see a test that walks `docs/` or
+lists every tracked file. `DOCS_READER_TESTS` in `lib/docs-only.ts` names them (for example
+`test/docs-config-keys.test.ts`), and the docs lane runs the ones whose tree the change touches.
+`test/docs-only.test.ts` fails on a new reader that is in neither `DOCS_READER_TESTS` nor `DOCS_READER_EXEMPT`.
+
+**CI.** In `free-tests.yml` and `windows-smoke.yml`, a `docs-scope` job checks out the merge ref
+with `fetch-depth: 2` and runs the base branch's classifier (`.github/actions/docs-scope`) on
+`HEAD^1..HEAD`. That is the exact tree CI tests, and a branch can't change the classifier that judges it.
+Each suite job skips only when `docs-scope` succeeded and said docs-only, so a crashed classifier runs
+everything. A required check that is itself the suite, `windows-smoke`, always runs and skips its steps
+instead (`env.DOCS_ONLY`), because gstack's land counts only a check that concluded success, never a skipped
+one. `docs-lane` runs `scripts/check-doc-links.ts --base HEAD^1` and the docs reader tests. The required
+`free-tests` aggregator always runs. On a docs-only pull request it passes only after `docs-lane` passed, and it
+records no `tested-tree`, so a push to main never reuses that run. Use the same jobs in another
+repository: copy `.github/actions/docs-scope`, add a `docs-scope` job, and gate each suite job with
+`${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}`.
+Never use a workflow-level `paths-ignore`: a required check that never starts stays pending.
+
+**Pregate and /ship.** On a docs-only change the `lanes` check runs the docs lane in place of the
+test lanes and owes no remote gate. The `regen` and `secrets` checks run as always. `ci-reuse/free-tests`
+declares `docs-scope` as its `skippable` gate. A pull request run that skipped every suite carries as not
+owed (`CI_CARRY: accepted ci-carry tree=… not_owed=docs-only`), but only when this checkout's classifier
+also calls the head docs-only. Without that check, the run is never evidence (`artifact_missing`).
+
+**Land.** `land.docs_only_skip` in `.gstack/ship-policy.json` names the `merged_checks` commands land
+skips for a docs-only pin, such as the test list, keeping typecheck and the freshness check. Land keeps every
+check when a non-docs file on the base tip names a changed doc, or reads the directory of a repo-admitted one
+([below](#repo-docs-paths)) where the pin had no such reader, because the pin merges onto that tip. Releases up
+to 1.98.0.0 refuse the key as unknown, so `validate` refuses it until `min_gstack_version` reaches
+`LAND_DOCS_ONLY_SKIP_KEY_VERSION` (lib/ship-policy-keys.ts). To turn it on (GST-1968), use one pull request, after a
+stable release carries the key: add `docs_only_skip`, raise `min_gstack_version` to that release, and check that
+`gstack-ship-policy validate` prints `POLICY_VALID` and a `MIN_READER` no newer than the stable release. Until
+then land runs every merged check on a docs-only pin. gstack's own policy leaves the key off.
+
+<a id="repo-docs-paths"></a>
+### Your repository's own docs paths (`docs_only`)
+
+A repository whose human docs live outside `docs/` names them in `.gstack/ship-policy.json`:
+
+```json
+"docs_only": { "allow": ["wiki/board/**.md"], "deny": ["wiki/board/drafts/**"], "tests": ["tests/wiki.test.ts"] }
+```
+
+Every check above still applies to a repo-allowed path: its mode, the built-in deny list, review-depth's
+`classifyPath` (a top-level directory holding a `SKILL.md` stays agent prose), generated outputs, renames on both sides, and
+the reference scan (a script or test naming the path pins it; a repo-allowed doc naming another does not).
+
+- **Base only.** The classifier reads the block with git from the base branch tip (CI: the merge commit's first
+  parent; pregate and `gstack-ci-carry`: `origin/<base>`; land: the tip it merges onto), while the diff still starts
+  at the merge base, so an allow the base revoked after a branch forked no longer applies. It never reads the head or
+  the working tree, and a pull request that edits `.gstack/ship-policy.json` is never docs-only,
+  so a branch can't allowlist itself.
+- **Narrow patterns.** Each `allow` entry ends in `.md` (not `.mdx`, which can import code), starts with a
+  literal directory or file name, uses only `*` and `**` as wildcards, and passes through no hidden directory and no `skills`, `templates`,
+  `sections`, `specialists`, `prompts`, `test`, `tests`, `spec`, `fixtures`, `lib`, `bin`, `scripts`, `src`,
+  `vendor`, `dist` or `build` segment. `**`, `*`, `*.md`, `**/*.md` and a pattern naming an agent file
+  (`wiki/SKILL.md`, `wiki/**/templates/**.md`) are `POLICY_INVALID` when the policy is read, with an example of a
+  narrow pattern. A path the pattern admits that still passes through one of those directories (`wiki/lib/x.md`)
+  refuses too. `deny` entries only remove paths, built-in ones included.
+- **Fail closed.** A base policy that is not valid JSON, or a `docs_only` block that fails those rules, makes every
+  change not docs-only, with the error as the refusal. An unknown key inside `docs_only` is a warning to
+  `gstack-ship-policy validate`, and the classifier then ignores `allow` (keeping `deny`), so a gstack that
+  doesn't understand a newer key never widens on it.
+- **Readers by directory.** A script that lists a directory reads every post in it, which a literal-path scan can't
+  see. So for a path only `allow` admits, any non-prose tracked file that names one of its directories (`wiki/`,
+  `'wiki'`, `"wiki/board"`, `'./wiki'`, `'../wiki'`, `root + '/wiki'`, `` `${root}/wiki` ``) refuses the change unless it is tied to `tests`: it is one of them, names one, or one
+  names it (with or without its extension). `tests` lists up to 16 test files (`*.test.ts` and the like, never a glob);
+  the docs lane runs them, in pregate and in CI's `tests` output, whenever a repo-admitted path changed. A listed test missing from the classified tree refuses
+  the change, so the docs lane can't pass without it. A prose file
+  that names a directory only describes it; one that names a path still pins that path.
+
+**Turning it on.** Releases up to 1.98.0.0 refuse `docs_only` as an unknown key, and `validate` refuses the block
+until `min_gstack_version` reaches `DOCS_ONLY_KEY_VERSION`. After a stable release carries it, add the block and
+raise `min_gstack_version` to that release in the same pull request; that pull request edits the policy, so it runs
+the full suites. Pushes to the base branch always run the full suites. A repository whose CI runs an older pinned
+gstack, or has no `docs-scope` job, gets the class in pregate, /ship and land only: bump the pin first, then add the
+`docs-scope` job from [CI](#docs-only) (never gating its own docs checks), then add the block.
 
 <a id="flaky-exception"></a>
 ## Owner-granted flaky exception

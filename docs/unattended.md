@@ -193,7 +193,7 @@ holds its required lines plus at most 150 words; a completion report holds at
 most 300 words; a subagent brief names the files to read instead of pasting
 them. Evidence goes in files the report points to. Waits go on operations,
 never on polling wakes, except a crew lane's warm wait under about 30 minutes
-([captain.md](captain.md#lane-context)).
+([captain.md](../crew/docs/captain.md#lane-context)).
 
 ### Token caps and fresh-context handoffs
 
@@ -441,7 +441,12 @@ The example above is the full run. The first `next` also takes `--kind`:
   (`GSTACK_CAPY=1`) that names no kind, is the lean run. The run is the `eng`
   phase alone with one native reviewer, whose prompt merges the CEO and Eng
   lenses (Design and DX only when scope detects them) and always asks "Any
-  outside terms, licences or rights involved?". The reviewer reads the draft
+  outside terms, licences or rights involved?". Each lens is short: the eng
+  lens is a five-question brief plus plan-eng-review's 36-line checklist when
+  the run is unattended or `--light`, the
+  others a one-paragraph role and that skill's checklist (CEO 37 lines, design
+  28, DX 34). The reviewer never gets those skills' own methods
+  (`lib/autoplan-lean.ts` `leanPrompt`). The reviewer reads the draft
   code with the plan: `git diff` from the merge base with `--base <ref>`
   (default `origin/HEAD`), untracked files included and the run directory
   left out, written into the phase's snapshot directory as `draft.diff` and
@@ -471,7 +476,11 @@ The example above is the full run. The first `next` also takes `--kind`:
   without re-review (`APPLIED: … (lean run: one gate revision; …)`) and
   approves. The gate and `gstack-owner-brief render --captain` relay work as
   in the full run. A paid-eval prereg counts as a feature.
-- **`--full`** restores every phase and both voices. Off Capy, and in an
+- **`--full`** restores every phase and both voices. Each phase's native
+  reviewer gets a five-question brief, the plan and that phase's checklist
+  (`--light`, the unattended default); the outside reviewer gets a
+  one-paragraph role and the plan. Neither gets the review skill's own
+  method, which only an interactive `/autoplan` session reads. Off Capy, and in an
   interactive session, the default stays full; `--ceo-only` stays its own run.
 
 1. **Dispatch each `ATTEMPT:`.** The native voice is a subagent on the parent's
@@ -992,7 +1001,7 @@ and `status: "pending"`, named in the handoff, never taken.
 - **Merge: never.** The run ends at a receipt bound to the pushed head
   (`SHIP_RECEIPT`, [ship-policy.md#ship-before-ready](ship-policy.md#ship-before-ready))
   or at a pending gate. Merging is the controller's act
-  ([captain.md](captain.md)); a green check list, an approval, or a prompt that
+  ([captain.md](../crew/docs/captain.md)); a green check list, an approval, or a prompt that
   says "merge when green" does not move it to the lane. The same holds for
   enabling auto-merge, adding the PR to a merge queue, or `gh pr ready` on a
   PR the run did not open.
