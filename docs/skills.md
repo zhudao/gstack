@@ -705,7 +705,7 @@ A lot of branches die when the interesting work is done and only the boring rele
 1. **`## What changed`**: one to three captioned before/after images from `gstack-pr-shots` or a UI screenshot, highest-signal first, with a collapsed text version under each.
 2. **`## Why`**: two or three sentences. The first states the problem in the person's words (the issue, the message, the failing run), then the cause and the user-visible effect.
 3. **`## Blast radius`**: what else the change touches and the one fact that makes that safe, with the evidence-ladder rung that fact reached (a test that exercises the shared path, a grep over every caller, a measured run). A change to a shared helper, a generated file, a selection list or a policy default always has one; a leaf fix says so in one line.
-`## Approvals`, the output of `gstack-approvals render` verbatim, goes inside Agent notes. On a private repository that is the table; on a public repository, or one whose visibility gh cannot read, it is only `Approved: yes|no (record <id>)`, because GitHub keeps every earlier version of a PR description.
+`## Approvals`, the output of `gstack-approvals render` verbatim, goes inside Agent notes. On a private repository that is the table; on a public repository, or one whose visibility gh cannot read, it is only `Approved: yes|no (record <id>)`, because GitHub keeps every earlier version of a PR description. The table shows each local path in Asked, Covers and Still pending as `…/<file name>`, so the home directory, user name and Drive folder in those paths stay out of the body; Exact words stays verbatim, and `gstack-approvals list` keeps the full path. For a private repository that may go public, `render --redacted` prints the public form, byte for byte; `--redacted` with `--full` is refused.
 
 Before the body is composed, `gstack-prose-lint` reads the Why, Summary and Blast radius drafts (`--sections 'Why,Summary,Blast radius' --gate`) and the CHANGELOG entry (`--base origin/<base> --gate`), and a `PROSE_LINT_FOUND` line names the sentence to rewrite; the rest of the body is advisory. The Captain's merge-ask template (`captain/templates/merge-ask.md`) carries the same sections, so a READY report and its PR say the same thing.
 
@@ -968,16 +968,20 @@ sets the defaults that keep it from coming back.
 
 - **Detect.** One program fetches each crew thread (`tools.thread.get`, with its transcript) to files, then
   `gstack-runaway scan --dir <dir>` prints a `RUNAWAY:` line per thread and a `FLAG:` line per limit crossed:
-  own tokens past 500M or active past 3 days (rotate), a subagent past 100M (stop), empty wakes past 25% of the
+  own tokens past 500M or active past 3 days (rotate, for a standing thread that wakes on every event; a crew
+  thread keeps its PR until it merges or closes and checks in with its Captain once past 1B, and no thread holding an
+  open PR rotates), a subagent past 100M (stop), empty wakes past 25% of the
   last 40 turns (warm-wait check-ins are left out), and review rounds past 2 per PR. Captains are reported, never rotated.
-- **Stop.** A live subagent past 100M is stopped with its reason. A thread is rotated at a clean point through
-  a handoff file and a successor brief (`runaway-stopper/templates/`), then archived by its own Captain. A thread
+- **Stop.** A live subagent past 100M is stopped with its reason. A standing thread is rotated at a clean point through
+  a handoff file and a successor brief (`runaway-stopper/templates/`), then archived by its own Captain once none of
+  its PRs is open (R91), through `gstack-archive-check thread`. A thread
   mid-/ship or mid-merge gets `DEFER:` and nothing happens until that work finishes.
 - **Prevent.** One wait on all pending operations, quiet wakes, compact program returns, one /ship subagent per
   PR head (metering its own row with a 100M default cap, `BUDGET_DEFAULT_CAP:`), two review rounds, and a fresh
   thread per automation run.
 
-Scanning FOUN-4, FOUN-14 and FOUN-71 as read on 2026-11-03 (excerpt):
+Scanning FOUN-4, FOUN-14 and FOUN-71 as read on 2026-11-03, before R70's 2026-11-09 amendment (today only a thread
+marked standing gets `ROTATE`, a crew thread past 1B gets `CHECK_IN`, and a thread holding an open PR never rotates) (excerpt):
 
 ```
 RUNAWAY: thread=FOUN-4 verdict=ROTATE own=4.04B(upper) total=6.90B credits=2299398 age_days=13.1 active=yes ...

@@ -86,6 +86,9 @@
  *       # --ci-run and overrides the plan: a positive whole number up to the shard's file count,
  *       # else FREE_JOBS_INVALID. --ci-verify requires every result to have run at the plan's k.
  *       # GSTACK_FREE_JOBS sets the local full-suite process count and never changes --ci-run.
+ *   bun run scripts/test-free-shards.ts --ci-run plan.json --shard 1 --result result.json --junit-dir junit/
+ *       # also keep each child's bun JUnit report (every sub-shard and the flaky retry) in junit/;
+ *       # CI uploads them to Trunk Flaky Tests for detection only. Verdicts never read them.
  *   bun run scripts/test-free-shards.ts --ci-verify plan.json --results results/
  */
 
@@ -457,16 +460,34 @@ const runsSerialUnderJobs = (file: string) => file in TREE_MUTATING || file in S
 const planDigest = (plan: Omit<FreeCiPlan, 'id'>): string =>
   createHash('sha256').update(JSON.stringify(plan)).digest('hex');
 
-/** One immutable plan is shared by isolated CI machines; never repack per job. */
-export function createFreeCiPlan(files: string[], count: number, durations: Record<string, number>, revision: string, shardJobs = 1): FreeCiPlan {
+/**
+ * The largest packed prediction whose CI job still fits MAX_CI_JOB_TIMEOUT_MINUTES
+ * (inverse of ciShardJobTimeoutMinutes's prediction term).
+ */
+export function maxPredictedMsUnderJobCap(setupSeconds: number): number {
+  return Math.floor(((MAX_CI_JOB_TIMEOUT_MINUTES * 60 - setupSeconds) * 1000 - wallTimeoutForShard(FLAKY_RETRY_CAP)) / 3);
+}
+
+/**
+ * One immutable plan is shared by isolated CI machines; never repack per job.
+ * With setupSeconds (--ci-plan --job-setup-seconds), a shard whose 99th-percentile
+ * estimates for unseeded files would push its job past the cap has its prediction
+ * cut back to the cap (GST-2193): a stale seed lengthens the job up to the cap and
+ * never fails the plan. Recorded durations are never cut, so a shard whose seeded
+ * files alone pass the cap still fails it.
+ */
+export function createFreeCiPlan(files: string[], count: number, durations: Record<string, number>, revision: string, shardJobs = 1, setupSeconds?: number): FreeCiPlan {
   const readers = files.filter(file => !(file in TREE_MUTATING));
   const exclusive = files.filter(file => file in TREE_MUTATING).sort();
   const packed = packShardsByDuration(readers, count, durations);
   const planned = packed.shards.map((files, index) => ({ files, predictedMs: packed.predictedMs[index] }));
   if (exclusive.length) planned.push({ files: exclusive, predictedMs: exclusive.reduce((ms, file) => ms + (durations[file] ?? 0), 0) });
+  const limitMs = setupSeconds === undefined ? Infinity : maxPredictedMsUnderJobCap(setupSeconds);
+  const seededMs = (shardFiles: string[]) => shardFiles.reduce((ms, file) => ms + (durations[normalizeRelativePath(file)] ?? 0), 0);
   const shards = planned.map(({ files, predictedMs }, index) => {
     const jobs = plannedShardJobs(files, shardJobs, runsSerialUnderJobs);
-    return { shard: index + 1, files, predictedMs, ...(jobs ? { jobs } : {}) };
+    const capped = predictedMs > limitMs && seededMs(files) <= limitMs ? limitMs : predictedMs;
+    return { shard: index + 1, files, predictedMs: capped, ...(jobs ? { jobs } : {}) };
   });
   const body = { version: 1 as const, revision, shards };
   return { ...body, id: planDigest(body) };
@@ -600,6 +621,8 @@ type CliOptions = {
   result: string | null;
   results: string | null;
   filesFrom: string | null;
+  /** Set only by --junit-dir (with --ci-run): where each child's JUnit report is kept. */
+  junitDir?: string;
   /** Set only by --jobs (with --ci-run); absent means the plan's per-shard k. */
   jobs?: number;
   /** Set only by --shard-jobs (with --ci-plan); absent means k = 1 in every shard. */
@@ -623,6 +646,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
   let jobs: number | undefined;
   let shardJobs: number | undefined;
   let jobSetupSeconds: number | undefined;
+  let junitDir: string | undefined;
   const paths: Record<'ciPlan' | 'ciRun' | 'ciVerify' | 'result' | 'results' | 'filesFrom', string | null> = {
     ciPlan: null, ciRun: null, ciVerify: null, result: null, results: null, filesFrom: null,
   };
@@ -646,6 +670,11 @@ export function parseCliOptions(argv: string[]): CliOptions {
     '--result': pathFlag('--result', 'result'),
     '--results': pathFlag('--results', 'results'),
     '--files-from': pathFlag('--files-from', 'filesFrom'),
+    '--junit-dir': (next) => {
+      const value = next();
+      if (!value || value.startsWith('--')) throw new Error('Missing path for --junit-dir');
+      junitDir = value;
+    },
     '--jobs': (next) => { jobs = parseJobsFlag(next()); },
     '--shard-jobs': (next) => { shardJobs = parseJobsFlag(next(), '--shard-jobs'); },
     '--job-setup-seconds': (next) => {
@@ -676,11 +705,12 @@ export function parseCliOptions(argv: string[]): CliOptions {
   if (ciModes > 1 || (ciModes && (quick || listOnly || dryRun || recordDurations || attributeHome))) throw new Error('CI modes cannot be combined with other selection modes');
   if (paths.ciRun && (shardIndex === null || !paths.result)) throw new Error('--ci-run requires --shard and --result');
   if (paths.ciVerify && !paths.results) throw new Error('--ci-verify requires --results');
+  if (junitDir !== undefined && !paths.ciRun) throw new Error('--junit-dir applies only to --ci-run');
   if (jobs !== undefined && !paths.ciRun) rejectJobsWithoutCiRun();
   if (shardJobs !== undefined && !paths.ciPlan) rejectShardJobsWithoutCiPlan();
   if (jobSetupSeconds !== undefined && !paths.ciPlan) throw new Error('--job-setup-seconds applies only to --ci-plan');
   if (quick && (recordDurations || windowsOnly || shardIndex !== null)) throw new Error('--quick cannot change recording, Windows or shard selection');
-  return { dryRun, listOnly, recordDurations, windowsOnly, verbose, shardCount, shardIndex, wallTimeoutMs, wallTimeoutExplicit, quick, attributeHome, ...paths, ...(jobs === undefined ? {} : { jobs }), ...(shardJobs === undefined ? {} : { shardJobs }), ...(jobSetupSeconds === undefined ? {} : { jobSetupSeconds }) };
+  return { dryRun, listOnly, recordDurations, windowsOnly, verbose, shardCount, shardIndex, wallTimeoutMs, wallTimeoutExplicit, quick, attributeHome, ...paths, ...(jobs === undefined ? {} : { jobs }), ...(shardJobs === undefined ? {} : { shardJobs }), ...(jobSetupSeconds === undefined ? {} : { jobSetupSeconds }), ...(junitDir === undefined ? {} : { junitDir }) };
 }
 
 const describeLines = (lines: string[]) => `${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ` (+${lines.length - 5} more)` : ''}`;
@@ -1172,6 +1202,8 @@ export interface RunFreeShardOptions {
   commandFor?: (files: string[], junitPath?: string) => ShardCommand;
   /** Ask bun for a JUnit report in the shard sandbox and record per-file counts on the outcome (--ci-run). */
   testCounts?: boolean;
+  /** Also keep the child's JUnit report in this directory, one uniquely named file per child (--junit-dir). Never read by a verdict. */
+  junitDir?: string;
   /** Suppress ALL child output from the console (tests). The classifier and the log file still see every byte. */
   quiet?: boolean;
   /** Forward the full child stream to the console (legacy firehose). Default: the quiet filtered console. */
@@ -1721,7 +1753,7 @@ export async function runFreeShard(
   // realpath: the browser tracker refuses a state dir whose path resolves elsewhere.
   const { stateDir, env } = createShardSandbox('gstack-free-shard-', options.env ?? process.env, { realpath: true });
   // The JUnit reporter leaves the console stream byte-identical (Bun 1.4.2); it only adds per-file counts.
-  const junitPath = options.testCounts ? path.join(stateDir, 'junit.xml') : undefined;
+  const junitPath = options.testCounts || options.junitDir ? path.join(stateDir, 'junit.xml') : undefined;
   const { command, args } = options.commandFor
     ? options.commandFor(files, junitPath)
     : { command: process.execPath, args: [...buildShardArgs(files, { rootDir }), ...(junitPath ? ['--reporter=junit', `--reporter-outfile=${junitPath}`] : [])] };
@@ -1791,6 +1823,14 @@ export async function runFreeShard(
     }
     await new Promise<void>((resolve) => shardLog.stream.end(() => resolve()));
     if (junitPath) junitXml = readJunitReport(junitPath);
+    if (options.junitDir && junitXml !== null) {
+      try {
+        fs.mkdirSync(options.junitDir, { recursive: true });
+        fs.writeFileSync(path.join(options.junitDir, `junit-${shardNumber}-of-${totalShards}-${env.GSTACK_FREE_SHARD_ID}.xml`), junitXml);
+      } catch (error) {
+        log(`${label} could not keep its JUnit report: ${error instanceof Error ? error.message : String(error)}; the verdict is unchanged`);
+      }
+    }
     try {
       if (!cleanupError) fs.rmSync(stateDir, { recursive: true, force: true });
     } catch {
@@ -1833,7 +1873,7 @@ export async function runFreeShard(
     shard: shardNumber, files, status, exitCode, elapsedMs: Date.now() - startedAt, groupPid, failingFiles, unattributedFailures,
     ...(status === 'passed' ? {} : { failures: report.failures }),
     summary: { testsRan: report.testsRan, filesRan: report.filesRan, sawTerminalSummary: report.sawTerminalSummary },
-    ...(junitPath ? { counts: parseJunitCounts(junitXml, files, report.testsRan, rootDir) } : {}),
+    ...(options.testCounts ? { counts: parseJunitCounts(junitXml, files, report.testsRan, rootDir) } : {}),
     ...(status === 'timed-out' && report.inFlight.length ? { inFlight: report.inFlight } : {}),
   };
   log(shardEpilogue(outcome, totalShards));
@@ -1915,7 +1955,7 @@ async function recordFreeTestDurations(files: string[], jobs: number, wallTimeou
 
 async function retryFailedFreeFiles(
   outcomes: FreeShardOutcome[], totalShards: number,
-  options: Pick<CliOptions, 'wallTimeoutExplicit' | 'wallTimeoutMs' | 'verbose'>,
+  options: Pick<CliOptions, 'wallTimeoutExplicit' | 'wallTimeoutMs' | 'verbose' | 'junitDir'>,
 ): Promise<{ exitCode: number; retry: FreeShardOutcome | null }> {
   let worst = Math.max(...outcomes.map(outcome => exitCodeFor(outcome.status)));
   let retry: FreeShardOutcome | null = null;
@@ -1948,6 +1988,7 @@ async function retryFailedFreeFiles(
       const retryOutcome = await runFreeShard(flakyFiles, totalShards + 1, totalShards + 1, {
         wallTimeoutMs: shardTimeout(flakyFiles.length),
         verbose: options.verbose,
+        ...(options.junitDir ? { junitDir: options.junitDir } : {}),
       });
       retry = retryOutcome;
       if (retryOutcome.status === 'passed') {
@@ -2013,7 +2054,7 @@ async function main(): Promise<number> {
         appendStepSummary(line);
       }
       warnUnseededFreeFiles(ciFiles, durations);
-      const plan = createFreeCiPlan(ciFiles, options.shardCount, durations, revision, options.shardJobs);
+      const plan = createFreeCiPlan(ciFiles, options.shardCount, durations, revision, options.shardJobs, options.jobSetupSeconds);
       validateFreeCiPlan(plan, ciFiles, revision);
       const matrix = ciPlanMatrix(plan, options.jobSetupSeconds);
       if ('include' in matrix) {
@@ -2048,7 +2089,7 @@ async function main(): Promise<number> {
       wallTimeoutMs: options.wallTimeoutExplicit ? options.wallTimeoutMs
         : wallTimeoutForPackedShard(shard.predictedMs, options.wallTimeoutMs, shard.files.length),
     }, {
-      runShard: (files, shardNumber, totalShards, runOptions) => runFreeShard(files, shardNumber, totalShards, runOptions),
+      runShard: (files, shardNumber, totalShards, runOptions) => runFreeShard(files, shardNumber, totalShards, { ...runOptions, ...(options.junitDir ? { junitDir: options.junitDir } : {}) }),
       retry: outcomes => retryFailedFreeFiles(outcomes, plan.shards.length, options),
       pack: (files, count) => packShardsByDuration(files, count, durations).shards,
       isSerial: runsSerialUnderJobs,

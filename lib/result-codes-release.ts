@@ -36,6 +36,11 @@ export const RELEASE_RESULT_CODES = {
     summary: 'the lane is not ready to report: the working tree, HEAD or CI state does not match the pushed PR head',
     fix: 'commit and push the work (or wait for CI on that exact head), then rerun gstack-ship-queue ready',
   },
+  QUEUE_BASE_UNFETCHED: {
+    anchor: 'queue-base-unfetched',
+    summary: 'ready, or the stamp path of land, could not fetch origin/<base>, so it did not compare the receipt with a base ref it could not refresh',
+    fix: 'fix the fetch (git fetch origin <base>), then rerun the same command',
+  },
   QUEUE_PROOF_MISSING: {
     anchor: 'queue-proof-missing',
     summary: 'a proof input the queue step needs is missing or does not match (gated head, base, stamp journal, version or tree)',
@@ -244,6 +249,11 @@ export const RELEASE_RESULT_CODES = {
     summary: 'the PR body’s /ship receipt is conditional: Step 5 failed on cases gstack-base-red proved are the base branch’s own, so /ship paused before READY',
     fix: 'wait for the base to pass those cases (gstack-base-red wait --pause <file>), then /ship --resume <record>, which re-runs Step 5 and rewrites the receipt without base_red; only ready --base-red --fixer <pr> READYs a conditional receipt, and it rides only a train with gates whose slot 1 is its fixer',
   },
+  QUEUE_RECEIPT_BASE_MISMATCH: {
+    anchor: 'queue-receipt-base-mismatch',
+    summary: 'the PR body’s /ship receipt was reviewed against another branch than the queue’s base (a #3570 stacked child retargeted before its parent landed), so it covers only the change since that branch',
+    fix: 'land the parent first, merge the base into this branch and push, then gstack-ship-receipt carry --pr <n> --base <base> moves the receipt to the base (it carries only when the parent fully landed and the child is unchanged), else rerun /ship against the base; then gstack-ship-queue ready again',
+  },
   BASE_RED_UNCONFIGURED: {
     anchor: 'base-red-unconfigured',
     summary: 'the base branch’s ship policy declares no base_red block, so gstack-base-red cannot reproduce a Step 5 failure there and every failure stays in-branch',
@@ -308,6 +318,11 @@ export const RELEASE_RESULT_CODES = {
     anchor: 'queue-post-merge-red',
     summary: 'a push workflow on the merged commit (free tests, the Windows subset, the main backstop) concluded failure, timed out or was cancelled after the train merged it; a neutral or skipped check is not red',
     fix: 'read the red run (gstack-ship-queue verify --post-merge <sha> prints one CHECK: line per workflow), repair on a new PR or roll back the merge; gstack-ship-queue train status names the freeze if the backstop filed one',
+  },
+  QUEUE_READY_NOTE_UNPUSHED: {
+    anchor: 'queue-ready-note-unpushed',
+    summary: 'ready wrote its READY receipt locally, but after three tries origin does not hold the note on refs/notes/gstack-trains (the push failed, or it exited 0 and origin read back without the note), so land would refuse the pin; the head is not READY',
+    fix: 'read the push error on the READY_RECEIPT line, fix what refused it (credentials, a hook or rule on refs/notes/*, the network), then rerun the printed gstack-ship-queue ready command, adding back any --pregate, --gate-exit or --gate-log you passed; it keeps ready_at and pushes the kept receipt',
   },
   QUEUE_SCREEN_RED: {
     anchor: 'queue-screen-red',
@@ -428,7 +443,7 @@ export const RELEASE_RESULT_CODES = {
   DOCS_RESULT_INVALID: {
     anchor: 'docs-result-invalid',
     summary: 'the documentation audit child\'s last line (/ship Step 14.5) does not meet the result contract: a key is missing, unknown or repeated once whitespace around keys is trimmed, a field has the wrong type or value, or documentation_section is empty or a placeholder; the audit result cannot be used, and this is a malformed reply, not a blocked audit',
-    fix: 'run the one remaining re-audit with the RETRY_NOTE: line appended to its prompt verbatim; with no attempt left, Step 14.5 stops with this code and the keys it names',
+    fix: 'on FORMAT_REPAIR:, re-ask once for the last line with gstack-docs-candidate repair-prompt and check the reply with result --repair-of, which uses no attempt; otherwise run the one remaining re-audit with the RETRY_NOTE: line appended to its prompt verbatim; with no attempt left, Step 14.5 stops with this code and the keys it names',
   },
   RECEIPT_PROSE_MISMATCH: {
     anchor: 'receipt-prose-mismatch',

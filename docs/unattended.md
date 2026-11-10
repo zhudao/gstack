@@ -174,10 +174,10 @@ The receipt's `review_loop` object, written from `gstack-review-scope summary
 (Step 9 full passes this ship ran, 1 or 2; up to 3 under `review_scope: diff-plus-blocking` or `all`),
 `blocking_found` (every blocker the readers found, rows and dispatch ledgers
 both, [review-policy.md](review-policy.md#what-the-receipt-records)), `deferred`
-(blocking findings in unchanged code filed as issues, Step 11's late defers
-included), `noted`, `fixed` and `scope`. The
+(blocking findings in unchanged code, kept on the PR and never filed as
+issues, Step 11's late defers included), `noted`, `fixed` and `scope`. The
 summary line a parent reads prints it as `passes=<n> blocking_found=<k>
-deferred=<m>`; the PR body lists the deferred issues under `## Deferred
+deferred=<m>`; the PR body lists the deferred findings under `## Deferred
 findings` and the below-floor items under `## Review notes`. A pass that finds
 nothing is `NO FINDINGS` from every reviewer and a pass with no edits, which
 is the loop's exit, never a failed review ([review-policy.md](review-policy.md)).
@@ -540,6 +540,11 @@ The example above is the full run. The first `next` also takes `--kind`:
    are then recorded as `answer_words` with `words_by`, never as
    `owner_reply`; a later gate never carries them (`CARRY: no`), and
    `gstack-approvals import` lists that row under the agent, not the owner.
+   They never settle a `uc` item (a user challenge or a round-cap approval):
+   a reply in an agent's own words that would choose one, by `rec`, `as-is`
+   or a token, is refused (`OWNER_REPLY_REQUIRED`) and nothing is applied;
+   such a reply may still answer the `d` items and leave the `uc` items to
+   the owner.
    An unattended run refuses an answer
    without `--by` (`ANSWER_BY_REQUIRED`, exit 3) and records the value as
    `answered_by` on every decision row and in the review record's gate line,
@@ -1006,18 +1011,22 @@ and `status: "pending"`, named in the handoff, never taken.
   enabling auto-merge, adding the PR to a merge queue, or `gh pr ready` on a
   PR the run did not open.
 - **Force-push: its own branch only, after a rebase the plan named, with a
-  pinned lease.** The branch is one the run created or was handed in its
-  prompt, never the base. The rebase is one the plan, the slot call or a
-  `/modernize` disposition names before it happens, not one the run decides
-  on its own; `git range-diff <old base>..<old head> <new base>..<new head>`
+  pinned lease.** A base that moved is merged in, never rebased: a reviewed
+  branch, a slot stamp and a gate-ahead lane all take a merge of the base
+  ([ship-policy.md](ship-policy.md#carrying-a-receipt-across-a-base-merge-or-a-test-only-fix),
+  [captain.md](../crew/docs/captain.md)). The only rebase is one the plan or
+  a `/modernize` disposition names before it happens, never one the run
+  decides on its own, on a branch the run created or was handed in its
+  prompt, never the base. Rebasing a branch that already holds a receipt
+  costs a fresh /ship unless the receipt's tree carries; `git range-diff <old base>..<old head> <new base>..<new head>`
   runs before the push and its output goes in the handoff. The push is
   `git push --force-with-lease=<branch>:<sha observed before the rebase> origin <branch>`:
   a bare `--force-with-lease` protects only against commits this clone never
   fetched, and a plain `--force` is never allowed. A rejected lease means the
   remote moved: fetch, read what landed, and start the disposition again.
   `/ship` itself never rebases or force-pushes, and an unattended `/modernize`
-  stops at its verdict; this route is for a run whose plan or slot call named
-  the rebase before it started.
+  stops at its verdict; this route is for a run whose plan named the rebase
+  before it started.
 - **Tests: the methods the repository's instructions name, without asking
   first.** AGENTS.md or CLAUDE.md, the named Setup commands, `package.json`
   scripts and the pregate configuration define the set; running one of them

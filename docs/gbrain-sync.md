@@ -150,6 +150,22 @@ your machine. Blocked patterns include:
 - PEM blocks (`-----BEGIN …-----`)
 - JWTs (`eyJ…`)
 - Bearer tokens in JSON (`"authorization": "…"`, `"api_key": "…"`, etc.)
+- Stripe live secret and restricted keys (`sk_live_…`, `rk_live_…`)
+- Slack tokens (`xoxb-…`, `xoxp-…` and the other `xox?-` forms)
+- npm tokens (`npm_…`)
+- Database URLs with a password (`postgres://app:<password>@host`, and the
+  same for MySQL, MongoDB, Redis and AMQP)
+
+The last four follow gstack's redaction rules, so placeholders such as
+`sk_live_EXAMPLE…`, `${DB_PASSWORD}` or `postgres:postgres@localhost` are
+not held.
+
+The scan reads the whole staged diff, including file names and the unchanged
+lines shown around each edit. Each added line is also scanned with its JSON
+strings decoded, so a secret written with `\u` escapes or inside an escaped
+JSON string is still caught. Because unchanged lines are scanned too, a file
+that already holds a flagged line is held on every edit until you remove the
+line or skip the file.
 
 If a scan hits, only the flagged file is held back (with any file coupled
 to it); everything else syncs. The held file stays queued and is re-scanned
@@ -169,7 +185,11 @@ To remediate:
 3. Otherwise, edit the file to remove the secret; the next skill run syncs it.
 
 There's a defense-in-depth hook at `~/.gstack/.git/hooks/pre-commit` that
-runs the same scan if you manually `git commit` against the repo.
+runs the same scanner (`bin/gstack-brain-secret-scan.py`) if you manually
+`git commit` against the repo. `gstack-artifacts-init` and
+`gstack-brain-restore` install it and copy the scanner next to it, so the
+hook keeps working if gstack moves. A hook written by an older gstack checks
+only the first six patterns; rerun `gstack-artifacts-init` to refresh it.
 
 Separately (v1.63.0.0+), every push writes a tamper-evident receipt to the
 egress ledger (`~/.gstack/security/egress.jsonl`) *before* anything is
@@ -205,6 +225,21 @@ merge can leave conflict markers in them. The sync parses every staged
 `.json` file and holds back one that does not parse (status `held`, rule
 `invalid-json`) until you repair it, and `gstack-doctor` warns when a synced profile or
 decision snapshot holds conflict markers.
+
+A project's decision snapshot, `decisions.active.json`, is never merged: it
+is rebuilt from that project's `decisions.jsonl`, which merges like any other
+`.jsonl` file. When two machines each log a decision between pushes, their
+snapshots conflict; if every conflict in brain-sync's merge is such a snapshot,
+brain-sync rebuilds each one from the merged log, commits the merge and pushes,
+whether or not your `.gitattributes` predates this. The one exception is a log
+that lost lines on either side since the machines last agreed, as
+`gstack-decision-log --compact` does to redacted decisions: the merged log is
+the union of both sides, so a rebuild would bring the redacted decision back,
+and brain-sync aborts that merge as before. Repositories set up by
+`gstack-artifacts-init` also mark the snapshot `merge=binary`, so a merge you
+run by hand keeps your side without conflict markers; finish it with
+`gstack-decision-log --rebuild-snapshot <project-slug>` and `git add -f` the
+snapshot before committing.
 
 ## Cross-machine pull cadence
 

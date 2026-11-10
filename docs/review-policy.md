@@ -78,12 +78,9 @@ incomplete coverage, which blocks until the reviewer is rerun.
    a hunk the PR changed, with three lines of context; `outside`: anything else),
    `kind`, `blocking` and `scope`. Findings in the diff are `fix`. A blocking
    finding in code the PR did not change is `defer`: `gstack-review-scope defer`
-   files it as a GitHub issue (one per finding, reused across reruns through an
-   `<!-- gstack-deferred-finding: <fingerprint> -->` marker; the issue text is
-   scanned like the PR body before anything is posted, so a finding that quotes a
-   secret is `unfiled (publication scan refused: …)`; `unfiled (<reason>)` when
-   `gh` is unavailable or its search fails; every unfiled case still exits 0)
-   and the PR body lists it under `## Deferred findings`. A finding's `cause`
+   records it for the PR and files no issue, and the PR body lists it under
+   `## Deferred findings`. Deferred findings never become issues; work someone
+   will actually do gets one issue with a named owner. A finding's `cause`
    (the changed line behind a defect reported elsewhere, a deleted file included)
    places it in the diff.
    Below-floor findings outside the diff are `note`, listed under `## Review notes`.
@@ -175,7 +172,10 @@ A full pass 1 always gets a full pass 2: `--pass1-depth` carries pass 1's
 `REVIEW_DEPTH`, and an absent flag counts as full. The fix range
 `RANGE_BASE..HEAD` must have at most `SCOPED_RANGE_LINES` (150) runtime lines, counted
 as the depth counts them (`gstack-review-plan --range-base $PASS_HEAD` prints
-`FIX_RANGE:`). It dispatches one fix-check on the range, the Red Team on the
+`FIX_RANGE:`). The range holds only the PR's own change since `RANGE_BASE`: when
+a base merge lands inside it, what the base brought (a file only main changed,
+or main's lines in a file both changed) is not counted, and neither is its gate
+class (GST-2229, harness-evals #354). It dispatches one fix-check on the range, the Red Team on the
 range, the native adversarial pass when the range changes runtime lines, every
 force-included specialist and the outside voice when published numbers changed.
 Step 11's voices that have not run yet stay listed, as on a full pass 2. It
@@ -688,7 +688,7 @@ puts in the receipt:
 | `REVIEW_SCOPE_VOIDED:` (stderr, not a receipt field) | an abandoned pass (GBEV-3): a `pN` ledger never judged that no row names, replaced by a later `pM` ledger (M > N) that was judged or is named. Its findings are left out of every count above instead of counting as unbound and unrecorded. A fix-check ledger and the last pass are never voided |
 
 Findings bind by id first (GST-1168). A row finding that came from a dispatched reader carries `ledger_id` (`<pass dir>/<merged.jsonl id>`, such as `p2/adversarial-native#3`) and pairs with that ledger entry whatever its path:line says, so a native finding with no path:line, or a row logged after its fix moved the line, still pairs. Each fix commit names what it fixed in a `Review-Finding: <ledger_id or fingerprint> reader=<raised_by>` trailer, and a trailer counts the finding as fixed. A late defer re-logs its finding under the same id, so it counts once. Rows that record their head dedupe by kind, pass, head and finding ids, so a logger command run twice counts once. Rows and findings without an id keep the path:line pairing above. The native reader's own verdict line ("all FIXABLE, and none blocks", with no file:line, list mark, lead label or Severity/Blocks field) collects at FIXABLE, not CRITICAL; the findings it summarizes collect on their own lines.
-| `review_loop.deferred` | blocking findings in unchanged code filed as issues (a Step 11 late defer, logged as a `review-late-defer` row so it never displaces the newest `review` pass, counts here and is not a pass) |
+| `review_loop.deferred` | blocking findings in unchanged code, kept on the PR under `## Deferred findings` (a Step 11 late defer, logged as a `review-late-defer` row so it never displaces the newest `review` pass, counts here and is not a pass) |
 | `review_loop.noted` | below-floor findings listed in the PR body |
 | `review_loop.fixed` | findings fixed in this PR |
 | `review_loop.scope` | the `review_scope` the loop ran under |
@@ -730,8 +730,10 @@ reads the newest `review-fix-check` row from `gstack-review-read`, chained back
 through earlier rows whose commit is the next row's `range_base`
 ([chained fix-checks](ship-policy.md#fix-check-chain), GST-1627). When every link
 is a completed clean read on committed content (freshness `CURRENT` against its own
-tree) whose commit is on the branch, the oldest link's `range_base` is a branch commit
-holding the reviewed tree, and for each link an approved `review_loop_grant` in
+tree; a fix-check that stopped on findings the owner has since ruled notes reads
+clean, [ruled notes](ship-policy.md#ruled-notes)) whose commit is on the branch, the oldest link's `range_base` is a branch commit
+holding the reviewed tree (or following its commit by docs and release metadata
+only, [docs bridge](ship-policy.md#fix-check-docs-bridge)), and for each link an approved `review_loop_grant` in
 `gstack-approvals` names a stop head inside its `range_base..commit`, each code or test path inside a link's `range_base..commit`
 that is unchanged since, or whose change against the base is still the one the
 fix-check read after a base merge also edited it (GST-1195), routes as
@@ -803,11 +805,11 @@ difference passed a scoped review.
 
 | Value | Pass 1 | Blocking finding in unchanged code | Pass 2+ | Cap |
 |---|---|---|---|---|
-| `frozen` (default) | the diff | filed as an issue, listed as deferred | the range since the previous pass, blocking only | 2 rounds (a fix-check is one) |
+| `frozen` (default) | the diff | listed as deferred in the PR body | the range since the previous pass, blocking only | 2 rounds (a fix-check is one) |
 | `diff-plus-blocking` | the diff | fixed in this PR | the range since the previous pass, blocking only | 3 fix cycles (Step 9.4 runs the review plan's two-round cap only under `frozen`) |
 | `all` | everything | fixed in this PR | the whole diff, every finding | 3 fix cycles |
 
-`diff-plus-blocking` is the fallback for a repository where deferred issues pile
+`diff-plus-blocking` is the fallback for a repository where deferred findings pile
 up; `all` is the loop as it ran before the key existed. A value other than
 `frozen` needs `min_gstack_version` at or past the release that added the key
 (`REVIEW_SCOPE_KEY_VERSION` in `lib/ship-policy-keys.ts`) so an older gstack refuses
@@ -852,10 +854,17 @@ and a later reader agree on what was flagged:
   under test.
 
 <a id="porting-a-contributors-work"></a>
-## Porting a contributor's work
+## Crediting a contributor's lines
 
-A ported branch keeps the contributor's commits as theirs and adds the
-porter's fixes on top, each crediting the original authors.
+Outside PRs are rewritten from main rather than ported
+([CONTRIBUTING.md](../CONTRIBUTING.md#how-a-contributors-pr-lands)). When a rewrite
+carries a contributor's lines over unchanged, the commit that carries them credits them.
+Pass the contributor's PR commits as the range, fetched as a ref and never checked out
+(`git fetch origin +pull/<n>/head:refs/contrib/<n>`, then `origin/<base>..refs/contrib/<n>`;
+the `+` lets a re-fetch follow a force-push): the default range holds only the rewrite's
+own commits and finds no co-author. A fork's commits can name any author, so list the
+range first and `--exclude <email>` every author whose lines the commit does not carry
+before adding `--message`.
 `gstack-coauthor-trailers [<range> | --base <ref>] [--message <file>]
 [--exclude <email>]...` lists every distinct author of the range's commits
 (default `origin/<base>..HEAD`) other than the checkout's own committer
@@ -909,7 +918,11 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    never split off as a second record (GST-1031); the line right under the heading that carries those fields, no other
    label and no file:line joins it at the stronger label (not under a heading that names CRITICAL or P0 itself), the way an unlocated paragraph after a blank line already does. An unnumbered, unlabeled bullet with no file:line
    under a paragraph finding whose Severity or Blocks line has not come yet is that finding's detail, so the field line after it
-   lands on the finding; a numbered item is its own finding.
+   lands on the finding; a numbered item is its own finding. A native adversarial numbered list item (`1. **FIXABLE. …**`)
+   with no fields of its own keeps, after an unlabeled nested list, its indented lines and the first paragraph after a blank
+   line until its fields come, so that paragraph's `Severity` and `Blocks` bind to the item instead of forming a second record;
+   an item naming CRITICAL or P0 is never lowered, and a list item, heading, lead label, file:line, bold paragraph opener,
+   verdict line or any later paragraph starts the next finding (ALPH-93).
    A reader's own no-defect closing sentence is no finding at the label it denies (GST-435): a prose line with no
    list, heading, bold or lead label, no `Severity` or `Blocks` field, no FIXABLE or INVESTIGATE, no file:line or path
    and no exception clause, with no line above it in its paragraph that runs on (no closing period) or names an
@@ -933,9 +946,14 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    can't tell a finding's own fields from another subject's. Otherwise lead judgment can fold it only into a finding
    at least as severe, and it counts toward what blocks. GST-766 skipped negated labels and lost
    real blockers named in an exception clause ("No CRITICAL issues except the token leak in log.ts:3"); GSTA-167
-   reverted that. Each prose finding's line also
+   reverted that. A reply that says `NO FINDINGS` keeps only its structured findings (GST-2122). Those are JSON objects
+   (malformed JSON included), lead labels, label headings, numbered finding headings, `Severity` fields, `Blocks: yes`,
+   the native voice's FIXABLE or INVESTIGATE tag, and anything naming a file:line, which still collect at their label.
+   Its other prose collects nothing. Outside such a reply prose collects as described above. A denial that a change
+   introduced a severity ("No fix introduced a CRITICAL defect") is a no-defect clause too, and a line led by a bold,
+   unlabelled lead ("**1. Coverage:** …", "- **Callers:** …") is read for those clauses after its lead. Each prose finding's line also
    records the Severity and Blocks its own text states as `stated`, beside the collected label and never in its place;
-   a classified finding that carries `stated` shows it in its deferred-review issue next to the label ("CRITICAL (the
+   a classified finding that carries `stated` shows it in its `## Deferred findings` line next to the label ("CRITICAL (the
    reviewer wrote Severity: Low, Blocks: no)"). /ship's Step 9.4 does not copy `stated` into its findings file yet: that
    instruction lives in a reviewer brief that changes only after a no-loss replay. A CRITICAL whose own text writes the
    field `Blocks: no` (colon required, and no `Blocks: yes`) is not counted as a blocker by the ledger count, nor by the
@@ -1037,7 +1055,7 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
 - `lib/review-collect.ts`: `collectCommit` (git objects only, from any checkout) and `collectLive` (the working tree), per-path lines and the base commit's registry (`test/review-collect.test.ts`).
 - `lib/review-scope.ts`, `bin/gstack-review-scope`: `classify`, `defer`, `render`, `summary` (with `fix_checks`, `dispatches`, `est_input_tokens`, `unrecorded`, `ledgers_read`); refusals are `REVIEW_SCOPE_INPUT`, `REVIEW_SCOPE_RANGE` and `REVIEW_SCOPE_LEDGER` ([troubleshooting.md](troubleshooting.md#review-scope-input)).
 - `lib/ship-policy.ts`: the `review_scope` key and its `ship: review_scope …` consequence line.
-- `review/checklist.md`: `prereg-with-results` under Gate Integrity and `test-keyboard-count-loop` under Pass 2; `crew/bin/gstack-coauthor-trailers` for the contributor-credit trailers of a port.
+- `review/checklist.md`: `prereg-with-results` under Gate Integrity and `test-keyboard-count-loop` under Pass 2; `crew/bin/gstack-coauthor-trailers` for the contributor-credit trailers of a rewrite.
 - `lib/ship-receipt-prose.ts`, `gstack-ship-receipt read --check-prose`: the body's quoted counters against the receipt (`RECEIPT_PROSE_MISMATCH`, [ship-policy.md](ship-policy.md#ship-receipt)).
 - `lib/ship-receipt.ts`, `lib/headless-artifacts.ts`: the `review_loop` receipt object, its schema and the summary line.
 - `lib/no-stop.ts`, `bin/gstack-no-stop`, `lib/autoplan-carry.ts`: the [no-stop defaults](#no-stop), their ledger and the autoplan re-gate (`test/no-stop.test.ts`, `test/autoplan-carry.test.ts`).
