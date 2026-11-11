@@ -987,6 +987,20 @@ pick a new `--output`), then copy the recovery file to where you want it.
 
 ---
 
+## Uninstall
+
+### `gstack-uninstall: refusing to delete <folder>: <checkout> has uncommitted changes` (or `has commits no remote-tracking branch contains`, `registers the locked worktree <path>`)
+
+`gstack-uninstall` checks every folder it is about to delete (each host's gstack install, global and project-local, the gstack-made Claude per-skill folders, and `~/.gstack`) before it removes anything. A git checkout inside one of them holds work that exists nowhere else, so the uninstall stopped with exit 2 and removed nothing. The variants `is a git checkout git cannot read`, `has a status git cannot read`, `has a history git cannot read` and `has worktrees git cannot list (gstack-uninstall needs git 2.36 or later)` mean git could not prove the checkout is safe to delete; for the last one, upgrade git to 2.36 or later.
+
+Fix: commit and push that checkout's work, or move the checkout out of `<folder>`. Unlock a locked worktree with `git worktree unlock <path>` if you want it gone. Then re-run `gstack-uninstall`. Checkouts under the current repo's `.gstack-worktrees/` have their own check, which `--force-worktrees` relaxes; this one has no override. [docs/uninstall.md](uninstall.md#option-1-run-the-uninstall-script)
+
+### `gstack-uninstall: refusing to delete <folder>: it holds <path>, which this uninstall keeps`
+
+`<folder>` is a gstack install the uninstall would delete, and `<path>` is state this run promised to keep: with `--keep-state`, `~/.gstack`, your state root, or the current repo's `.gstack/` or `.gstack-worktrees/`; without it, a state root selected by `GSTACK_HOME` or a similar variable. The usual cause is running `gstack-uninstall --keep-state` from inside the gstack checkout itself.
+
+Fix: run `gstack-uninstall` from outside `<folder>` (for example `cd ~ && ~/.claude/skills/gstack/bin/gstack-uninstall --keep-state`), or move `<path>` out of `<folder>` first. [docs/uninstall.md](uninstall.md#option-1-run-the-uninstall-script)
+
 ## Codex and other env-var hosts
 
 <a id="gstack-no-install-found"></a>
@@ -5503,8 +5517,8 @@ resumes its own lock.
 ### `QUEUE_BASE_UNFETCHED`
 
 **Meaning.** `gstack-ship-queue ready` (or the stamp path of `land`) could not
-fetch `origin/<base>`, so it stopped before reading the policy or comparing
-any receipt field. Both compare the receipt's recorded selection, depth and
+fetch `origin/<base>`, so it stopped before reading the policy (which also
+picks `ready`'s train or plain path) or comparing any receipt field. Both compare the receipt's recorded selection, depth and
 targeted classes with what the current base gives the head; a local
 `origin/<base>` a few landings old measures the PR from an older merge base,
 pulls in files of PRs that already landed, and reports a false
@@ -6525,10 +6539,30 @@ CHANGELOG drops or renames a released heading (the message then names the
 CHANGELOG). `train prune --stale` deletes the scratch branches of merged or
 closed PRs.
 
+<a id="ci-superseded"></a>
+### `CI_SUPERSEDED: <check> red run <id> replaced by <id> (suite <a> → <b>)`
+
+**Meaning.** `gstack-ship-queue ready` or `land` judges each check by its
+newest run, and here the newest run passed in a different check suite from an
+older red run of the same check. The usual cause is a lane dispatching
+`free-tests.yml` on its branch after the `pull_request` run went red. The
+`pull_request` run tested GitHub's merge of the branch with the base, and the
+dispatched run tested the branch alone, so a failure that exists only on the
+merge with main can be hidden. The line is a warning: CI still counts as
+green, and nothing is refused. A rerun of the red run in its own suite prints
+nothing (reports/GSTA-461.md item 7).
+
+**Fix.** Nothing is required. Before sending READY or landing, open the red
+run (`gh run view <id>` names the job) and check whether it failed for a reason
+the branch-only run could not see. If it was a flaky test, log it as flaky the
+usual way. To clear the line, rerun the failed `pull_request` run itself
+(`gh run rerun <run> --failed`), which replaces it in the same suite.
+
 <a id="queue-ready-note-unpushed"></a>
 ### `QUEUE_READY_NOTE_UNPUSHED`
 
-**Meaning.** `gstack-ship-queue ready` wrote the READY receipt in the local
+**Meaning.** `gstack-ship-queue ready` (under a train policy, or under
+`changelog_fragments` without one) wrote the READY receipt in the local
 state root, but origin does not hold its note on `refs/notes/gstack-trains`.
 `ready` pushes the notes ref, then fetches it back and requires origin's tip
 to be the local tip or to contain it. It tries three times, fetching and
@@ -6543,7 +6577,9 @@ the land failed instead (#4245). Don't send the READY block.
 refused it, then run the `NEXT:` line, which is the same `ready` command
 without `--pregate`, `--gate-exit` or `--gate-log`: add back any of those you
 passed the first time. It keeps the first `ready_at`, follows a screen run already dispatched at the
-same merge SHA, and pushes the kept receipt. To see the raw error, run
+same merge SHA, and pushes the kept receipt. Without a train policy there is
+no `NEXT:` line: rerun the same `ready` command with the same flags, and it
+writes the receipt again and pushes it. To see the raw error, run
 `git push origin refs/notes/gstack-trains:refs/notes/gstack-trains`.
 
 <a id="queue-screen-red"></a>
