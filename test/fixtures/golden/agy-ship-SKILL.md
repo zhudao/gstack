@@ -12,7 +12,7 @@ description: |
 
 ## Shared preamble (load first)
 
-This skill follows gstack shared preamble `dc6688a6791f` (AskUserQuestion format, voice, writing, completeness and completion rules). If your Read of that file, headed by this id, is still in context, do not read it again; otherwise Read `sections/preamble.md` relative to the installed `gstack-ship` SKILL.md directory in full before the command below. A section or subsection here with a shared heading replaces the shared one.
+This skill follows gstack shared preamble `de374247c8a5` (AskUserQuestion format, voice, writing, completeness and completion rules). If your Read of that file, headed by this id, is still in context, do not read it again; otherwise Read `sections/preamble.md` relative to the installed `gstack-ship` SKILL.md directory in full before the command below. A section or subsection here with a shared heading replaces the shared one.
 
 ## Preamble (run first)
 
@@ -867,16 +867,17 @@ A new PR or an existing draft needs no question: Step 19 creates or keeps the dr
 ~/.gemini/antigravity-cli/skills/gstack/bin/gstack-ship-release push --branch <branch-name>
 ```
 
-It checks the branch, the offer, the gate above (`--gate-open <n>`; `--gate-open-approved` is B)
-`gstack-pregate sealed` and push guards, then `git ls-remote --heads origin refs/heads/<branch-name>` against HEAD: a failed lookup STOPs, a match prints
-`PUSH: ALREADY_PUSHED` (go to Step 18), else it runs `git push -u origin <branch-name>`.
+It checks the branch, the offer, the gate above (`--gate-open <n>`; `--gate-open-approved` is B),
+the sealed and push guards, then `git ls-remote --heads origin refs/heads/<branch-name>` against HEAD: a failed lookup STOPs,
+a match is `already_pushed` (Step 18), else `git push -u`. It ends with
+`PUSH: pushed|already_pushed|failed …`; quote it.
 
 **If the push fails, STOP.** No Step 19 or publication claim. Report the error:
 - **Non-fast-forward push:** fetch and inspect the remote, then merge under Step 3's
   conflict rules. Run Steps 5–16 before returning to Step 17. Never rewrite history.
 - **Authentication, hook or network failure:** repair the cause, then repeat Step 16
   even with unchanged content before returning to Step 17. Never bypass failed guards.
-Never force-push. Only a successful push or verified `ALREADY_PUSHED` proceeds.
+Never force-push. Only a successful push or `already_pushed` proceeds.
 
 After `EVIDENCE: DEFERRED`, run Step 5's `gstack-ship-release accept`; a `STOP:` there
 is a failed lane (stage 4). Continue to Step 18. No documentation writer runs after push.

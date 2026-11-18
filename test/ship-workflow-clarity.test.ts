@@ -166,7 +166,7 @@ test('late verified outputs are committed before push, without tags', () => {
   expectOrdered(compact(between(entryTemplate, '### 5. Report, then push', '## Step 17:')), [/commit/i, 'continue to Step 17'], 'ship Step 16.5');
   expectMentions(entry, [['not', 'git tag']], 'ship entry');
   expectOrdered(pushFlow, ['**Non-fast-forward push:**', '**Authentication, hook or network failure:**'], 'ship Step 17');
-  expectTokens(pushFlow, ['`ALREADY_PUSHED`'], 'ship Step 17');
+  expectTokens(pushFlow, ['`already_pushed`', '`PUSH: pushed|already_pushed|failed …`'], 'ship Step 17');
 });
 
 test('Step 18 resolves open PR state before preparing the title file Step 19 posts', () => {
@@ -223,7 +223,7 @@ test('Step 14.5 runs the doc caps before the verification gate and records the a
   expectTokens(docs, ['`DOCS_CAP: none declared`', '"status":"updated|current"', '"status":"blocked"', '"exception":{"accepted_by"', '`DOCS_AUDIT_BLOCKED`', 'An unattended run has no owner to accept: it stops here.'], 'ship documentation section');
   const compose = between(prTemplate, 'Handoff record first', '**Existing open PR/MR**');
   expectTokens(compose, ['--docs @.gstack/tmp/docs-audit.json', '`DOCS_AUDIT_BLOCKED`'], 'ship pr-body receipt write');
-  expectTokens(compact(between(prTemplate, '## Documentation', '## Test plan')), ['`Documentation exception: accepted by <accepted_by> <date> via <via>: <reason>`'], 'ship pr-body Documentation');
+  expectTokens(compact(between(prTemplate, '## Documentation', '## Tests')), ['`Documentation exception: accepted by <accepted_by> <date> via <via>: <reason>`'], 'ship pr-body Documentation');
 });
 
 test('Step 9.4 applies the cap before any edit, names its scratch files under .gstack/tmp/, logs Step 11 late defers, and hands reviewers the range from pass 2 (PR 1 review notes)', () => {
