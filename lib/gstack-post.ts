@@ -42,6 +42,7 @@ import { canonicalRemote } from "./remote-identity";
 import { parseChangelog } from "./changelog-check";
 import { versionWidth } from "./version-source";
 import { securityFingerprints } from "./security-findings";
+import { approvalsGrantStopSpans } from "./approval-record";
 
 export const OPS = ["pr-comment", "issue-comment", "reply", "pr-title", "pr-body", "pr-create", "issue-create", "fold"] as const;
 export type Op = (typeof OPS)[number];
@@ -54,7 +55,14 @@ export interface PostEnv {
   readFile(path: string): string;
   out(text: string): void;
   err(text: string): void;
+  /** On Capy (GSTACK_CAPY=1): write the checked parts for the host's PR tool and return its HOST_PUBLISH: line; gh is never called to write (GST-3183). */
+  hostPublish?(op: Op, target: string | undefined, parts: Array<[Part, string]>, dest: HostDest): string;
+  /** GH_REPO: gh's PR and issue commands write there, but gh repo view ignores it, so the destination read names it. */
+  ghRepo?: string;
 }
+
+/** Where the gh write would have gone, so the host's PR tool can send the hand-off to the same place. */
+export interface HostDest { repo: string; host: string; to?: string; base?: string; head?: string; draft: boolean }
 
 export const EXIT = { posted: 0, refused: 1, confirm: 2, cliFailed: 3, plainTitle: 4, usage: 64 } as const;
 
@@ -473,7 +481,7 @@ function visibility(env: PostEnv, req: Request, kind: HostKind, configBin: strin
   try { return norm(String(JSON.parse(gl.stdout).visibility ?? "")) ?? "unknown"; } catch { return "unknown"; }
 }
 
-type Part = "title" | "body";
+export type Part = "title" | "body";
 interface Located { part: Part; finding: Finding }
 
 /**
@@ -628,7 +636,7 @@ function scanParts(parts: Array<[Part, string]>, vis: RepoVisibility, selfEmail:
   for (const [part, text] of parts) {
     const result = scan(text, { repoVisibility: vis, allowlist, ...(selfEmail ? { selfEmail } : {}) });
     oversize ||= result.oversize;
-    const runIds = result.findings.some(f => f.id === "pii.phone.e164") ? receiptIdSpans(text) : [];
+    const runIds = result.findings.some(f => f.id === "pii.phone.e164") ? [...receiptIdSpans(text), ...approvalsGrantStopSpans(text)] : [];
     for (const finding of result.findings) {
       if (finding.id === "pii.phone.e164" && runIds.some(s => s.line === finding.line && s.from <= finding.col && finding.col <= s.to)) continue;
       found.push({ part, finding });
@@ -834,6 +842,32 @@ export function runPost(argv: string[], env: PostEnv, configBin = "gstack-config
           : "gstack-post: MEDIUM findings; nothing was posted. Ask the user about each finding; to post these exact bytes, rerun with --confirm <token>. Any edit needs a new scan.\n");
         return EXIT.confirm;
       }
+    }
+    if (env.hostPublish) {
+      let head = req.head;
+      if (req.op === "pr-create" && !head) {
+        const b = env.run("git", ["branch", "--show-current"]);
+        head = b.status === 0 ? b.stdout.trim() : "";
+        if (!head) throw new UsageError("pr-create on Capy needs --head <branch> when HEAD is detached: the host's PR tool cannot infer it");
+      }
+      let dest = { repo: remote.segments.join("/"), host: remote.host };
+      if (remote.kind === "github") {
+        const ghRepo = env.ghRepo?.trim();
+        const view = env.run("gh", ["repo", "view", ...(ghRepo ? [ghRepo] : []), "--json", "nameWithOwner,url"]);
+        try { const v = JSON.parse(view.stdout); dest = { repo: String(v.nameWithOwner ?? ""), host: new URL(String(v.url)).host }; } catch { dest = { repo: "", host: "" }; }
+        if (view.status !== 0 || !dest.repo) { env.err(`gstack-post: cannot resolve the repository gh would have written to (gh repo view${ghRepo ? ` ${ghRepo}` : ""} --json nameWithOwner,url: ${view.stderr.trim().split("\n")[0] || "no repository"}); nothing was handed off\n`); return EXIT.cliFailed; }
+        const origin = remote.segments.join("/");
+        if (req.target !== undefined && !/^[1-9][0-9]*$/.test(req.target) && origin.toLowerCase() !== dest.repo.toLowerCase()) { env.err(`gstack-post: target ${req.target} names ${origin}, but the hand-off goes to ${dest.repo}, the repository gh resolves (gh repo set-default or GH_REPO); pass the number of the ${dest.repo} pull request or issue; nothing was handed off\n`); return EXIT.usage; }
+        if (req.op === "pr-create" && head && !head.includes(":") && origin.toLowerCase() !== dest.repo.toLowerCase()) {
+          if (remote.host.toLowerCase() !== dest.host.toLowerCase() || remote.segments.length !== 2) { env.err(`gstack-post: pr-create from ${remote.host}/${origin} into ${dest.host}/${dest.repo}: the head branch is on another host or a nested namespace, so the host's PR tool cannot name it; pass --head <owner>:<branch>; nothing was handed off\n`); return EXIT.usage; }
+          head = `${remote.segments[0]}:${head}`;
+        }
+      }
+      let line: string;
+      try { line = env.hostPublish(req.op, n, parts, { ...dest, to: req.to, base: req.base, head, draft: req.draft }); }
+      catch (e) { env.err(`gstack-post: could not write the hand-off for the host's PR tool: ${(e as Error).message}; nothing was handed off\n`); return EXIT.cliFailed; }
+      env.out(line);
+      return EXIT.posted;
     }
     return send(env, remote.kind, req, n, title, body);
   } catch (e) {

@@ -338,6 +338,7 @@ gstack_result_anchor() {
     PROSE_LINT_FOUND) printf '%s' 'prose-lint-found' ;;
     RECEIPT_BLOCKER_OPEN) printf '%s' 'receipt-blocker-open' ;;
     REVIEW_LOOP_EXCEPTION_INVALID) printf '%s' 'review-loop-exception-invalid' ;;
+    CI_CARRY_TREE_LOG_UNBOUND) printf '%s' 'ci-carry-tree-log-unbound' ;;
     CI_CARRY_RERUN_MALFORMED) printf '%s' 'ci-carry-rerun-malformed' ;;
     RECEIPT_CARRY_TREE_MISMATCH) printf '%s' 'receipt-carry-tree-mismatch' ;;
     RECEIPT_CARRY_PRODUCT_CHANGED) printf '%s' 'receipt-carry-product-changed' ;;
@@ -371,6 +372,7 @@ gstack_result_anchor() {
     PR_WAIT_REFUSED) printf '%s' 'pr-wait-refused' ;;
     PREGATE_HEAD_POLICY_LOOSENS) printf '%s' 'pregate-head-policy-loosens' ;;
     REVIEW_DIFF_TOO_LARGE) printf '%s' 'review-diff-too-large' ;;
+    REVIEW_EXCLUDE_KEEP_TOO_LARGE) printf '%s' 'review-exclude-keep-too-large' ;;
     REVIEW_DIFF_UNREADABLE) printf '%s' 'review-diff-unreadable' ;;
     REVIEW_PLAN_STOPPED) printf '%s' 'review-plan-stopped' ;;
     REVIEW_EXCLUDE_REFERENCE) printf '%s' 'review-exclude-reference' ;;
@@ -382,6 +384,7 @@ gstack_result_anchor() {
     PUSH_GIT_FAILED) printf '%s' 'push-git-failed' ;;
     SPAWN_OUTPUT_INCOMPLETE) printf '%s' 'spawn-output-incomplete' ;;
     APPROVAL_RECORD_INVALID) printf '%s' 'approval-record-invalid' ;;
+    APPROVAL_RULING_RUN_OPEN) printf '%s' 'approval-ruling-run-open' ;;
     APPROVAL_RECORD_SECRET) printf '%s' 'approval-record-secret' ;;
     APPROVAL_RECORD_NO_BRANCH) printf '%s' 'approval-record-no-branch' ;;
     APPROVAL_RECORD_UNAVAILABLE) printf '%s' 'approval-record-unavailable' ;;

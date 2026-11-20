@@ -104,8 +104,8 @@ export interface ShipReceipt {
   gate?: Record<string, unknown>; ci?: Record<string, unknown>; spend_usd?: number | string; predecessor?: string;
   /** The run's calls from the call log (lib/ship-clock.ts callsSince: gstack-command calls plus keep-alives), so a 200-call run shows at the receipt; absent on older receipts. */
   calls?: number;
-  /** GSTA-258: the lanes CI carried at this head's tree, one entry per run (gstack-evidence carried); `rerun` and `attempts` when files passed only on a re-run (GST-3054). */
-  ci_carried?: Array<{ lane: string; run: number; attempt: number; tree: string; rerun?: number; attempts?: number[]; exception?: BoundLaneException }>;
+  /** GSTA-258: the lanes CI carried at this head's tree, one entry per run (gstack-evidence carried); `rerun` and `attempts` when files passed only on a re-run (GST-3054); `tree_source: job-log` when the run's tree.json came from its job log (HARN-118). */
+  ci_carried?: Array<{ lane: string; run: number; attempt: number; tree: string; rerun?: number; attempts?: number[]; tree_source?: 'job-log'; exception?: BoundLaneException }>;
   session_kind?: string; artifacts_consumed?: string; run?: string;
   // C-stamp (C3/C5/C7): the tree receipt's verdicts and the policy provenance, all optional.
   thread?: string; tree?: string; gate_reuse?: string; policy?: string; queue_mode?: string; preregistration?: string; history?: string;
@@ -131,7 +131,7 @@ export interface ShipReceipt {
   /** Review round grants the lane or its Captain recorded for this PR (gstack-approvals round-grant, lib/review-round-grant.ts; GST-2673): never the owner's, so never in review_loop_exception. */
   review_round_grants?: Array<{ kind: 'extra-round' | 'fix-check'; head: string; pr: number; by: string; reason: string; at: string; approval: string; stop_run?: string; findings?: string[] }>;
   /** The owner's rulings that a finding ships as a disclosed note (gstack-approvals rule, lib/ruled-notes.ts); the PR body lists each one word for word (GST-1537). */
-  ruled_notes?: Array<{ finding: string; head: string; by: string; reason: string; at: string; approval: string }>;
+  ruled_notes?: Array<{ finding: string; head: string; by: string; reason: string; at: string; approval: string; relayed?: string; not_security?: true }>;
   /** The owner's dispositions of gate findings (gstack-approvals gate, lib/gate-dispositions.ts); the PR body lists each one word for word (GST-2491). */
   gate_dispositions?: Array<{ finding: string; gate_id: string; head: string; by: string; reason: string; words: string; at: string; approval: string }>;
   /** The `Mechanical retake: <path> (<what>)` lines /ship finish proved for this head's tree (lib/ship-mechanical.ts); the PR body lists each one word for word (GST-1560). */
@@ -267,7 +267,7 @@ export const ARTIFACT_SCHEMAS = {
       schema_version: { const: 1 }, pr: { type: 'integer' }, head: str, version: str, base: str, gated_tree: str,
       gate: { type: 'object' }, ci: { type: 'object' }, spend_usd: { type: ['number', 'string'] }, calls: { type: 'integer', minimum: 0 }, predecessor: str,
       ci_carried: { type: 'array', items: { type: 'object', required: ['lane', 'run', 'attempt', 'tree'], properties: { lane: str, run: { type: 'integer', minimum: 1 }, attempt: { type: 'integer', minimum: 1 }, tree: str,
-        rerun: { type: 'integer', minimum: 1 }, attempts: { type: 'array', items: { type: 'integer', minimum: 1 } },
+        rerun: { type: 'integer', minimum: 1 }, attempts: { type: 'array', items: { type: 'integer', minimum: 1 } }, tree_source: { enum: ['job-log'] },
         exception: { type: 'object', required: ['head', 'files', 'by', 'reason', 'at', 'approval', 'preflight'], properties: { head: str, files: strList, by: str, reason: str, at: str, approval: str,
           preflight: { type: 'object', required: ['label', 'tests_ran'], properties: { label: str, tests_ran: { type: 'integer', minimum: 1 } } } } } } } },
       session_kind: str, artifacts_consumed: { ...str, description: '<n>/<m>' }, run: str,
@@ -284,7 +284,7 @@ export const ARTIFACT_SCHEMAS = {
       review_exclude: { type: 'object', required: ['source', 'patterns', 'applied', 'excluded', 'excluded_bytes', 'kept', 'gate_tagged', 'patterns_sha256', 'list_sha256', 'digest'], properties: { source: str, patterns: strList, applied: strList, excluded: { type: 'integer', minimum: 0 }, excluded_bytes: { type: 'integer', minimum: 0 }, kept: { type: 'integer', minimum: 0 }, gate_tagged: strList, patterns_sha256: str, list_sha256: str, digest: str } },
       review_loop_exception: { type: 'object', required: ['accepted_by', 'date', 'via', 'reason'], properties: { accepted_by: str, date: str, via: str, reason: str, fix_check: { type: 'object', required: ['head', 'findings'], properties: { head: str, findings: { type: 'integer', minimum: 0 }, files: strList } }, second_pass: { type: 'object', required: ['head', 'deferred'], properties: { head: str, deferred: strList } } } },
       review_round_grants: { type: 'array', items: { type: 'object', required: ['kind', 'head', 'pr', 'by', 'reason', 'at', 'approval'], properties: { kind: { enum: ['extra-round', 'fix-check'] }, head: str, pr: { type: 'integer', minimum: 1 }, by: str, reason: str, at: str, approval: str, stop_run: str, findings: { type: 'array', items: str } } } },
-      ruled_notes: { type: 'array', items: { type: 'object', required: ['finding', 'head', 'by', 'reason', 'at', 'approval'], properties: { finding: str, head: str, by: str, reason: str, at: str, approval: str } } },
+      ruled_notes: { type: 'array', items: { type: 'object', required: ['finding', 'head', 'by', 'reason', 'at', 'approval'], properties: { finding: str, head: str, by: str, reason: str, at: str, approval: str, relayed: str, not_security: { const: true } } } },
       gate_dispositions: { type: 'array', items: { type: 'object', required: ['finding', 'gate_id', 'head', 'by', 'reason', 'words', 'at', 'approval'], properties: { finding: str, gate_id: str, head: str, by: str, reason: str, words: str, at: str, approval: str } } },
       mechanical: strList,
       design: { type: 'object', required: ['mode', 'reason'], properties: { mode: { enum: ['static'] }, reason: str } },

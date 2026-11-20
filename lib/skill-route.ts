@@ -89,6 +89,16 @@ export function readSkillSwitch(name: SwitchName, env: NodeJS.ProcessEnv = proce
   return v ? { on: v === 'on', source: `config ${name}` } : { on: fallback, source: `config ${name}`, invalid: cfg };
 }
 
+/** The host a skill hook runs under: codex when its Codex wrapper (hosts/codex/hooks) set GSTACK_HOOK_HOST, else Claude Code. */
+export type HookHost = 'claude' | 'codex';
+export const hookHost = (env: NodeJS.ProcessEnv = process.env): HookHost => (env.GSTACK_HOOK_HOST === 'codex' ? 'codex' : 'claude');
+
+/** Where Codex reads skills: GSTACK_INSTALLED_SKILLS_DIR, else ${CODEX_HOME:-~/.codex}/skills. */
+export function codexSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.GSTACK_INSTALLED_SKILLS_DIR) return env.GSTACK_INSTALLED_SKILLS_DIR;
+  return path.join(env.CODEX_HOME || path.join(env.HOME || os.homedir(), '.codex'), 'skills');
+}
+
 /** Where Claude Code reads skills: GSTACK_INSTALLED_SKILLS_DIR, else ${CLAUDE_CONFIG_DIR:-~/.claude}/skills. */
 export function installedSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.GSTACK_INSTALLED_SKILLS_DIR) return env.GSTACK_INSTALLED_SKILLS_DIR;
@@ -175,6 +185,7 @@ export function scanInstalledSkills(dir: string): { skills: InstalledSkill[]; pr
     }
     if (frontmatter === null) continue;
     const name = frontmatterName(frontmatter, entry);
+    const gstack = ownedByGstack(path.join(dir, entry), file);
     let triggers: string[] = [];
     if (/^triggers:/m.test(frontmatter)) {
       triggers = frontmatterList(`---\n${frontmatter}\n---`, 'triggers');
@@ -186,10 +197,40 @@ export function scanInstalledSkills(dir: string): { skills: InstalledSkill[]; pr
         problems.push(`${SKILL_NAME.test(name) ? name : entry.slice(0, 64)}: ${problem}`);
         triggers = [];
       }
+      const short = isGstackSkill({ name, file, frontmatter, triggers, gstack }) ? [] : triggers.filter(t => contentTokens(t).length < 2);
+      if (short.length) {
+        problems.push(`${name}: skipped ${short.map(t => `"${t}"`).join(', ')}: another installed skill's trigger needs two content words, so one word cannot claim a prompt`);
+        triggers = triggers.filter(t => !short.includes(t));
+      }
     }
-    skills.push({ name, file, frontmatter, triggers, gstack: ownedByGstack(path.join(dir, entry), file) });
+    skills.push({ name, file, frontmatter, triggers, gstack });
   }
   return { skills, problems };
+}
+
+/**
+ * Codex's skills, as scanInstalledSkills reads them. Each gstack skill (a gstack-<name> directory) keeps the name its
+ * installed SKILL.md gives, the one Codex lists and mentions it by (gstack-review/ holds name: review, so $review), or
+ * its directory when that name is missing or unusable. Codex renders keep only name and description, so a gstack
+ * skill without triggers takes them from the same skill's Claude render in this checkout.
+ */
+export function scanCodexSkills(dir: string): { skills: InstalledSkill[]; problems: string[] } {
+  const { skills, problems } = scanInstalledSkills(dir);
+  return {
+    problems,
+    skills: skills.map(s => {
+      const entry = path.basename(path.dirname(s.file));
+      if (!entry.startsWith('gstack-') || !isGstackSkill({ ...s, name: entry })) return s;
+      let triggers = s.triggers;
+      if (!triggers.length) {
+        try {
+          const fm = readFrontmatter(path.join(GSTACK_ROOT, entry.slice('gstack-'.length), 'SKILL.md'));
+          if (fm && /^triggers:/m.test(fm)) triggers = frontmatterList(`---\n${fm}\n---`, 'triggers');
+        } catch { /* no Claude render beside this file: the skill routes on nothing */ }
+      }
+      return { ...s, name: SKILL_NAME.test(s.name) ? s.name : entry, triggers, gstack: true };
+    }),
+  };
 }
 
 const STOPWORDS = new Set(('a an the this that these those it its i me my we our us you your he she they them their ' +
@@ -300,17 +341,81 @@ export function scorePrompt(prompt: string, skills: InstalledSkill[]): RouteCand
 export const ROUTED_SKILLS = ['review', 'qa', 'verify'];
 const isRouted = (s: InstalledSkill) => !isGstackSkill(s) || ROUTED_SKILLS.includes(baseName(s.name));
 
-export type RouteDecision =
-  | { route: RouteCandidate; routes: RouteCandidate[]; candidates: RouteCandidate[] }
-  | { route: null; reason: 'slash-command' | 'empty' | 'below-threshold'; candidates: RouteCandidate[] };
+/**
+ * Signs that a prompt reports a defect (bugReport). One strong sign is enough: a word for what went wrong, an exception
+ * name (ValueError), the verb fix, an issue template's expected or actual heading, a failure verb (fails, failed to,
+ * doesn't work) or a "should X, not Y" correction. Feature requests use error, exception and failure as nouns ("add
+ * error handling", "a custom exception class"), so those words, a negated verb, "should" and "instead of" are weak
+ * signs, and a bug report needs two different ones.
+ */
+const SYMPTOM_STEMS = new Set(['bug', 'crash', 'traceback', 'regression', 'broken', 'wrong', 'incorrect', 'incorrectly', 'defect',
+  'hang', 'stuck', 'freeze', 'freezes', 'leak', 'corrupt', 'imprecise', 'inaccurate', 'unexpected', 'unexpectedly', 'weird', 'strange',
+  'glitch', 'mismatch', 'typo'].map(stem));
+const STRONG_SIGN = new RegExp(String.raw`\b(?:expected (?:behaviou?r|result|output|value)|actual (?:behaviou?r|result|output)|what did you expect`
+  + String.raw`|what happened|steps to reproduce|to reproduce|reproducible|correct (?:output|result|value|answer|behaviou?r)|fails|failing`
+  + String.raw`|fail(?:ed)? to|(?:does|do|did)(?: not|n't) work|not working|no longer works?)\b|\bshould\b[^.!?]*(?:, not\b|\binstead of\b)`);
+const WEAK_SIGNS = [/\b(?:errors?|exceptions?|failures?|failed)\b/, /\b(?:(?:does|do|did|is|are|was|were|can|could|will|would)(?: not|n't)|cannot|can't|won't)\b/,
+  /\bshould\b/, /\binstead of\b/];
 
-export function routePrompt(prompt: string, skills: InstalledSkill[], threshold = ROUTE_THRESHOLD): RouteDecision {
+/** The verb fix, as a prompt asks for one. */
+const FIX_WORD = /^(?:re-)?fix(?:es|ing)?$/;
+
+/** True when the prompt's window (promptWindow) reads as a bug report: one strong sign, or two different weak ones. */
+export function bugReport(prompt: string): boolean {
+  const text = promptWindow(prompt).toLowerCase().replace(/[\u2019`]/g, "'").replace(/\s+/g, ' ');
+  if (words(text).some(w => SYMPTOM_STEMS.has(stem(w)) || FIX_WORD.test(w) || /^[a-z]{3,}(?:error|exception)$/.test(w))) return true;
+  return STRONG_SIGN.test(text) || WEAK_SIGNS.filter(re => re.test(text)).length >= 2;
+}
+
+/**
+ * A trigger that claims bug reports: the defect and fixing it, and nothing else, as "fix this bug" and "reproduce the bug
+ * in a test" do. A trigger that names its own target ("fix lint errors", "fix postgres bugs") claims only that kind of fix.
+ */
+const FIX_VERBS = ['fix', 'debug', 'repair', 'reproduce'];
+const GENERIC_CLAIM_WORDS = new Set(['bug', 'test', ...FIX_VERBS]);
+const claimsBugReports = (trigger: string) => {
+  const content = contentTokens(trigger);
+  return content.includes('bug') && content.some(w => FIX_VERBS.includes(w)) && content.every(w => GENERIC_CLAIM_WORDS.has(w));
+};
+
+/**
+ * On a bug report, the installed skill that claims bug reports, named alone: one with a claiming trigger that is not
+ * gstack's own (gstack's routed skills only check work), the best-scoring first, then by name. Null when none is installed.
+ */
+function bugFixRoute(skills: InstalledSkill[], candidates: RouteCandidate[]): RouteCandidate | null {
+  const score = (s: InstalledSkill) => candidates.find(c => c.skill === s.name)?.score ?? 0;
+  const fixer = skills.filter(s => !isGstackSkill(s) && s.triggers.some(claimsBugReports))
+    .sort((a, b) => score(b) - score(a) || a.name.localeCompare(b.name))[0];
+  if (!fixer) return null;
+  const trigger = fixer.triggers.find(claimsBugReports)!;
+  return { skill: fixer.name, score: 1, matched: contentTokens(trigger).length, trigger, file: fixer.file, gstack: false };
+}
+
+export type RouteDecision =
+  | { route: RouteCandidate; routes: RouteCandidate[]; candidates: RouteCandidate[]; bugReport: boolean }
+  | { route: null; reason: 'slash-command' | 'skill-mention' | 'empty' | 'below-threshold'; candidates: RouteCandidate[] };
+
+/**
+ * A prompt that already names a command is never routed: `/` on both hosts, and Codex's `$skill` mention there. A bug
+ * report goes to the installed skill that claims bug reports, alone, whatever the triggers score (bugFixRoute), unless
+ * it holds the whole phrase of one of /review's or /qa's own triggers ("review this pr for bugs") and never asks for a
+ * fix: finding bugs is not fixing one. Any other prompt goes to the skills whose triggers reach the threshold.
+ */
+export function routePrompt(prompt: string, skills: InstalledSkill[], threshold = ROUTE_THRESHOLD, host: HookHost = 'claude'): RouteDecision {
   const trimmed = prompt.trim();
   if (!trimmed) return { route: null, reason: 'empty', candidates: [] };
   if (trimmed.startsWith('/')) return { route: null, reason: 'slash-command', candidates: [] };
-  const candidates = scorePrompt(prompt, skills.filter(isRouted));
+  if (host === 'codex' && trimmed.startsWith('$')) return { route: null, reason: 'skill-mention', candidates: [] };
+  const routed = skills.filter(isRouted);
+  const candidates = scorePrompt(prompt, routed);
+  const window = promptWindow(prompt);
+  const seq = ` ${tokens(window).join(' ')} `;
+  const findsBugs = !words(window).some(w => FIX_WORD.test(w)) && routed.some(s => isGstackSkill(s)
+    && ['review', 'qa'].includes(baseName(s.name)) && s.triggers.some(t => seq.includes(` ${tokens(t).join(' ')} `)));
+  const fixer = !findsBugs && bugReport(prompt) ? bugFixRoute(routed, candidates) : null;
+  if (fixer) return { route: fixer, routes: [fixer], candidates, bugReport: true };
   const routes = candidates.filter((c, i) => c.score >= threshold && candidates.findIndex(o => o.skill === c.skill) === i).slice(0, MAX_ROUTES);
-  return routes.length ? { route: routes[0], routes, candidates } : { route: null, reason: 'below-threshold', candidates };
+  return routes.length ? { route: routes[0], routes, candidates, bugReport: false } : { route: null, reason: 'below-threshold', candidates };
 }
 
 export type HintVariant = 'name' | 'step' | 'contract';
@@ -324,13 +429,24 @@ export function hintVariant(env: NodeJS.ProcessEnv = process.env): HintVariant {
 }
 
 /** The one additionalContext line: its source, its off switch, the skill (or two), and the ask to say gstack routed it. */
-export function hintLine(route: RouteCandidate, extra = '', also?: RouteCandidate): string {
+export function hintLine(route: RouteCandidate, extra = '', also?: RouteCandidate, host: HookHost = 'claude'): string {
+  if (host === 'codex') return codexHintLine(route, extra, also);
   const s = `/${route.skill}`;
   const matched = (r: RouteCandidate) => `the installed /${r.skill} trigger "${r.trigger.replace(/["\s]+/g, ' ').trim()}"`;
   const head = `gstack skill routing (UserPromptSubmit hook; matched ${matched(route)}${also ? ` and ${matched(also)}` : ''}; off: gstack-config set skill_routing off): `;
   const ask = also
     ? `this request fits ${s} or /${also.skill}. Run the one that fits better with the Skill tool before you start (${s} if both fit), and tell the user in one sentence which skill gstack routed this to.`
     : `this request fits ${s}. Run ${s} with the Skill tool before you start, and tell the user in one sentence that gstack routed this to ${s}.`;
+  return head + ask + (extra.trim() ? ` ${extra.replace(/\s+/g, ' ').trim()}` : '');
+}
+
+/** hintLine's Codex wording: skills by their Codex names (gstack-review), read and followed rather than run with the Skill tool. */
+function codexHintLine(route: RouteCandidate, extra: string, also?: RouteCandidate): string {
+  const matched = (r: RouteCandidate) => `the installed ${r.skill} trigger "${r.trigger.replace(/["\s]+/g, ' ').trim()}"`;
+  const head = `gstack skill routing (UserPromptSubmit hook; matched ${matched(route)}${also ? ` and ${matched(also)}` : ''}; off: gstack-config set skill_routing off): `;
+  const ask = also
+    ? `this request fits the ${route.skill} or ${also.skill} skill. Read and follow the one that fits better before you start (${route.skill} if both fit), and tell the user in one sentence which skill gstack routed this to.`
+    : `this request fits the ${route.skill} skill. Read and follow the ${route.skill} skill before you start, and tell the user in one sentence that gstack routed this to ${route.skill}.`;
   return head + ask + (extra.trim() ? ` ${extra.replace(/\s+/g, ' ').trim()}` : '');
 }
 
