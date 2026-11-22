@@ -164,6 +164,26 @@ reverted rather than the whole crew waiting on a root cause, and a finding at th
 blocking floor ([review-policy.md](../../docs/review-policy.md)) still stops the PR it is
 found in.
 
+When a review round finds another case of a kind an earlier round already found (another
+bypass, another misfire, another double-send path), a lane stops patching cases and changes
+the design. Either it lists every case up front (each caller or trigger against each
+outcome: done, failed, failed partway, refused, retried) with a test for each case that
+sends, deletes or grants, or it rebuilds on a shape that can't have that kind of bug, such
+as an allowlist of named file types instead of a guess about what a file contains. Four
+crews reached this on their own: one PR met a new double-send path in each of four rounds,
+one took five /ship runs before an allowlist rebuild passed in one, one closed a
+pattern-matching PR for a rebuild after every round found new misfires, and one dropped
+exemptions after reads kept finding bypasses.
+
+To narrow a safety or security guard that catches too much, a lane keeps the broad match
+and adds an exemption that a test proves, never a narrower replacement match. A guard that
+decides by matching command text is bypassed by quoting, environment variables,
+redirection, `xargs` or a renamed program, so when reviews keep finding bypasses of an
+exemption, drop the exemption and change the caller or remove the capability instead.
+Three crews hit this: three review blockers on one PR came from replacing a broad match
+with a narrower one, a narrowed command hold was bypassed three ways, and a wrapper that
+blocked one migration command outright broke every upgrade.
+
 ## Lane context
 
 Every step a lane takes re-reads its whole conversation. A step within about five minutes
@@ -264,6 +284,15 @@ went stale and conflicting, and started to look like junk.
   does this for rotations), while the old thread stays: a successor never makes archiving a
   thread with an open PR OK. When no successor is needed yet, the Captain takes the work
   itself, on an issue assigned to a live thread with the trigger written in it.
+- **Move the clock with the work.** A successor brief lists every wait, watch, webhook and
+  automation the old thread holds, not only its PRs, and the successor registers and
+  confirms each one before the old thread cancels its own, because archiving a thread can
+  pause its automations. A thread holding a deadline checks its waits after every wake,
+  because another wake can end a timer wait for good, and a paid run on an unattended
+  machine collects its own results at the end of its chain instead of trusting a later
+  wake. Three crews lost work this way: an archive paused a one-shot automation, timer
+  waits ended by other wakes never came back, and a wake that came about seven hours late
+  let a VM reaper take a run's ledger.
 - **Archive through the check.** Before archiving any crew thread, re-assign every open
   issue it holds to a live thread or close it, then archive with the one program below. It
   reads the thread and its open issues, runs `gstack-archive-check thread`, and archives
@@ -565,7 +594,7 @@ What to do with each refusal (nothing was merged unless the code says so):
 | `QUEUE_RECEIPT_MISSING` / `QUEUE_RECEIPT_STALE` | lane | /ship at the pin |
 | `QUEUE_NOT_READY` | lane, or Captain | no READY note: `ready --pr <n> --no-screen` at the pin; `merge: train`: use the train; closed or retargeted PR: as named |
 | `QUEUE_LAND_CHECKS` | Captain, then lane | pending: `gstack-pr-wait <n> --until green` and rerun; red: back to the lane (rule 16 rerun for a flaky case); missing: dispatch the workflow on the branch |
-| `QUEUE_LAND_MERGED_CHECKS` | lane | a `land.merged_checks` command failed on the pin merged onto main: the lane merges main (rule 19), fixes it, /ship, `ready`, new READY |
+| `QUEUE_LAND_MERGED_CHECKS` | Captain, then lane | the message says the checks changed files land's git or gh calls read: hold, nothing goes back to the lane yet; restore each named path from a trusted copy, release the lock with `land --pr <n> --pin <sha>` (no `--allow-repo-commands`), and find out why the checks wrote there. Otherwise a `land.merged_checks` command failed, or the `land.merged_ci` run was red, on the pin merged onto main: one rerun of land for a flaky case (rule 16), else back to the lane, which merges main (rule 19), fixes it, /ship, `ready`, new READY ([troubleshooting](../../docs/troubleshooting.md#queue-land-merged-checks)) |
 | `QUEUE_LAND_NOT_CLEAN` | lane, or Captain | `CONFLICTING`, or the pin conflicts with main's tip on a stale base: the lane merges main (rule 19), /ship, `ready`; `UNKNOWN`: rerun in a minute |
 | `QUEUE_TRAIN_FROZEN` / `QUEUE_LAND_LOCKED` | Captain | finish the repair or the holder first |
 | `QUEUE_TRAIN_UNTRUSTED` | Captain | a fork head; rewrite on a crew branch |

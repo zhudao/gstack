@@ -69,6 +69,8 @@ case "$TEL_START" in ''|*[!0-9]*) ;; *) _TEL_DUR=$(( _TEL_END - TEL_START )) ;; 
 # Release the workflow lease run gstack-skill-start opened (SESSION_ID starts
 # with its harness pid), so a finished run stops blocking gstack-upgrade (GST-1205).
 [ -n "$SESSION_ID" ] && "$_BIN/gstack-lease" release --pid "${SESSION_ID%%-*}" --run "$SESSION_ID" >/dev/null 2>&1 || true
+_SHIP_RUN=$(git rev-parse --git-path gstack-ship-run 2>/dev/null || true)
+[ -n "$SESSION_ID" ] && [ -n "$_SHIP_RUN" ] && [ -f "$_SHIP_RUN" ] && "$_BIN/gstack-ship-run" skill-end --run "$SESSION_ID" >/dev/null 2>&1 || true
 
 # Record completion before the final drain, including its durable enqueue.
 # The normal sync gates still decide publication: full may sync timelines,
@@ -118,10 +120,13 @@ if [ "$_TEL" != "off" ] && [ -x "$_BIN/gstack-telemetry-log" ]; then
       fi
     fi ;;
   esac
+  # error_class: an error run's exit reason, from exit_reason's own fixed list.
+  _ERR_CLASS=""
+  [ "$OUTCOME" = error ] && case "$EXIT_REASON" in blocked|tool_error|test_failed|context_limit|gave_up) _ERR_CLASS="$EXIT_REASON" ;; esac
   "$_BIN/gstack-telemetry-log" \
     --skill "$SKILL_NAME" --duration "$_TEL_DUR" --outcome "$OUTCOME" \
     --used-browse "$USED_BROWSE" --session-id "$SESSION_ID" \
-    --error-message "$ERROR_MESSAGE" --failed-step "$FAILED_STEP" \
+    --error-class "$_ERR_CLASS" --error-message "$ERROR_MESSAGE" --failed-step "$FAILED_STEP" \
     --host "$_HOST" --routing "$_ROUTING" --harness-session "$_HSESS" \
     --exit-reason "$EXIT_REASON" --invoked "$INVOKED" --model-family "$MODEL_FAMILY" --checks "$CHECKS" 2>/dev/null &
 fi

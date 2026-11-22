@@ -90,7 +90,7 @@ Write the text into each printed file with your file-write tool (Claude Code's W
 _EG="$HOME/.claude/skills/gstack/bin/gstack-egress-lib.sh"; [ -r "$_EG" ] && . "$_EG"; _aside_exec() { if command -v _gstack_egress_run >/dev/null 2>&1; then _gstack_egress_run open aside-agent aside.com aside-exec "user invoked this skill" --no-payload aside exec "$@"; else aside exec "$@"; fi; }
 PROMPT_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<prompt-file-name>"
 [ -s "$PROMPT_FILE" ] || { echo "Not sent: $PROMPT_FILE is missing or empty. Write the prompt, then rerun this block." >&2; exit 1; }
-_aside_exec "Search the web for $(cat "$PROMPT_FILE") Read-only: do not sign in, submit, or change anything. Then stop." && rm -f "$PROMPT_FILE"
+_aside_exec "Search the web for $(cat "$PROMPT_FILE") Read-only: do not sign in, submit, or change anything. Then stop." && rm "$PROMPT_FILE"
 ```
 
 If Aside is not installed or not running (`command -v aside` prints nothing, or the request fails), run the same lookup with the WebSearch tool when the host provides it: `"[runtime] best test framework {current year}"` and `"[framework A] vs [framework B] comparison"`. If neither is available, use this built-in knowledge table:
@@ -374,11 +374,12 @@ Then post with your platform from Step 0 (`github` or `gitlab`). Substitute the 
 TITLE_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<title-file-name>"
 BODY_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-file-name>"
 [ -s "$TITLE_FILE" ] && [ -s "$BODY_FILE" ] || { echo "Not sent: $TITLE_FILE or $BODY_FILE is missing or empty, so the text was never written. Write it, then send by hand: gh issue create --title \"\$(cat $TITLE_FILE)\" --body-file $BODY_FILE" >&2; exit 1; }
+[ "${GSTACK_CAPY:-}" = 1 ] && { echo "Not sent: on Capy, gh signs in as the owner's own GitHub account. Hand $TITLE_FILE and $BODY_FILE to whoever owns the work instead (docs/troubleshooting.md#host-publish)." >&2; exit 0; }
 case "<platform>" in
   github) gh issue create --title "$(cat "$TITLE_FILE")" --body-file "$BODY_FILE" --assignee "<github-username>" ;;
   gitlab) glab issue create -t "$(cat "$TITLE_FILE")" -d "$(cat "$BODY_FILE")" -a "<gitlab-username>" ;;
   *) echo "Not sent: no GitHub or GitLab remote. Files: $TITLE_FILE $BODY_FILE" >&2; false ;;
-esac && rm -f "$TITLE_FILE" "$BODY_FILE"
+esac && rm "$TITLE_FILE" "$BODY_FILE"
 ```
 
 - If neither CLI is available or `--assignee`/`-a` fails (user not in org, etc.), create the issue without assignee and note who should look at it in the body.

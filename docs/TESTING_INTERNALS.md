@@ -199,11 +199,14 @@ one duration-packed `--ci-plan`, 10 ordinary `--ci-run` shards plus a separate
 exclusive-fixture shard, and a `--ci-verify` aggregate. CI shards still run on
 independent machines without ordering unrelated jobs. Three workflow-level
 constants in `free-tests.yml` set that size for every event: `FREE_SUITE_RUNNER`
-(`ubicloud-standard-8`), `FREE_SUITE_SHARDS` (`'10'`) and `FREE_SUITE_JOBS`
-(`'4'`, the [sub-shards](#sub-shards-inside-one-ci-job) each shard runs side by
+(`ubicloud-standard-16`), `FREE_SUITE_SHARDS` (`'10'`) and `FREE_SUITE_JOBS`
+(`'8'`, the [sub-shards](#sub-shards-inside-one-ci-job) each shard runs side by
 side), which `free-plan` resolves into the shards' runner, shard count and plan.
-GSTA-203 chose them by a 3-run A/B against 20 × `ubicloud-standard-4` at k = 1
-(the PR that set them has the table). A `workflow_dispatch` run may
+GSTA-203 first chose 10 × `ubicloud-standard-8` at k = 4 by a 3-run A/B against
+20 × `ubicloud-standard-4` at k = 1 (the PR that set them has the table). GST-3303
+moved to `ubicloud-standard-16` at k = 8 once `test/review-pass.test.ts` was
+split: two trial runs cut the slowest shard job from 222–226 s to 155–158 s, for
+about $0.085 more per run. A `workflow_dispatch` run may
 override them with `free_runner` (`ubicloud-standard-2`, `-4`, `-8` or `-16`),
 `free_shards` (1–40) and `free_jobs` (1–8) for runner-sizing experiments only;
 its job summary says so, and it is never cited as a PR or train Free Tests result.
@@ -1136,6 +1139,29 @@ machine swap, in this order:
    plus ten minutes has passed, so set `UBI_TTL_HOURS` above the expected
    duration and name that duration in the thread before launching.
 
+## Mutation report
+
+A weekly, report-only trial of mutation testing. It checks whether gstack's tests reject plausible wrong code in the files agents change most. `.github/workflows/mutation-report.yml` runs every Saturday at 06:00 UTC, or on demand through workflow_dispatch, on `ubicloud-standard-16`. It is not a required check, never runs on pull requests, and never blocks a merge.
+
+`scripts/mutation-report.ts` does the work:
+
+1. It picks the five `lib/**/*.ts` files (not tests) with the most landings on main in the last 30 days (`git log --first-parent`), from the job's full-history checkout. A file that no test imports is listed as `no tests`, and a file Stryker finds nothing to mutate in (a data-only file) as `no mutants`; in both cases the next file takes its place.
+2. For each file it selects the test files that import it directly. If none do, it falls back to the transitive importers from `lib/pregate/import-graph.ts`. At most 20 run, and the report shows "20 of N" when it caps them.
+3. **Positive control.** The selected tests must first pass on the unedited file; if they don't, the file is reported as `failed`. Then the script prepends `throw new Error('mutation-report positive control')` to the file and runs the same tests, which must fail with that message. If they don't, the tests reach the file only through a spawned process, and every mutant would be a false survivor. The file is then reported as `control survived` and not mutated.
+4. It runs StrykerJS with the community Bun runner, using per-test coverage and `ignoreStatic`, within a 55-minute budget per file that also covers the two test runs before it (at most 10 minutes each). Stryker runs under `timeout`, which kills its whole process group at the budget, and the script then restores the tree with `git checkout -- .`. A file that runs out of budget is reported as `unfinished`. The report is rewritten after every file, so a job that hits its own limit still leaves the finished files.
+5. It writes a table (killed, survived, no coverage, timeout, mutation score) and up to 15 survivors per file, each with its line, mutator and replacement. The table goes to the step summary, and the Markdown, JSON and per-file Stryker reports go to the `mutation-report` artifact.
+
+Stryker (`@stryker-mutator/core`) and `@hughescr/stryker-bun-runner` are both Apache-2.0. They are installed at the exact versions in `STRYKER_PACKAGES` into the runner's temp directory with `--ignore-scripts`, so `package.json` and `bun.lock` don't change. Their own dependencies aren't locked.
+
+Stryker has to edit files in place, because its sandbox copy fails on this repo's symlinked directories (`EISDIR` on `connect-chrome`). The script therefore refuses a dirty tree, requires `--throwaway-checkout`, and must never run in a checkout you work in. If a run is killed, it can leave a mutated file behind: run `git checkout -- .` and remove `.stryker-tmp`. To run it locally, use a scratch worktree:
+
+```bash
+git worktree add /tmp/mut origin/main && cd /tmp/mut && bun install
+npm install --prefix /tmp/stryker --no-save --ignore-scripts @stryker-mutator/core@10.1.1 @hughescr/stryker-bun-runner@1.6.0
+bun --no-env-file --config=/dev/null scripts/mutation-report.ts --throwaway-checkout --files 1 \
+  --stryker-dir /tmp/stryker --out-dir /tmp/mutation-out
+```
+
 ## Cloud sandboxes (Vercel / Conductor cloud workspaces)
 
 Syscall-supervised sandboxes need environment setup before `bun run test` can
@@ -1261,7 +1287,10 @@ them would select the same cases.
 belongs to a paid touchfile or `FREE_FIXTURES`, and each workflow to the paid or
 free-only list. Editing a paid test file runs its own gate cases on the PR when
 their Bun test is named by the case id; the file's other cases stay deferred with
-a reason that says to name the test by its case id.
+a reason that says to name the test by its case id. The same file also fails when
+any file under `test/` or `browse/test/` names a SWE-bench-style task id
+(GST-3402): every install is a clone of this repository, so real benchmark tasks
+must stay out of it, and router and fixture tests use synthetic prompts instead.
 
 ### Exercised-path map
 
@@ -1629,7 +1658,8 @@ refresh to a maintainer.
   (`GSTACK_FREE_JOBS=2`, 60-minute job): at four, files that pass nightly failed
   under the load and the recording outran its old 30-minute job. The recorder stays on
   `ubicloud-standard-8` while the free-suite shards run on `FREE_SUITE_RUNNER`
-  (`ubicloud-standard-8`); both are Ubicloud standard runners. When either recording adds
+  (`ubicloud-standard-16` at k = 8, the same two vCPUs per sub-shard); both are
+  Ubicloud standard runners. When either recording adds
   or drops a test file, it force-updates the `bot/free-duration-seeds` branch,
   opens or refreshes one seed PR whose body states the ratchet result, and
   dispatches Free Tests, Windows Smoke and Quality gate on it. Those
@@ -1843,7 +1873,10 @@ The full curated suite below runs nightly on main and on dispatch, never on a PR
 `windows-latest` job
 (`bun run test:windows --ci-run`), and verifies every shard receipt on Linux
 (`--windows-only --ci-verify`). Packing uses Windows-measured durations from
-`scripts/free-test-durations-windows.json`; the weekly
+`scripts/free-test-durations-windows.json`, and a file's Linux time when that
+seed lacks it. With `--shard-budget-seconds 720`, `--shards 8` is a floor: the
+planner adds shards until no shard plans more than 12 minutes, 80% of the
+15-minute job. The weekly
 `free-durations-record.yml` run refreshes them, or by hand run
 `gh workflow run windows-free-tests.yml --ref <branch> -f record_durations=true`,
 then download the `free-test-durations-windows` artifact and commit it.
@@ -2090,7 +2123,7 @@ refusal from `bin/gstack-eval-plan` (logic in `lib/eval-plan-checks.ts` and
 | Check | When it runs | Refusal |
 |---|---|---|
 | `## Decisions`: one `if <result>: <what we do>` line per possible result, at least two, with different actions | `prereg --check`, before anything is spent | `PREREG_INCOMPLETE` |
-| `## Scoring`: `judge: none`, or a judge model from another family than every arm with `labels:` (40 or more) and `agreement:` (kappa 0.6 or more); with two or more arms, `paired: yes`, `interval: 95%` and `mdd:` stated before the run | `prereg --check` | `PREREG_INCOMPLETE` |
+| `## Scoring`: `judge: none`, or a judge model from another family than every arm with `labels:` (100 or more; 40 for a plan frozen before 2026-11-22) and `agreement:` (kappa 0.6 or more); with two or more arms, `paired: yes`, `interval: 95%` and `mdd:` stated before the run | `prereg --check` | `PREREG_INCOMPLETE` |
 | The judge's Cohen's kappa against `{"id", "human", "judge"}` hand labels, at the preregistered count and bar | `judge --check` before the approval ask; `results --check --labels` before any number goes out | `EVAL_JUDGE_UNCHECKED` |
 | A zero in any results table comes from a column named after a `## Diagnostics` counter whose synthetic fixture plants at least one case (expected 1 or more) | `results --check` | `EVAL_REPORT_UNPLANTED_ZERO` |
 | A results table with a failures column also has an `answer-only` column: failures by the grader's own rule on the final answer | `results --check` | `EVAL_REPORT_NO_ANSWER_ONLY` |
@@ -2111,6 +2144,45 @@ rules it was frozen under: the PREREG line shows `result_checks=exempt` and
 none of the four checks apply. Text frozen before a priced call is not edited
 to meet a newer rule.
 
+## Eval-loop checks
+
+The owner's eval-loop rules (2026-11-19) are refusals in `prereg --check` for
+every preregistration frozen on or after 2026-11-21, on top of the result
+checks. Logic in `checkLoop` and `checkQuickLook` (`lib/eval-plan-checks.ts`):
+
+| Check | Refusal |
+|---|---|
+| `## Pilot`, uncounted, per arm: `share:` at most 10% of that arm's budget, `counted: no`, `ran:` (the part under test ran, on that arm's own outputs), `judge:` (the judge passes its label check on that arm's pilot outputs, with a model judge), `supply:` (the units can be supplied at the planned rate), `units:` (every unit type, each drawn at least once) and `seed:` (a fixed draw order that doesn't depend on the number of workers) | `PREREG_INCOMPLETE` |
+| `## Scoring` with a model judge: `per-arm: yes` and `effort:`, the reasoning effort set in the judge's start | `PREREG_INCOMPLETE` |
+| `## Cost`: `paid:` (a plain dollar amount such as `$1,200`; `2k`, ranges, units and arithmetic are refused), `meter:` and `ledger:`, the private file that gets the actual cost and the decision it settled | `PREREG_INCOMPLETE` |
+| `## Interim look` when `paid:` is above $500: `at: 50%`, `looks: 1`, `bounds:` O'Brien-Fleming, `futility:` | `PREREG_INCOMPLETE` |
+| An arm or bar asking for a smaller change or less code has a `regression test` bar beside it | `PREREG_INCOMPLETE` |
+| `## Held-out exposure` has an `answers:` line: how each task machine was checked for answers the agent could read there | `PREREG_INCOMPLETE` |
+| With `per-arm: yes`, `judge --check` needs an `arm` on every label row, rows naming only arms in `## Arms` and covering every one, and the bar met on each arm's labels (`JUDGE_ARM:` lines) | `EVAL_JUDGE_UNCHECKED` |
+| A quick look (`kind: quick look`; `question:`, `decision:`, `stop:`, `cap:` of $100 or less) publishes no number | `results --check`: `EVAL_QUICK_LOOK_NO_NUMBER` |
+
+Why: of $28,836 spent on our last 30 evals, 23.7% settled nothing, and most of
+that leaked through arms and judges that broke rather than through too many
+samples. The biggest single loss ($2,033) was a judge that failed its check after
+the whole grid had run, which a per-arm pilot catches for a tenth of the price.
+A pilot that drew one unit type planned a 77% yield and got 9%, and a restart at a
+new concurrency redrew its items. A "smaller change" instruction cut code to 0.44x
+and wrote fewer tests (28 of 100 sessions against 79). A reader subagent that
+inherited its parent's highest effort cost about four times the default. Three
+unplanned looks raise a 5% false-positive rate to about 11%, so a counted run big
+enough to matter takes one planned look. One look at half the units under
+O'Brien-Fleming bounds stops for effect at |z| 2.80 or more and passes at the end
+at |z| 1.98 or more.
+
+How we'll know it worked: cost per decision (paid plus meter spend divided by the
+ship-or-kill calls settled) is recounted over evals preregistered under these
+checks on Monday 2026-12-07, against $1,922 per decision and 23.7% settling
+nothing. That count reads each plan's `ledger:` file.
+
+A `frozen: YYYY-MM-DD` line before 2026-11-21 keeps the rules it was frozen
+under: the PREREG line shows `loop_checks=exempt`. Frozen plans also keep the
+models they named; new plans name `gpt-6.2-sol`.
+
 ## Frontier models under test
 
 Garry, 2026-11-01 (R54): "I think you are spending too much time with Haiku and
@@ -2119,7 +2191,7 @@ models like Opus and 6.1 Sol... just transfer from Haiku to Sonnet, who gives a
 shit about that, man?"
 
 **Models under test are frontier models.** Today that's `claude-opus-5-5` and
-`gpt-6.1-sol`, plus at most one low-cost primary the preregistration names. Haiku
+`gpt-6.2-sol` (a plan frozen on `gpt-6.1-sol` keeps it), plus at most one low-cost primary the preregistration names. Haiku
 and Sonnet are not models under test. They aren't stand-ins for a frontier model,
 and an eval has no tier-transfer arms (Haiku against Sonnet, say) unless its
 preregistration says it is asking about that tier.
@@ -2128,18 +2200,53 @@ preregistration says it is asking about that tier.
 can't carry a KEEP, FIX-METHOD or CUT-CANDIDATE verdict under R48. Rerun it on a
 frontier model first.
 
-**What the rule leaves alone.** Judges, cross-family review voices and a
-harness's shipped housekeeping model aren't models under test, so they keep the
-model they already use.
+**No older generations in any role we choose (R116).** Garry, 2026-11-21: "Can
+we suspend tests with gpt-4o and audit our models? We should be using frontier
+models and mainly focused on opus 5.5 or whatever model is like that at the
+current moment." So no plan uses gpt-4o (any variant, snapshot or provider
+form), or any model `lib/pricing.ts` marks `superseded_by`, as an arm, a judge,
+a reader or a simulator. A row is marked when a newer major generation of its
+family has its own row (`claude-opus-4-7` → `claude-opus-5-5`, `gpt-5.4` →
+`gpt-6.2-sol`, `gemini-2.5-flash` → `gemini-3.8-flash`); a point release in
+the same generation is not, so `gpt-6-astra` stays a valid judge beside
+`gpt-6.2-astra` and `claude-fable-5-1` stays current until Fable 5.2 has a
+price row. Readers and simulators go in an optional `## Models` section as
+`reader: <model>` and `simulator: <model>` lines.
+
+The one exception: a competitor system tested as its vendor ships it keeps its
+built-in model. Name it on a `vendor-default: <model> <system>` line in `## Models`
+(for example `vendor-default: gpt-4o-mini Mem0 1.2 as shipped`). It covers that
+system's arm only: the arm whose loadout names the system (`gpt-4o-mini#mem0`),
+never a plain or `#no-gstack` arm on the same model, a judge, a reader or a
+simulator. `prereg --check` prints
+it as `MODEL_EXCEPTION:`, and `results --check` refuses results that never name
+the model. Published rows measured on gpt-4o stay up, labelled with the model
+they ran; a plan with a `frozen:` date before 2026-11-21 keeps the models it
+named.
+
+Cross-family review voices and a harness's shipped housekeeping model aren't eval
+roles a plan chooses, so this check doesn't read them.
 
 **The check.** `gstack-eval-plan dry-run` prints `CHECK: frontier` whenever an arm
 is Haiku or Sonnet. When every arm is one, the dry run fails unless
 `--tier-question "<what the preregistration asks about that tier>"` is passed.
 When only some arms are, it warns. Either way it prints the whole plan's price
-on `claude-opus-5-5` and `gpt-6.1-sol`. The dry run doesn't enforce that number:
+on `claude-opus-5-5` and `gpt-6.2-sol`. The dry run doesn't enforce that number:
 compare it with the brief cap before any arm is swapped. `pilot start` refuses a
 pilot whose every arm is Haiku or Sonnet unless its dry run recorded a tier
 question.
+
+For R116, `prereg --check` prints `MODEL_GENERATION: refused <model> role=<role>
+replacement=<model>` for each refused use, adds `models=refused` to its `PREREG:`
+line and exits 1 with `EVAL_MODEL_OLD_GENERATION`. `dry-run` prints `CHECK:
+model-generation refused …` and fails, and `pilot start` refuses an
+older-generation arm even when its dry run passed on other arms.
+
+**Judge labels (R78 amendment).** Garry approved on 2026-11-21: a plan frozen on
+or after 2026-11-22, or with no `frozen:` line, checks its model judge against at
+least 100 hand-labelled outputs before the judge's numbers count. The kappa bar
+stays 0.6. A plan frozen earlier keeps 40. `prereg --check`, `judge --check` and
+`results --check` all read the bar from the plan's `frozen:` date.
 
 ## Running evals as an agent: detach
 
