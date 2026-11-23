@@ -276,7 +276,8 @@ else
     125) echo "ASIDE_UNAVAILABLE: bounded probe unavailable" ;;
     0) if printf '%s\n' "$_o" | grep -q '^ASIDE_READY '; then echo "READY: $_A"
        else echo "ASIDE_NOT_RUNNING: no readiness marker"; fi ;;
-    *) echo "ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally" ;;
+    *) case "$_o" in *"isn't running"*) echo "ASIDE_NOT_RUNNING: app not running" ;;
+       *) echo "ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally" ;; esac ;;
   esac
   unset _o
 fi
@@ -758,11 +759,11 @@ Follow the preamble's session rules; `CONDUCTOR_SESSION: true` changes transport
 2. Recommend without selecting. Count distinct planned file additions, edits and
    deletions; mark estimated counts as estimates. Apply the first matching rule:
    - For >15 planned changed files, recommend SCOPE REDUCTION.
-   - If categories overlap or are unclear, explain why and recommend HOLD SCOPE.
+   - If categories overlap or are unclear, recommend HOLD SCOPE.
    - Otherwise: a new product/system (greenfield) → SCOPE EXPANSION;
      added capability → SELECTIVE EXPANSION; fix/refactor → HOLD SCOPE.
-   In the Recommendation's `because` clause, connect a concrete plan fact or
-   constraint to this mode's actual benefit or tradeoff, not just its count/category.
+   In the `because` clause, name a plan fact and what this mode does with it that
+   the nearest other mode would not; never a count or category alone.
 3. Resolve that recommendation. When `QUESTION_TUNING: true`, first check `question_id=plan-ceo-review-mode` through the preamble's
    `gstack-question-preference --check`.
    A check that exits 0 with `AUTO_DECIDE` selects the recommendation; go to the automatic handoff in

@@ -53,7 +53,7 @@ import { approvalForReceipt } from '../lib/approval-citations';
 import {
   CARRY_NAMED_PATHS,
   bindReceipt, carryReceipt, recheckCarried, classifyCarryPath, computeCensus, extractReceipt, landedStackParent, missingIssueLines, orderReceipt, parseReviewLoop, placeReceipt, planCarry, planTreeCarry,
-  receiptIssuesFrom, receiptRuns, receiptSummaryLine, renderCensus, renderReceiptBlock, unruledOpenBlockers, validateReceipt, type CensusPr,
+  RUNS_FENCE, receiptIssuesFrom, receiptRuns, receiptSummaryLine, renderCensus, renderReceiptBlock, unruledOpenBlockers, validateReceipt, type CensusPr,
 } from '../lib/ship-receipt';
 import { checkDocsCaps, docsCapLine, docsExceptionLine, parseReceiptDocs } from '../lib/ship-receipt-docs';
 import { comparePath, contextPacket, PACKET_SECTION_CAP, readScopedReview, touchedPaths } from '../lib/ship-patch';
@@ -68,8 +68,9 @@ import { appliedGateDispositions, gateDispositionText, publicGateDisposition } f
 import { securityFingerprints } from '../lib/security-findings';
 import { laneExceptionBodyLines } from '../lib/test-lane-exception';
 import { abandonMarker, grantedStop, grantMarker, historyLine, placeRunEntry, prReviewHistory, receiptedRun, reviewRoute, runStub, stopFrom, stopMarker } from '../lib/pr-review-history';
-import { changeRunRecord } from '../lib/ship-run-record';
-import { grantFor, publicRoundGrant, readReviewRoundGrants, type ReviewRoundGrant } from '../lib/review-round-grant';
+import { changeRunRecord, readRunRecord } from '../lib/ship-run-record';
+import { splitAgentNotes, withAgentNotes } from '../lib/agent-notes';
+import { grantFor, grantForPr, publicRoundGrant, readReviewRoundGrants, type ReviewRoundGrant } from '../lib/review-round-grant';
 import { readMechanicalLines } from '../lib/ship-mechanical';
 import { patchId, productPatchAgainstBase, productRules, productSpec, verifiedOutputs } from '../lib/ship-receipt-patch';
 import { runCalls } from '../lib/ship-clock';
@@ -160,6 +161,9 @@ write flags: --pr --head --base --version --gated-tree --predecessor --gate <jso
   with the content HEAD holds, each excluded or kept only because code names it (GST-1429); prints REVIEW_EXCLUDE_DOCS_AUDIT: and
   records HEAD's selection. Any other change, or an unreadable snapshot, refuses as above. --docs-pre <Prepare snapshot> (the same
   audit's first snapshot) narrows the audit's files to those whose content it changed, so uncommitted docs the review read stay.
+  An audit file the review kept for its own content (gate path, gate tags, agent prose, a secret line) refuses with
+  RECEIPT_DOCS_AUDIT_READ and writes a packet of the audit's change for one scoped reader, not a review round (GST-3532);
+  --docs-audit-read <record.json> (its clean { head, paths, reviewer, verdict, packet_sha256 }) binds it as docs_audit_read.
   When a run audits twice, the last audit's post snapshot carries the earlier audit (gstack-docs-candidate snapshot --run --pre
   --carry): files the earlier audit edited reset too, to their content before it, when HEAD holds what it left; a carried audit of
   another run refuses (GST-1616).
@@ -266,7 +270,7 @@ function callsArg(rest: string[]): number | undefined {
   try { return runCalls(record, process.env) ?? undefined; } catch (e: any) { throw new Error(`--budget-record ${record}: ${e.message}`); }
 }
 
-function cmdWrite(rest: string[], json: boolean): number {
+async function cmdWrite(rest: string[], json: boolean): Promise<number> {
   const repoRoot = git(['rev-parse', '--show-toplevel']) ?? process.cwd();
   const checkedOut = git(['rev-parse', 'HEAD'], repoRoot);
   const head = flag(rest, '--head') ?? checkedOut;
@@ -286,7 +290,7 @@ function cmdWrite(rest: string[], json: boolean): number {
   let pregate: PregateField | undefined;
   const pregateFile = flag(rest, '--pregate');
   if (pregateFile) {
-    const read = pregateFieldFor(repoRoot, pregateFile, head);
+    const read = pregateFieldFor(repoRoot, pregateFile, head, flag(rest, '--base'));
     if (!read.ok) { for (const e of read.errors) process.stderr.write(resultLine('gstack-ship-receipt write', e.code, `${e.message}; nothing written`) + '\n'); return EXIT.fail; }
     pregate = read.field;
   }
@@ -348,7 +352,15 @@ function cmdWrite(rest: string[], json: boolean): number {
   if (review.exclude.state === 'refused') { for (const l of review.exclude.lines) process.stderr.write(`${l}; nothing written\n`); return EXIT.refused; }
   const excludeNow = review.exclude.state === 'active' ? review.exclude.record : null;
   const excludeGiven = flag(rest, '--review-exclude') ?? 'none';
-  const excludeBound = writeExcludeBinds(repoRoot, base, headSha ?? head, review, flag(rest, '--review-exclude'), flag(rest, '--docs-post'), flag(rest, '--docs-pre'));
+  const excludeBound = writeExcludeBinds(repoRoot, base, headSha ?? head, review, flag(rest, '--review-exclude'), flag(rest, '--docs-post'), flag(rest, '--docs-pre'), flag(rest, '--docs-audit-read'));
+  if (!excludeBound.ok && excludeBound.packet) {
+    const at = headSha ?? head;
+    const packet = path.resolve(repoRoot, git(['rev-parse', '--git-path', `gstack/docs-audit-read-${at.slice(0, 12)}.md`], repoRoot) ?? `.git/gstack/docs-audit-read-${at.slice(0, 12)}.md`);
+    try { fs.mkdirSync(path.dirname(packet), { recursive: true }); fs.writeFileSync(packet, excludeBound.packet.text); }
+    catch (e) { process.stderr.write(`gstack-ship-receipt write: ${excludeBound.why}, but the reader's packet ${packet} cannot be written (${(e as Error).message.split('\n')[0]}); make its directory writable, then rerun write; nothing written\n`); return EXIT.fail; }
+    process.stderr.write(resultLine('gstack-ship-receipt write', 'RECEIPT_DOCS_AUDIT_READ', `${excludeBound.why}: one scoped reader (not a review round) reads ${packet}, then rerun write with --docs-audit-read <record.json> written outside the worktree ({"head":"${at}","paths":${JSON.stringify(excludeBound.packet.paths)},"reviewer":"<model>","verdict":"clean","packet_sha256":"${excludeBound.packet.sha256}"}); a finding goes to the lane's Captain; nothing written`) + '\n');
+    return EXIT.fail;
+  }
   if (!excludeBound.ok) {
     process.stderr.write(`gstack-ship-receipt write: field=review_exclude expected=${excludeNow?.digest ?? 'none'} recorded=${excludeGiven} source=${excludeNow?.source ?? `origin/${base} (no review_exclude_paths)`}: the --review-exclude argument names another selection than ${base}'s review_exclude_paths gives ${head.slice(0, 12)} (write compares the argument, not the review ledger)${flag(rest, '--review-exclude') === undefined ? '; no --review-exclude was given, so write compared none' : ''}${excludeBound.why ? `; the docs-audit exception does not apply: ${excludeBound.why}` : ''}; fix: when only Step 14.5's docs audit changed files under review_exclude_paths after the review, pass its --docs-post <audit-id>-post.json and --docs-pre <its Prepare snapshot>; otherwise rerun /ship's review on ${head.slice(0, 12)} (gstack-review-dispatch pass --base ${base}), run gstack-review-dispatch verify --ledger <ledger> and write with the --review-exclude <d> its REVIEW_EXCLUDE_RECORD: line prints (none when it prints no such line); nothing written (RECEIPT_INVALID)\n`);
     return EXIT.fail;
@@ -379,7 +391,18 @@ function cmdWrite(rest: string[], json: boolean): number {
     const loopRaw = jsonArg(flag(rest, '--review-loop'));
     const reviewLoop = loopRaw ? parseReviewLoop(loopRaw) : undefined;
     if (loopRaw && !reviewLoop) throw new Error('--review-loop needs integer passes, blocking_found and deferred (gstack-review-scope summary --out <file>, then @<file>)');
-    const open = unruledOpenBlockers(loopRaw, ruledNotes, ruledHead => spawnSync('git', ['merge-base', '--is-ancestor', ruledHead, headSha ?? head], { cwd: repoRoot, timeout: 30_000 }).status === 0);
+    const ruledOpen = unruledOpenBlockers(loopRaw, ruledNotes, ruledHead => spawnSync('git', ['merge-base', '--is-ancestor', ruledHead, headSha ?? head], { cwd: repoRoot, timeout: 30_000 }).status === 0);
+    const at = headSha ?? head, baseRef = `origin/${base.replace(/^origin\//, '')}`, run = flag(rest, '--run'), pr = Number(flag(rest, '--pr'));
+    const blockers = (Array.isArray(loopRaw?.open) ? loopRaw.open : []).filter((b: any) => ruledOpen.includes(typeof b === 'string' ? b : b?.id));
+    const rows = ruledOpen.length ? reviewRows(repoRoot) ?? [] : [];
+    const grants = ruledOpen.length ? readReviewRoundGrants(repoRoot).filter(g => g.kind === 'fix-check' && grantForPr(g, pr)) : [];
+    const live = grants.length && !receiptRuns(bodyText).length && flag(rest, '--pr') ? readBody(['--pr', flag(rest, '--pr')!, ...(flag(rest, '--repo') ? ['--repo', flag(rest, '--repo')!] : [])]) : undefined;
+    const clearing = ruledOpen.length ? await import('../lib/fix-check-clearing') : undefined;
+    const byGrant = !grants.length || !clearing ? undefined : !run ? { ids: [], why: 'write names no --run, so no run spent the grant' } : clearing.clearByGrant(repoRoot, { pr, run, head: at, baseRef, body: live?.ok ? live.body : bodyText, grants, rows, open: blockers });
+    const byTrailer = clearing ? clearing.clearByTrailer(repoRoot, { head: at, baseRef, rows, open: blockers }) : [];
+    if (byGrant) process.stderr.write(`FIX_CHECK_CLEAR: ${byGrant.ids.length ? `grant=${byGrant.approval} run=${byGrant.run} closed=${byGrant.ids.join(',')}` : 'none'}${byGrant.why ? ` (${byGrant.why})` : ''}\n`);
+    for (const t of byTrailer) process.stderr.write(`TRAILER_CLEAR: ${t.id} (fixed by ${t.commit.slice(0, 12)}, read clean by the full review at ${t.review.slice(0, 12)})\n`);
+    const open = ruledOpen.filter(id => !byGrant?.ids.includes(id) && !byTrailer.some(t => t.id === id));
     if (open.length) { process.stderr.write(resultLineWithDocs('gstack-ship-receipt write', 'RECEIPT_BLOCKER_OPEN', `${open.join(', ')}; nothing written`) + '\n'); return EXIT.refused; }
     input = {
       schema_version: 1, pr: flag(rest, '--pr') !== undefined ? Number(flag(rest, '--pr')) : undefined, head,
@@ -393,11 +416,12 @@ function cmdWrite(rest: string[], json: boolean): number {
       policy: flag(rest, '--policy') ?? tree?.policy, queue_mode: flag(rest, '--queue-mode'), preregistration: flag(rest, '--preregistration'), history: flag(rest, '--history'),
       ...pregate, issues: issuesFile ? receiptIssuesFrom(issuesFile) : undefined, approval: approval.kind === 'ok' ? approval.approval : undefined,
       review_loop: reviewLoop, ...(docs?.ok ? { docs: docs.docs } : {}), ...product,
-      gstack_version: installedGstackVersion(), review_depth: reviewDepth, review_loop_exception: loopException?.ok ? loopException.exception : undefined, review_round_grants: roundGrantsFor(repoRoot, flag(rest, '--pr'))?.map(g => publicRoundGrant(g, ruledNotes)), ruled_notes: ruledNotes.length ? ruledNotes.map(publicRuledNote) : undefined, gate_dispositions: gateDispositions.map(publicGateDisposition), mechanical: mechanical.length ? mechanical : undefined, review_targeted: targeted?.ok ? targeted.targeted : undefined,
+      gstack_version: installedGstackVersion(), review_depth: reviewDepth, review_loop_exception: loopException?.ok ? loopException.exception : undefined, review_round_grants: roundGrantsFor(repoRoot, flag(rest, '--pr'))?.map(g => publicRoundGrant(g, ruledNotes)), cleared_by_grant: byGrant?.ids.length ? { approval: byGrant.approval!, run: byGrant.run!, ids: byGrant.ids } : undefined, cleared_by_trailer: byTrailer.length ? byTrailer : undefined, ruled_notes: ruledNotes.length ? ruledNotes.map(publicRuledNote) : undefined, gate_dispositions: gateDispositions.map(publicGateDisposition), mechanical: mechanical.length ? mechanical : undefined, review_targeted: targeted?.ok ? targeted.targeted : undefined,
       design: review.frontend ? { mode: 'static', reason: 'no preview declared' } : undefined,
       base_red: pause ? receiptBaseRed(pause) : undefined,
       review_exclude: receiptExclude(review.exclude),
       review_exclude_fallback: receiptExcludeFallback(review.exclude),
+      docs_audit_read: excludeBound.read,
       no_stop: noStopArg(flag(rest, '--no-stop')),
     };
   } catch (e: any) { process.stderr.write(`gstack-ship-receipt write: ${e.message}\n`); return EXIT.usage; }
@@ -424,10 +448,31 @@ function cmdWrite(rest: string[], json: boolean): number {
   const block = renderReceiptBlock(receipt);
   const out = flag(rest, '--out');
   if (out) fs.writeFileSync(out, block);
-  if (body) fs.writeFileSync(body, placeReceipt(fs.existsSync(body) ? fs.readFileSync(body, 'utf8') : '', receipt));
+  const closed = [...(receipt.cleared_by_grant ? [`Closed by grant ${receipt.cleared_by_grant.approval}: ${receipt.cleared_by_grant.ids.join(', ')} (the granted fix-check of run ${receipt.cleared_by_grant.run} read the fix clean)`] : []),
+    ...(receipt.cleared_by_trailer ?? []).map(t => `Closed by fix ${t.commit.slice(0, 12)}: ${t.id} (a later full review at ${t.review.slice(0, 12)} read it clean)`)];
+  if (body) {
+    let text = fs.existsSync(body) ? fs.readFileSync(body, 'utf8') : '';
+    const pr = flag(rest, '--pr');
+    if (pr && fs.existsSync(body) && !extractReceipt(text).found && !receiptRuns(text).length) {
+      const live = readBody(['--pr', pr, ...(flag(rest, '--repo') ? ['--repo', flag(rest, '--repo')!] : [])]);
+      const prior = live.ok ? extractReceipt(live.body).receipt : undefined;
+      const runs = live.ok ? receiptRuns(live.body) : [];
+      if (!live.ok) process.stderr.write(`RECEIPT_RUNS: PR #${pr}'s earlier runs were not read (${live.why}), so ${body} keeps only this run; fix: ${live.fix}\n`);
+      else if (prior || runs.length) text = withAgentNotes(text, [(splitAgentNotes(text).notes ?? '').trim(), prior ? renderReceiptBlock(prior) : '', runs.length ? '```' + RUNS_FENCE + '\n' + runs.map(r => JSON.stringify(r)).join('\n') + '\n```\n' : ''].filter(Boolean).join('\n\n'));
+    }
+    const notes = splitAgentNotes(text).notes ?? '';
+    const lines = closed.filter(l => !notes.includes(l));
+    fs.writeFileSync(body, placeReceipt(lines.length ? withAgentNotes(text, [notes.trim(), ...lines].filter(Boolean).join('\n\n')) : text, receipt));
+  }
   process.stderr.write(receiptSummaryLine(receipt) + '\n');
   process.stdout.write(json ? JSON.stringify(receipt) + '\n' : block);
   return EXIT.ok;
+}
+
+/** The branch's review-log rows as gstack-review-read prints them, or null when it fails. */
+function reviewRows(repoRoot: string): Record<string, any>[] | null {
+  const log = runScriptSync(path.join(path.dirname(Bun.fileURLToPath(import.meta.url)), 'gstack-review-read'), [], { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+  return log.status !== 0 ? null : (log.stdout ?? '').split('\n---CONFIG---')[0]!.split('\n').flatMap(l => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
 }
 
 function cmdRead(rest: string[], json: boolean): number {
@@ -555,10 +600,10 @@ function gitVersionBelow(repoRoot: string, minimum: string): string | null {
 
 type PregateField = { pregate: string; requires_remote?: string[]; flaky_exception?: ShipReceipt['flaky_exception'] };
 /** A pregate result file → the receipt's pregate field, verified current for this checkout's tree (shared by write and carry). */
-function pregateFieldFor(repoRoot: string, file: string, head: string): { ok: true; field: PregateField } | { ok: false; errors: Array<{ code: string; message: string }> } {
+function pregateFieldFor(repoRoot: string, file: string, head: string, base?: string): { ok: true; field: PregateField } | { ok: false; errors: Array<{ code: string; message: string }> } {
   const read = readPregateFile(file);
   if (!read.file) return { ok: false, errors: read.errors.map(e => ({ code: e.code, message: `${e.message} at ${e.path}` })) };
-  const v = verifyPregate(repoRoot, read.file);
+  const v = verifyPregate(repoRoot, read.file, undefined, base);
   if (!v.ok) return { ok: false, errors: [{ code: v.code!, message: v.message ?? 'pregate is not current' }] };
   const foreign = exceptionConsumerProblem(read.file, head);
   if (foreign) return { ok: false, errors: [{ code: 'PREGATE_REMOTE_UNCLEARED', message: foreign }] };
@@ -812,7 +857,7 @@ function cmdCarry(rest: string[], json: boolean): number {
   if (pregateFile) {
     const local = git(['rev-parse', 'HEAD'], repoRoot)?.trim();
     if (local !== head) return refused('RECEIPT_CARRY_PREGATE_STALE', `--pregate verifies this checkout's tree, but the checkout is at ${local?.slice(0, 12) ?? 'no commit'}, not the carried head ${head.slice(0, 12)}; check out ${head.slice(0, 12)} and run gstack-pregate there`);
-    const read = pregateFieldFor(repoRoot, pregateFile, head);
+    const read = pregateFieldFor(repoRoot, pregateFile, head, flag(rest, '--base'));
     if (!read.ok) return refused('RECEIPT_CARRY_PREGATE_STALE', `--pregate ${pregateFile}: ${read.errors[0]?.code ?? 'invalid'} ${read.errors[0]?.message ?? ''}`.trim());
     pregateField = read.field;
   } else if (receipt.pregate && !rest.includes('--dry-run')) {
@@ -1003,9 +1048,8 @@ function cmdStop(rest: string[]): number {
   if (!repoRoot) { process.stderr.write('gstack-ship-receipt stop: run it inside the git checkout\n'); return EXIT.usage; }
   const read = readBody(rest);
   if (!read.ok) { process.stderr.write(`gstack-ship-receipt stop: ${read.why}; fix: ${read.fix}\n`); return EXIT.fail; }
-  const log = runScriptSync(path.join(path.dirname(Bun.fileURLToPath(import.meta.url)), 'gstack-review-read'), [], { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
-  if (log.status !== 0) { process.stderr.write(`gstack-ship-receipt stop: gstack-review-read exited ${log.status}; nothing recorded\n`); return EXIT.fail; }
-  const rows = (log.stdout ?? '').split('\n---CONFIG---')[0]!.split('\n').flatMap(l => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
+  const rows = reviewRows(repoRoot);
+  if (!rows) { process.stderr.write('gstack-ship-receipt stop: gstack-review-read failed; nothing recorded\n'); return EXIT.fail; }
   const headNow = git(['rev-parse', 'HEAD'], repoRoot) ?? '';
   const found = stopFrom(rows, since, { treeOf: c => git(['rev-parse', '--verify', '--quiet', `${c}^{tree}`], repoRoot), onHead: c => ancestorIn(repoRoot)(c, headNow) });
   if (!found.ok) { process.stderr.write(`${resultLine('gstack-ship-receipt stop', 'STOP_UNBOUND', `${found.why}; no stop record, so no fix-check grant can answer this stop`)}\n`); return EXIT.refused; }
@@ -1018,17 +1062,24 @@ function cmdStop(rest: string[]): number {
 }
 
 /** Before a granted round's first dispatch: this run spends the grant, so no other run can buy the same round with it. */
-function cmdClaim(rest: string[]): number {
+async function cmdClaim(rest: string[]): Promise<number> {
   const run = flag(rest, '--run'), id = flag(rest, '--grant');
   if (!run || !/^[\w.:-]{1,120}$/.test(run) || !id) { process.stderr.write('gstack-ship-receipt claim: --run <the /ship run id> and --grant <approval id> are required\n'); return EXIT.usage; }
   const repoRoot = git(['rev-parse', '--show-toplevel']);
   if (!repoRoot) { process.stderr.write('gstack-ship-receipt claim: run it inside the git checkout\n'); return EXIT.usage; }
   const read = readBody(rest);
   if (!read.ok) { process.stderr.write(`gstack-ship-receipt claim: ${read.why}; fix: ${read.fix}\n`); return EXIT.fail; }
-  const g = readReviewRoundGrants(repoRoot).find(x => x.approval === id);
-  if (!g) { process.stderr.write(`${resultLine('gstack-ship-receipt claim', 'GRANT_UNKNOWN', `no approved review_round_grant row ${id} in this branch's approval record`)}\n`); return EXIT.refused; }
+  const grants = readReviewRoundGrants(repoRoot), g = grants.find(x => x.approval === id);
+  if (!g) { process.stderr.write(`${resultLine('gstack-ship-receipt claim', 'GRANT_UNKNOWN', `no approved fix-check or round grant ${id} (a gstack-approvals round-grant row, or an owner's review_loop_grant <head> row) in this branch's approval record`)}\n`); return EXIT.refused; }
   const other = receiptRuns(read.body).find(r => r.mark === 'grant' && r.grant === id && r.run !== run);
   if (other) { process.stderr.write(`${resultLine('gstack-ship-receipt claim', 'GRANT_SPENT', `grant ${id} was claimed by run ${other.run}: a grant buys one round; the lane or its Captain records a new one`)}\n`); return EXIT.refused; }
+  const held = receiptRuns(read.body).some(r => r.mark === 'grant' && r.grant === id && r.run === run);
+  if (!held && g.kind === 'fix-check') {
+    const rows = reviewRows(repoRoot);
+    if (!rows) { process.stderr.write(`gstack-ship-receipt claim: gstack-review-read failed, so whether a fix-check already spent grant ${id} is unknown; not claimed, so do not dispatch\n`); return EXIT.fail; }
+    const { bindFixCheckRow, grantSpent } = await import('../lib/fix-check-clearing');
+    if (grantSpent(rows, g, row => bindFixCheckRow(repoRoot, row, grants, { open: true }).ok)) { process.stderr.write(`${resultLine('gstack-ship-receipt claim', 'GRANT_SPENT', `a counted fix-check already read under grant ${id} (it carries the grant, or started after the grant was recorded): a grant buys one round; the lane or its Captain records a new one (docs/troubleshooting.md#pr-round-cap)`)}\n`); return EXIT.refused; }
+  }
   const err = postBody(rest, read.pr, placeRunEntry(read.body, grantMarker({ head: g.head, run, grant: id })));
   if (err) { process.stderr.write(`gstack-ship-receipt claim: ${err}; not claimed, so do not dispatch\n`); return EXIT.fail; }
   const handedOff = !flag(rest, '--body') && hostPublishes();
@@ -1036,7 +1087,10 @@ function cmdClaim(rest: string[]): number {
   if (!again.ok) { process.stderr.write(`gstack-ship-receipt claim: ${again.why}; the claim is unconfirmed, so do not dispatch\n`); return EXIT.fail; }
   const first = receiptRuns(again.body).find(r => r.mark === 'grant' && r.grant === id);
   if (first?.run !== run) { process.stderr.write(`${resultLine('gstack-ship-receipt claim', 'GRANT_SPENT', `grant ${id} was claimed by run ${first?.run ?? 'another run'} while this run claimed it: a grant buys one round; the lane or its Captain records a new one`)}\n`); return EXIT.refused; }
-  const recorded = changeRunRecord(repoRoot, 'claim', run, { claim: { grant: id, ...(g.stop_run ? { stop_run: g.stop_run } : {}), stop_head: g.head, findings: g.findings ?? [] } });
+  const bodyPr = read.pr ?? flag(rest, '--pr');
+  const claimPr = g.pr || (bodyPr && /^[1-9]\d*$/.test(bodyPr) ? Number(bodyPr) : undefined);
+  const recorded = changeRunRecord(repoRoot, 'claim', run, { claim: { grant: id, ...(g.stop_run ? { stop_run: g.stop_run } : {}), stop_head: g.head, findings: g.findings ?? [], ...(claimPr ? { pr: claimPr } : {}) } });
+  if (!recorded.ok && readRunRecord(repoRoot).kind !== 'none') { process.stderr.write(`gstack-ship-receipt claim: the run record did not take the claim (${recorded.why}); not claimed, so do not dispatch: the PR body already holds run ${run}'s claim, so rerun claim with this same --run once the record is writable (a new run id reads GRANT_SPENT)\n`); return EXIT.fail; }
   process.stdout.write(`GRANT_CLAIMED: grant=${id} kind=${g.kind} run=${run} head=${g.head.slice(0, 12)}\n${recorded.ok ? '' : `RUN_RECORD: claim not recorded (${recorded.why})\n`}`);
   return EXIT.ok;
 }
@@ -1075,7 +1129,7 @@ function cmdAbandoned(rest: string[]): number {
   return EXIT.ok;
 }
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   const json = rest.includes('--json');
   if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') { process.stdout.write(HELP + '\n'); return cmd ? EXIT.ok : EXIT.usage; }
@@ -1094,4 +1148,4 @@ function main(argv: string[]): number {
   return EXIT.usage;
 }
 
-process.exitCode = main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2));

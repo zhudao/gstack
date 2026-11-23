@@ -44,6 +44,8 @@ import { secretExcerpt } from './review-secret-excerpt';
 import { cmpVersion, parseVersion } from './version-source';
 import { REVIEW_EXCLUDE_KEY_VERSION, SHIP_POLICY_PATH, isUnavailable, policyUnavailableLine } from './ship-policy';
 import { loadPolicyAt } from './ship-policy-at';
+import { resolveStateRoot } from './state-root';
+import { vendoredCacheRoot, vendoredPolicy, vendoredSelection, type VendoredSelection } from './review-vendored';
 
 /** The most diff bytes one reader is handed (about 500K tokens); above it the pass stops instead of truncating. */
 export const REVIEW_DIFF_MAX_BYTES = 2_000_000;
@@ -61,12 +63,16 @@ export type KeptReason = (typeof KEPT_REASONS)[number];
 export interface ExcludeRecord {
   source: string; patterns: string[]; applied: string[]; unmatched: string[];
   excluded: number; excluded_bytes: number; kept: number; gate_tagged: string[]; patterns_sha256: string; list_sha256: string; digest: string;
+  /** Excluded files that are verified vendored upstream files (docs/vendored-code.md); absent when none are. */
+  vendored?: number;
 }
 export interface ActiveExclusion {
   state: 'active'; record: ExcludeRecord; excluded: Set<string>; specs: string[]; keep: string[];
   /** The kept files (a subset of keep, as `:(top,literal)` items) whose only reason is a secret line, or gate tags on data lines: pass readers get an excerpt. */
   excerpt: string[];
   kept: Array<{ path: string; reason: KeptReason }>; content: Record<ContentKind, number>; references: Array<{ prefix: string; files: string[] }>;
+  /** The base policy's review_vendored check over the matched files; absent when the base declares none. */
+  vendored?: VendoredSelection | { error: string };
 }
 export type Exclusion =
   | { state: 'none' }
@@ -89,6 +95,8 @@ export interface ExcludeInput {
   gateTagged?: ReadonlySet<string> | null;
   /** The command name the refusal lines start with. */
   context: string;
+  /** Fetch review_vendored upstreams into the cache first (gstack-review-plan); every other caller reads the cache offline. */
+  vendoredFetch?: boolean;
 }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -300,13 +308,13 @@ function attributeBinaryLines(i: ExcludeInput, paths: readonly string[], unread:
 }
 
 /** The kind of content a path holds when the policy may exclude it, or null for code (tests included). */
-export type ContentKind = 'binary' | 'data' | 'docs' | 'log' | 'declared';
+export type ContentKind = 'binary' | 'data' | 'docs' | 'log' | 'declared' | 'vendored';
 /**
  * One range's input with the matched files a pattern names by their file name (its last segment, with no glob character): a
  * config name there is data; and the files a review_exclude_paths and a review_content_patterns pattern both match, which
  * the base policy declares content.
  */
-type Scope = ExcludeInput & { named?: ReadonlySet<string>; declared?: ReadonlySet<string>; keptDeclared?: ReadonlySet<string> };
+type Scope = ExcludeInput & { named?: ReadonlySet<string>; declared?: ReadonlySet<string>; keptDeclared?: ReadonlySet<string>; vendored?: ReadonlySet<string> };
 const config = (i: Scope, p: string) => isDataConfig(p) && !i.named?.has(p);
 /** Source code by its name, in any letter case: a program extension, or a build or task file name. A declared file with one stays code. */
 const SOURCE = /(?:\.(?:[cm]?[jt]sx?|py[iw]?|pyx|rb|erb|rake|sh|bash|zsh|fish|ksh|csh|ps1|psm1|psd1|bat|cmd|vbs|go|rs|dart|java|kt|kts|scala|sc|groovy|gradle|clj[sc]?|swift|m|mm|c|h|cc|cpp|cxx|hpp|hh|hxx|ino|cs|fs|fsx|vb|php|phtml|pl|pm|lua|r|jl|ex|exs|erl|hrl|hs|ml|mli|elm|zig|nim|v|sol|sql|vue|svelte|astro|html?|xhtml|css|scss|sass|less|wasm|wat|tf|hcl|nix|mk|cmake|bzl|star|awk|sed|asm|s|applescript|jsonnet|tmpl|ejs|hbs|jinja2?|j2|mdx)|(?:^|\/)(?:Makefile|GNUmakefile|Dockerfile|Containerfile|Rakefile|Gemfile|Brewfile|Justfile|Procfile|Vagrantfile|Jenkinsfile|Earthfile|Tiltfile|BUILD|WORKSPACE|CMakeLists\.txt|meson\.build)(?:\.[^/]*)?)$/i;
@@ -317,6 +325,7 @@ function contentKind(i: Scope, p: string, binary: ReadonlySet<string>): ContentK
   if (DATA_PATH.test(p) && !config(i, p)) return 'data';
   if (/\.log$/i.test(p)) return 'log';
   if (classifyPath(p, i.classRoot) === 'docs' && !SOURCE.test(p)) return 'docs';
+  if (i.vendored?.has(p)) return 'vendored';
   return declaredData(i, p) ? 'declared' : null;
 }
 
@@ -367,11 +376,56 @@ function pathReason(i: Scope, p: string, m: Matched, binary: ReadonlySet<string>
 
 /**
  * A file whose full-path reference keeps excluded content: a code or test file (not docs, data, a .log or binary) outside the
- * would-be-excluded set, or a declared file that stays in review (kept in this range, or an executable or link at `mode`).
+ * would-be-excluded set, or a declared file that stays in review (kept in this range, or an executable or link at `mode`). A
+ * verified vendored file counts as the code it is, excluded or not, so the files it names keep the selection they had before.
  */
-const consumer = (i: Scope, f: string, candidates: ReadonlySet<string>, mode?: string) =>
-  !candidates.has(f) && !f.startsWith('.gstack/tmp/') && (contentKind(i, f, new Set()) === null
-    || (!!i.declared?.has(f) && (!!i.keptDeclared?.has(f) || mode === '100755' || mode === '120000')));
+const consumer = (i: Scope, f: string, candidates: ReadonlySet<string>, mode?: string) => {
+  if (f.startsWith('.gstack/tmp/')) return false;
+  const kind = contentKind(i, f, new Set());
+  if (kind === 'vendored' && !declaredData(i, f)) return true;
+  return !candidates.has(f) && (kind === null || (!!i.declared?.has(f) && (!!i.keptDeclared?.has(f) || mode === '100755' || mode === '120000')));
+};
+
+/** A test file by name: `*.test.*`, `*.spec.*`, `*_test.go`, `*_test.py` or `test_*.py`. */
+const TEST_FILE = /\.(test|spec)\.[^/]+$|_test\.(go|py)$|(^|\/)test_[^/]+\.py$/;
+
+/** The quoted strings that are array entries (innermost open bracket [), by opening-quote offset; a forward scan that skips strings and comments. */
+function arrayEntries(body: string, hashComments: boolean): Map<number, string> {
+  const out = new Map<number, string>();
+  const open: string[] = [];
+  for (let k = 0; k < body.length; k++) {
+    const c = body[k]!;
+    if ((c === '/' && body[k + 1] === '/') || (hashComments && c === '#')) { const e = body.indexOf('\n', k); if (e < 0) break; k = e; continue; }
+    if (c === '/' && body[k + 1] === '*') { const e = body.indexOf('*/', k + 2); if (e < 0) break; k = e + 1; continue; }
+    if (c === "'" || c === '"' || c === '`') {
+      let e = k + 1;
+      for (; e < body.length && body[e] !== c; e++) { if (body[e] === '\\') e++; else if (body[e] === '\n' && c !== '`') break; }
+      if (open[open.length - 1] === '[') out.set(k, body.slice(k + 1, e));
+      k = e;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') open.push(c);
+    else if (c === ')' || c === ']' || c === '}') open.pop();
+  }
+  return out;
+}
+let lastEntries: { body: string; py: boolean; entries: Map<number, string> } | null = null;
+
+/**
+ * Whether a hit is the repo's own contract test for the exclusion pinning its pattern list and nothing more (GST-3512):
+ * the path is itself one of the base policy's review_exclude_paths patterns, and the test file names
+ * review_exclude_paths and holds the path only as whole quoted array entries ('p', "p" or `p`; the scan skips other
+ * strings and comments). Such a test pins the list, so it keeps nothing. A path that is not a literal pattern (a hit or
+ * near-miss example), a quoted call argument (readFileSync('p')), an object value, a plain constant, a joined or prefixed
+ * path, or a mention in a comment still counts, and so does every non-test file.
+ */
+function contractExample(patterns: ReadonlySet<string>, s: string, file: string, body: string): boolean {
+  if (!patterns.has(s) || !TEST_FILE.test(file) || !body.includes('review_exclude_paths')) return false;
+  const py = file.endsWith('.py');
+  if (lastEntries?.body !== body || lastEntries.py !== py) lastEntries = { body, py, entries: arrayEntries(body, py) };
+  for (let at = body.indexOf(s); at >= 0; at = body.indexOf(s, at + 1)) if (lastEntries.entries.get(at - 1) !== s) return false;
+  return true;
+}
 
 /**
  * An uncapped search for fixed strings at the head (or the working tree) and `revs`: string -> the consumer files
@@ -385,7 +439,7 @@ const consumer = (i: Scope, f: string, candidates: ReadonlySet<string>, mode?: s
  * manifest (every line a digest and a path, lib/review-risk.ts) names files without reading them, so it keeps none. On a live tree, an entry git reads from its blob
  * (skip-worktree or assume-unchanged) goes into a second index grepped with --cached, as git grep itself would read it.
  */
-function grepFixed(i: Scope, strings: readonly string[], candidates: ReadonlySet<string>, revs: readonly string[]): Map<string, Set<string>> | null {
+function grepFixed(i: Scope, strings: readonly string[], candidates: ReadonlySet<string>, revs: readonly string[], skip?: (s: string, file: string, body: string) => boolean): Map<string, Set<string>> | null {
   const found = new Map<string, Set<string>>();
   if (!strings.length) return found;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-exclude-'));
@@ -433,7 +487,7 @@ function grepFixed(i: Scope, strings: readonly string[], candidates: ReadonlySet
         } else for (const f of files) try { bodies.set(f, fs.readFileSync(path.join(i.root, f), 'utf8')); } catch { return null; }
         for (const [file, body] of bodies) {
           if (hashManifest(body.split('\n'))) continue;
-          for (const s of strings) if (body.includes(s)) (found.get(s) ?? found.set(s, new Set()).get(s)!).add(file);
+          for (const s of strings) if (body.includes(s) && !skip?.(s, file, body)) (found.get(s) ?? found.set(s, new Set()).get(s)!).add(file);
         }
       }
     }
@@ -446,7 +500,7 @@ function grepFixed(i: Scope, strings: readonly string[], candidates: ReadonlySet
  * nothing); `head-only` when only the head does (a notice, never applied); `fallback` when the base policy fails only on its
  * exclusion keys, which finish (lib/ship-policy.ts) then sets aside so every file is reviewed; `refused` when the base policy cannot be read or
  * does not validate, or git cannot list the matches; `active` otherwise. Named-by-code keeps a file only when a kept code
- * file names its full repository path (never its basename: receipt trees reuse result.json thousands of times); a git grep
+ * file names its full repository path (not the exclusion's own contract test pinning it as a pattern, contractExample) (never its basename: receipt trees reuse result.json thousands of times); a git grep
  * failure keeps every candidate (consumer-scan-unavailable), and so does an unknown gate scan (gate-scan-unavailable) or a
  * matched text file with changed lines the collector holds no added lines for (GST-1451: it is unread, so it fails closed).
  */
@@ -460,6 +514,8 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
   }
   if (load.setAside) return { state: 'fallback', source, errors: load.setAside.map(e => `${e.path}: ${e.message}`) };
   const patterns = load.policy.review_exclude_paths;
+  const patternSet = new Set(patterns);
+  const example = (s: string, f: string, body: string) => contractExample(patternSet, s, f, body);
   if (!patterns.length) { const head = headPatterns(i); return head.length ? { state: 'head-only', patterns: head, source } : { state: 'none' }; }
   const sel = select(i, patterns);
   if ('error' in sel) return { state: 'refused', code: 'REVIEW_DIFF_UNREADABLE', lines: [`${i.context}: git could not list the files review_exclude_paths matches (${sel.error}); fix: git fetch origin ${base}, then rerun once; nothing was planned (REVIEW_DIFF_UNREADABLE)`] };
@@ -469,8 +525,12 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
   const native = new Set<string>();
   const claimed = i.perPath.filter(e => e.binary && sel.files.has(e.path)).map(e => e.path);
   const binary = binaryContent(i, sel.files, new Set([...claimed, ...(bytesBinary(i, patterns) ?? sel.files.keys())]), unread, native);
+  const vpol = vendoredPolicy(load.policy);
+  const hiddenManifest = vpol?.manifests.find(m => sel.files.has(m));
+  const vsel = hiddenManifest ? { error: `${hiddenManifest} matches review_exclude_paths, so readers would not see its pins` } : vpol ? vendoredSelection({ root: i.root, policy: vpol, head: i.head, mergeBase: i.mergeBase, changed: new Set(sel.files.keys()), fetch: !!i.vendoredFetch, cacheRoot: vendoredCacheRoot(resolveStateRoot()) }) : undefined;
+  const vendored = vsel && !('error' in vsel) ? new Set(vsel.verified) : undefined;
   const fileName = (s: string) => s.slice(s.lastIndexOf('/') + 1);
-  const x: Scope = { ...i, declared, named: new Set(patterns.flatMap(q => /[*?[\\]/.test(fileName(q)) ? [] : (sel.byPattern.get(q) ?? []).filter(f => fileName(f) === fileName(q)))) };
+  const x: Scope = { ...i, declared, vendored, named: new Set(patterns.flatMap(q => /[*?[\\]/.test(fileName(q)) ? [] : (sel.byPattern.get(q) ?? []).filter(f => fileName(f) === fileName(q)))) };
   const text = { ...x, added: { ...i.added, ...attributeBinaryLines(i, claimed.filter(p => !binary.has(p) && !unread.has(p)), unread) } };
   const collected = new Map(i.perPath.map(e => [e.path, e]));
   const unseen = (p: string) => { const e = collected.get(p); return !e || (!e.binary && e.lines > 0 && !(p in text.added)); };
@@ -478,14 +538,14 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
   for (const [p, m] of sel.files) reasons.set(p, unread.has(p) ? 'consumer-scan-unavailable' : pathReason(text, p, m, binary, native) ?? (unseen(p) ? 'consumer-scan-unavailable' : null));
   const candidates = new Set([...reasons].filter(([, r]) => r === null).map(([p]) => p));
   const secretOnly = [...reasons].filter(([p, r]) => r === 'secret-line' && !p.includes('\n')).map(([p]) => p);
-  const tagOnly = [...reasons].filter(([p, r]) => r === 'gate-tagged' && !p.includes('\n') && (GATE_DATA.test(p) || (/\.json$/i.test(p) && RESULTS_TREE.test(p)))
+  const tagOnly = [...reasons].filter(([p, r]) => r === 'gate-tagged' && !p.includes('\n') && (GATE_DATA.test(p) || (/\.json$/i.test(p) && RESULTS_TREE.test(p)) || !!vendored?.has(p))
     && !binary.has(p) && !unseen(p) && pathReason({ ...text, gateTagged: null }, p, sel.files.get(p)!, binary, native) === null).map(([p]) => p);
   const renamed = tagOnly.length ? renamedPaths(i) : null;
   const floorCtx = { project: parseGateIntegrityBlock(readClaudeMd(i.root)), specIsTestPath: true };
   const gateData = renamed ? tagOnly.filter(p => !renamed.has(p) && gateFloor(p, floorCtx) === null && singleLineTags(p, text.added[p] ?? [])) : [];
   const y: Scope = { ...x, keptDeclared: new Set([...reasons].filter(([p, r]) => r !== null && declared.has(p)).map(([p]) => p)) };
-  const named = grepFixed(y, [...candidates, ...secretOnly].filter(p => !p.includes('\n')), new Set([...candidates, ...secretOnly]), [i.mergeBase]);
-  const gateNamed = gateData.length ? grepFixed(y, gateData, new Set([...candidates, ...secretOnly]), [i.mergeBase]) : new Map<string, Set<string>>();
+  const named = grepFixed(y, [...candidates, ...secretOnly].filter(p => !p.includes('\n')), new Set([...candidates, ...secretOnly]), [i.mergeBase], example);
+  const gateNamed = gateData.length ? grepFixed(y, gateData, new Set([...candidates, ...secretOnly]), [i.mergeBase], example) : new Map<string, Set<string>>();
   for (const p of candidates) {
     if (i.gateTagged === null) reasons.set(p, 'gate-scan-unavailable');
     else if (named === null || p.includes('\n')) reasons.set(p, 'consumer-scan-unavailable');
@@ -504,7 +564,10 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
       const why = new Map<string, number>();
       for (const f of kept) why.set(reasons.get(f)!, (why.get(reasons.get(f)!) ?? 0) + 1);
       const top = [...why].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r}:${n}`).join(',');
-      return { state: 'refused', code: 'REVIEW_EXCLUDE_KEEP_TOO_LARGE', lines: [`${i.context}: review_exclude_paths pattern ${p} on ${source} keeps ${kept.length} matched files in review (${top}), and the command readers run to read them would need ${bytes} argument bytes (more than ${KEEP_ARG_MAX_BYTES}), so the pattern cannot be applied and is not dropped either; fix: when those files are published data, add a review_content_patterns entry for them beside the pattern on ${base} as its own PR (docs/ship-policy.md#review-content-patterns), else narrow the pattern or split the PR; nothing was planned (REVIEW_EXCLUDE_KEEP_TOO_LARGE)`] };
+      const unverified = vsel && !('error' in vsel) ? vsel.failed.filter(e => kept.includes(e.path)).length : 0;
+      const vfix = vsel && 'error' in vsel ? `the vendored check could not run (${vsel.error}), so no matched file counts as vendored; run gstack-vendored-verify --base ${base} and fix what it names, then rerun once; `
+        : unverified ? `${unverified} of them are manifest entries that do not count as vendored (they did not verify, or the merge base has them as our own code); run gstack-vendored-verify --base ${base} and fix what it names, then rerun once; ` : '';
+      return { state: 'refused', code: 'REVIEW_EXCLUDE_KEEP_TOO_LARGE', lines: [`${i.context}: review_exclude_paths pattern ${p} on ${source} keeps ${kept.length} matched files in review (${top}), and the command readers run to read them would need ${bytes} argument bytes (more than ${KEEP_ARG_MAX_BYTES}), so the pattern cannot be applied and is not dropped either; fix: ${vfix}when those files are published data, add a review_content_patterns entry for them beside the pattern on ${base} as its own PR (docs/ship-policy.md#review-content-patterns), else narrow the pattern or split the PR; nothing was planned (REVIEW_EXCLUDE_KEEP_TOO_LARGE)`] };
     }
     applied.push(p);
     for (const f of kept) keep.add(f);
@@ -513,20 +576,21 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
   const excerpt = [...excerptable].filter(p => keep.has(p)).sort();
   const keptList = [...reasons].filter(([, r]) => r !== null).map(([p, r]) => ({ path: p, reason: r! })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const sortedExcluded = [...excluded].sort();
-  const content: Record<ContentKind, number> = { binary: 0, data: 0, docs: 0, log: 0, declared: 0 };
+  const content: Record<ContentKind, number> = { binary: 0, data: 0, docs: 0, log: 0, declared: 0, vendored: 0 };
   for (const p of sortedExcluded) content[contentKind(x, p, binary)!]++;
   const prefixes = [...new Set(applied.map(literalPrefix).filter(Boolean))];
   const refs = grepFixed(y, prefixes, excluded, []) ?? new Map<string, Set<string>>();
   const patterns_sha256 = sha256(JSON.stringify(patterns));
-  const list_sha256 = sha256(JSON.stringify({ applied, excluded: sortedExcluded, kept: keptList.map(k => [k.path, k.reason]) }));
+  const list_sha256 = sha256(JSON.stringify({ applied, excluded: sortedExcluded, kept: keptList.map(k => [k.path, k.reason]), ...(vendored?.size ? { vendored: (vsel as VendoredSelection).digest } : {}) }));
   const record: ExcludeRecord = {
     source, patterns: [...patterns], applied, unmatched: patterns.filter(p => !(sel.byPattern.get(p) ?? []).length),
     excluded: excluded.size, excluded_bytes: excludedBytes(i, sortedExcluded, sel.files), kept: keptList.length,
     gate_tagged: keptList.filter(k => k.reason === 'gate-tagged').map(k => k.path), patterns_sha256, list_sha256, digest: sha256(`${patterns_sha256}\n${list_sha256}`),
+    ...(content.vendored ? { vendored: content.vendored } : {}),
   };
   return {
     state: 'active', record, excluded, specs: applied.map(p => `:(top,exclude,glob)${p}`), keep: [...keep].sort().map(literal), excerpt: excerpt.map(literal), kept: keptList, content,
-    references: prefixes.filter(p => refs.has(p)).map(p => ({ prefix: p, files: [...refs.get(p)!].sort() })),
+    references: prefixes.filter(p => refs.has(p)).map(p => ({ prefix: p, files: [...refs.get(p)!].sort() })), ...(vsel ? { vendored: vsel } : {}),
   };
 }
 
@@ -551,6 +615,14 @@ export function excludeLines(x: Exclusion, base: string): string[] {
   if (x.state === 'fallback') return [fallbackLine(x, base)];
   const r = x.record;
   const out = [`REVIEW_EXCLUDE: patterns=${r.applied.length}/${r.patterns.length} excluded=${r.excluded} bytes=${r.excluded_bytes} kept=${r.kept} content=${Object.entries(x.content).filter(([, n]) => n).map(([k, n]) => `${k}:${n}`).join(',') || 'none'} source=${r.source} digest=${r.digest}${r.unmatched.length ? ` unmatched=${r.unmatched.join(',')}` : ''}`];
+  const v = x.vendored;
+  if (v && 'error' in v) out.push(`REVIEW_VENDORED: unavailable (${v.error}); no vendored file is treated as verified; fix: gstack-vendored-verify --base ${base} (docs/vendored-code.md)`);
+  else if (v) {
+    out.push(`REVIEW_VENDORED: verified=${v.verified.length} unverified=${v.failed.length} pins=${v.pins.length} digest=${v.digest}`);
+    for (const p of v.pins) out.push(`REVIEW_VENDORED_PIN: ${p.upstream}@${p.commit.slice(0, 12)} reachable_from=${p.reachable_from ?? 'none'} files=${p.files} verified=${p.verified}`);
+    for (const f of v.failed.slice(0, 20)) out.push(`REVIEW_VENDORED_KEPT: ${f.verdict} ${f.path}${f.detail ? ` (${f.detail})` : ''}`);
+    if (v.failed.length > 20) out.push(`REVIEW_VENDORED_KEPT: +${v.failed.length - 20} more (gstack-vendored-verify --base ${base} --json lists every one)`);
+  }
   for (const k of x.kept.slice(0, 20)) out.push(`REVIEW_EXCLUDE_KEPT: ${k.reason} ${k.path}`);
   if (x.kept.length > 20) out.push(`REVIEW_EXCLUDE_KEPT: +${x.kept.length - 20} more (gstack-review-plan --json lists every kept file)`);
   const gated = x.excerpt.filter(s => x.kept.some(k => k.reason === 'gate-tagged' && literal(k.path) === s)).length;
@@ -560,8 +632,8 @@ export function excludeLines(x: Exclusion, base: string): string[] {
 }
 
 /** The one line every brief gets under an active exclusion; it names the selection digest the receipt binds (verify's REVIEW_EXCLUDE_RECORD). */
-export function disclosureLine(r: Pick<ExcludeRecord, 'source' | 'excluded' | 'excluded_bytes' | 'applied' | 'kept' | 'digest'>): string {
-  return `Excluded by base policy ${r.source} (selection ${r.digest}): ${r.excluded} files, ${r.excluded_bytes} bytes on this branch matching ${r.applied.join(' ') || 'no applied pattern'}. They are not in your diff; do not report on their absence. Kept despite a match: ${r.kept} files (listed in the plan).`;
+export function disclosureLine(r: Pick<ExcludeRecord, 'source' | 'excluded' | 'excluded_bytes' | 'applied' | 'kept' | 'digest' | 'vendored'>): string {
+  return `Excluded by base policy ${r.source} (selection ${r.digest}): ${r.excluded} files, ${r.excluded_bytes} bytes on this branch matching ${r.applied.join(' ') || 'no applied pattern'}. They are not in your diff; do not report on their absence. Kept despite a match: ${r.kept} files (listed in the plan).${r.vendored ? ` ${r.vendored} of the excluded files are vendored upstream files gstack verified byte for byte against the pins the base allowlists, each one new on this branch or already vendored at the merge base; the plan's REVIEW_VENDORED_PIN lines name the pins.` : ''}`;
 }
 /** The selection digest a disclosure line names, or undefined. */
 export const disclosureDigest = (line: string | undefined) => line?.match(/^Excluded by base policy \S+ \(selection ([0-9a-f]{64})\)/)?.[1];
@@ -635,17 +707,33 @@ function policyJson(patterns: readonly string[], floor?: string | null): string 
   return JSON.stringify({ review_exclude_paths: patterns, min_gstack_version: min });
 }
 
-/** Folders to suggest: the largest top directories, until what is left would fit. */
-function suggest(byDir: ReadonlyArray<[string, number]>, bytes: number): string[] {
+/** By path alone, whether review_exclude_paths could exclude a file: content (data, logs, docs, binary assets), never code or tests. */
+const excludableByPath = (p: string) => !SOURCE.test(p) && (DATA_PATH.test(p) || /\.log$/i.test(p) || BINARY_CONTENT_EXT.test(p) || classifyPath(p) === 'docs');
+
+/**
+ * Folders to suggest: the top directories holding the most bytes the policy could exclude (whole folders when only folder
+ * sizes are known), until what is left would fit; none when they cannot get the reader under the ceiling (#4369).
+ */
+function suggest(d: { bytes: number; byDir: ReadonlyArray<[string, number]>; byFile?: ReadonlyArray<[string, number]> }): string[] {
+  let byDir = d.byDir;
+  if (d.byFile?.length) {
+    const excludable = new Map<string, number>();
+    for (const [file, n] of d.byFile) {
+      if (!excludableByPath(file)) continue;
+      const dir = file.includes('/') ? file.split('/')[0]! : '(root)';
+      excludable.set(dir, (excludable.get(dir) ?? 0) + n);
+    }
+    byDir = [...excludable].sort((a, b) => b[1] - a[1]);
+  }
   const out: string[] = [];
-  let left = bytes;
+  let left = d.bytes;
   for (const [dir, n] of byDir) {
     if (left <= REVIEW_DIFF_MAX_BYTES || out.length >= 3) break;
     if (dir === '(root)') continue;
     out.push(`${dir}/**`);
     left -= n;
   }
-  return out;
+  return left <= REVIEW_DIFF_MAX_BYTES ? out : [];
 }
 
 /** The REVIEW_DIFF_TOO_LARGE line and object: the reader's bytes, the largest folders and files, and a fix chosen by where the policy stands. */
@@ -655,9 +743,10 @@ export function tooLargeLine(context: string, reader: string, d: { bytes: number
   const largest = (d.byFile ?? []).slice(0, 5);
   const split = largest.length ? `split the PR (largest files: ${largest.map(([f, n]) => `${named(f)} (${n} bytes)`).join(', ')})` : 'split the PR';
   const land = (patterns: readonly string[]) => `ask the repo owner to land ${policyJson(patterns, c.floor)} in ${SHIP_POLICY_PATH} on ${c.base} as its own PR (docs/ship-policy.md#review-exclude-paths), then bring ${c.base} into this branch and rerun once; if it is still over, ${split}`;
-  const dirs = suggest(d.byDir, d.bytes);
+  const dirs = suggest(d);
+  const fresh = dirs.filter(p => !c.record?.patterns.includes(p));
   const fix = c.state === 'head-only' ? `this branch declares review_exclude_paths, but only the copy on ${c.base} applies: ${land(c.headPatterns ?? [])}`
-    : c.state === 'active' ? `still over after excluding ${c.record?.excluded ?? 0} files; ${dirs.length ? land([...(c.record?.patterns ?? []), ...dirs.filter(p => !c.record?.patterns.includes(p))]) : split}`
+    : c.state === 'active' ? `still over after excluding ${c.record?.excluded ?? 0} files; ${fresh.length ? land([...(c.record?.patterns ?? []), ...fresh]) : split}`
     : dirs.length ? land(dirs) : split;
   const files = largest.length ? ` files=${largest.map(([f, n]) => `${/[\s,:"]/.test(f) ? JSON.stringify(f) : f}:${n}`).join(',')}` : '';
   const line = `${context}: the reader's diff is over the review ceiling (reader=${reader} bytes=${d.bytes} max=${REVIEW_DIFF_MAX_BYTES} top=${top}${files} policy=${c.source}); fix: ${fix}; nothing was written (REVIEW_DIFF_TOO_LARGE)`;

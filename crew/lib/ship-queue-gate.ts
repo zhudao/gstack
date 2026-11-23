@@ -21,6 +21,7 @@ import { spawnSync } from '../../lib/spawn-sync';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { mergeChangelogs } from '../../lib/changelog-check';
+import { removeWorktree } from '../../lib/git-worktree-lock';
 import { ensureTmpExcluded, restamp, versionFiles } from '../../lib/restamp';
 import type { ResultCodeName } from '../../lib/result-codes';
 import type { ShipPolicy } from '../../lib/ship-policy';
@@ -44,11 +45,11 @@ let hooksOff = false;
 /** land calls this first: none of its git calls runs a hook or fsmonitor, because land.merged_checks are repo commands that can write where the checkout's hooks live (lib/land-merged-checks.ts). Other queue commands keep the checkout's hooks, the managed pre-push guard among them. */
 export function queueHooksOff(): void { hooksOff = true; }
 
-export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string | Buffer): { ok: boolean; out: string; err: string; status: number | null } {
+export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string | Buffer, timeoutMs = 120_000): { ok: boolean; out: string; err: string; status: number | null } {
   const base = env ?? process.env;
   const n = Number(base.GIT_CONFIG_COUNT) || 0;
   const noHooks = hooksOff ? { GIT_CONFIG_COUNT: String(n + 2), [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${n}`]: '/dev/null', [`GIT_CONFIG_KEY_${n + 1}`]: 'core.fsmonitor', [`GIT_CONFIG_VALUE_${n + 1}`]: 'false' } : {};
-  const r = spawnSync(toolPath('git', base.PATH), args, { cwd, encoding: 'utf8', timeout: 120_000, env: { ...base, ...noHooks }, input, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync(toolPath('git', base.PATH), args, { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...base, ...noHooks }, input, maxBuffer: 64 * 1024 * 1024 });
   return { ok: r.status === 0, out: (r.stdout ?? '').replace(/\n$/, ''), err: (r.stderr ?? '').trim(), status: r.status };
 }
 
@@ -180,9 +181,8 @@ export function prepareGateAhead(o: PrepareOptions): { record: AttemptRecord; fi
   }
   const ga = r.gateAhead;
   const drop = (code: ResultCodeName, message: string): QueueFailure => {
-    git(o.repoRoot, ['worktree', 'remove', '--force', worktree]);
+    removeWorktree(o.repoRoot, worktree);
     fs.rmSync(dir, { recursive: true, force: true });
-    git(o.repoRoot, ['worktree', 'prune']);
     return { code, message };
   };
   const mergeTree = git(o.repoRoot, ['rev-parse', `${ga.gated_head}^^{tree}`]).out;
@@ -234,8 +234,7 @@ export function recordGateAhead(o: RecordOptions): { record: AttemptRecord; file
   rec.result = { exit: o.exit, log: path.relative(o.repoRoot, kept), log_sha256: logSha, recorded_at: (o.now ?? new Date()).toISOString() };
   rec.state = 'recorded';
   writeJsonAtomic(file, rec);
-  git(o.repoRoot, ['worktree', 'remove', '--force', rec.worktree]);
+  removeWorktree(o.repoRoot, rec.worktree);
   fs.rmSync(path.dirname(rec.worktree), { recursive: true, force: true });
-  git(o.repoRoot, ['worktree', 'prune']);
   return { record: rec, file, current, repeated: false };
 }

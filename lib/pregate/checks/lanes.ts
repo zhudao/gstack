@@ -41,7 +41,7 @@ import { selectLanes, type Selection } from '../lane-selection';
 import { launchRuntime } from '../runtime';
 import { cargoModel, type CargoModel } from '../rust';
 import { adapterFor, readRange, STALL_IDLE, supervise, type Counter, type Supervised } from '../supervise';
-import { ranFiles, verifyFromRun, type RunProfile } from '../../run-evidence';
+import { ranFiles, runChanged, runReceiptFields, verifyFromRun, type RunProfile } from '../../run-evidence';
 import { matchesAny } from '../../ship-policy';
 import { testFileArgs } from '../../test-paths';
 import type { CheckDef, CheckResult, PregateContext, RemoteObligation } from '../types';
@@ -197,6 +197,36 @@ function importsPlaywright(text: string): boolean {
   }
   return false;
 }
+/** Where a file takes the value `test` from: a relative module or `@playwright/test`, by `import { test } from …` (aliased or not), `export { test } from …` or `export * from …`. */
+function testSources(text: string): string[] {
+  const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+  return [...code.matchAll(/^[\t ]*(?:(?:import|export)[\t ]*\{([^}]*)\}|export[\t ]*\*)[\t ]*from[\t ]*['"](\.{1,2}\/[^'"]+|@playwright\/test)['"]/gm)].filter(m => m[1] === undefined || m[1].split(',').some(s => /^test(?:\s+as\s+[\w$]+)?$/.test(s.trim()))).map(m => m[2]!);
+}
+/**
+ * Whether a JS/TS test is a Playwright spec: it imports a value from `@playwright/test`, or takes `test` from a repo module that does and doesn't take
+ * `test` from a unit runner, directly or through further such modules, up to 8 deep (Playwright's fixtures pattern: `base.extend(…)`, `mergeTests(…)`).
+ * Only the modules `test` comes from are followed, so a unit test whose helper or vitest fixture uses other Playwright APIs keeps its runner (#4347).
+ */
+function playwrightSpec(repoRoot: string, file: string): boolean {
+  const exts = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+  const seen = new Set<string>();
+  let level = [file];
+  for (let depth = 0; level.length && depth <= 8; depth++) {
+    const next: string[] = [];
+    for (const mod of level.filter(m => !seen.has(m))) {
+      seen.add(mod);
+      const text = readRepoFile(repoRoot, mod) ?? '', sources = testSources(text);
+      if (depth === 0 ? importsPlaywright(text) : sources.includes('@playwright/test') || (importsPlaywright(text) && !/^[\t ]*import\b[^;]*\btest\b[^;]*\bfrom[\t ]*['"](?:vitest|@jest\/globals|bun:test|node:test)['"]/m.test(text))) return true;
+      for (const base of sources.filter(s => s.startsWith('.')).map(spec => path.posix.normalize(path.posix.join(path.posix.dirname(mod), spec))).filter(b => b !== '..' && !b.startsWith('../'))) {
+        const stem = base.replace(/\.[cm]?jsx?$/, '');
+        const hit = [base, ...exts.map(e => stem + e), ...exts.map(e => `${base}/index${e}`)].find(c => readRepoFile(repoRoot, c) !== null);
+        if (hit) next.push(hit);
+      }
+    }
+    level = next;
+  }
+  return false;
+}
 /** Whether a JS test is a node:test file: it loads `node:test` in a statement that starts a line (`import … from 'node:test'`, a bare import, or `require`) and loads neither vitest nor `@jest/globals`, whose runner owns it. Text that mentions a module mid-line, in a comment or in a template literal does not count. */
 function importsNodeTest(text: string): boolean {
   const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|`(?:\\[\s\S]|[^\\`])*`/g, '');
@@ -222,7 +252,7 @@ function declaredRunnerFiles(runner: string): RegExp | null {
  * against its own pubspec); Rust tests run per crate as `cargo test -p <name>`
  * from the crate's workspace root; JS/TS tests owned by a nested package that
  * declares vitest or jest run from that package; a JS/TS test that imports
- * `@playwright/test` runs through `playwright test` from its nearest package;
+ * `@playwright/test`, or takes `test` from a local fixtures module built on it, runs through `playwright test` from its nearest package;
  * a `.js`, `.mjs` or `.cjs` test that loads `node:test` runs from the repo root with the runner `detectRunner` gives node:test files;
  * the rest go to the detected runner from the repo root, split by language
  * when no one runner fits them all (`.mjs` + `.py` runs both), and pytest only
@@ -265,7 +295,7 @@ export function planRuns(ctx: PregateContext, files: readonly string[]): RunPlan
       continue;
     }
     const pkg = /\.[cm]?[jt]sx?$/.test(f) ? nearestRoot(ctx.repoRoot, f, 'package.json', seenPackage) : null;
-    if (pkg !== null && importsPlaywright(readRepoFile(ctx.repoRoot, f) ?? '')) { add(playwright, pkg, under(pkg, f)); continue; }
+    if (pkg !== null && playwrightSpec(ctx.repoRoot, f)) { add(playwright, pkg, under(pkg, f)); continue; }
     if (/\.[cm]?js$/.test(f) && importsNodeTest(readRepoFile(ctx.repoRoot, f) ?? '')) { nodeTests.push(f); continue; }
     if (pkg) {
       if (!pkgRunners.has(pkg)) pkgRunners.set(pkg, packageRunner(ctx.repoRoot, pkg, ctx.env));
@@ -734,14 +764,22 @@ export function fromRunProfiles(ctx: PregateContext, profiles: Record<string, Ru
  * ones it already passed. Profiles are matched by workflow and OS, never by name, so none has to be named after a lane.
  */
 function fromRun(ctx: PregateContext, sel: Selection): { line: string; passed: string[]; receipt?: string } {
-  const { ref, check } = ctx.fromRun!;
-  const names = 'error' in check ? [] : fromRunProfiles(ctx, check.profiles);
-  const v = 'error' in check ? { ok: false as const, reason: 'profiles_unavailable', detail: check.error } : verifyFromRun(check, ref, names, ctx.wtree, ctx.head);
-  if (!v.ok) return { line: `REUSE: refused reason=${v.reason} — ${v.detail}; every selected test runs here`, passed: [] };
-  const ran = new Set(ranFiles(v.evidence));
+  const { ref, check, runs } = ctx.fromRun!;
+  if ('error' in check) return { line: `REUSE: refused reason=profiles_unavailable — ${check.error}; every selected test runs here`, passed: [] };
+  const names = fromRunProfiles(ctx, check.profiles);
+  const verdicts = (runs ?? [{ ref, profile: null }]).map(r => verifyFromRun(check, r.ref, r.profile ? names.filter(n => n === r.profile) : names, ctx.wtree, ctx.head));
+  const ok = verdicts.flatMap(v => (v.ok ? [v.evidence] : []));
+  const v = verdicts[0]!;
+  if (!ok.length && !v.ok) return { line: `REUSE: refused reason=${v.reason} — ${v.detail}; every selected test runs here`, passed: [] };
+  let changed: string | null = null;
+  try { for (const e of ok.length > 1 ? ok : []) changed ??= runChanged(check.deps, e.run_id, e.run_attempt); }
+  catch (err) { changed = `reading the runs again failed: ${String((err as Error)?.message ?? err).slice(0, 200)}`; }
+  if (changed) return { line: `REUSE: refused reason=run_changed — ${changed}; every selected test runs here`, passed: [] };
+  const ran = new Set(ok.flatMap(ranFiles));
   const passed = sel.localTests.filter(t => ran.has(t));
-  const skipped = sel.localTests.filter(t => v.evidence.skipped?.includes(t)).length;
-  return { line: `REUSE: accepted ${passed.length} of ${sel.localTests.length} selected local test file(s) from ${v.receipt}; ${sel.localTests.length - passed.length} still run${skipped ? ` (${skipped} skipped every test in the run)` : ''}`, passed, receipt: v.receipt };
+  const skipped = sel.localTests.filter(t => !ran.has(t) && ok.some(e => e.skipped?.includes(t))).length;
+  const receipt = `run tree=${ctx.wtree.slice(0, 12)} tests=${ok.reduce((n, e) => n + (e.tests ?? e.files.length), 0)} ${runReceiptFields(ok, check.now)}`;
+  return { line: `REUSE: accepted ${passed.length} of ${sel.localTests.length} selected local test file(s) from ${receipt}; ${sel.localTests.length - passed.length} still run${skipped ? ` (${skipped} skipped every test in the run)` : ''}`, passed, receipt };
 }
 
 /**
