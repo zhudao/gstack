@@ -32,6 +32,7 @@ import { reviewRoundGrants } from './review-round-grant';
 import { dispositionedOn, gateDispositionText, gateKey, readGateDispositions } from './gate-dispositions';
 import { parseReviewLoopException, type ReviewLoopException } from './ship-receipt-depth';
 import { parseReceiptDocs, type ReceiptDocs } from './ship-receipt-docs';
+import { redactFindingSpans } from './redact-engine';
 import { resolveStateRoot } from './state-root';
 import { bumpVersion, cmpVersion, fmtVersion, parseVersion, versionWidth, type Bump } from './version-source';
 import { waitForRun } from './ci-carry';
@@ -53,7 +54,7 @@ export const RELEASE_HELP = `gstack-ship-release — /ship Steps 12 and 15-17 (s
          [--docs-requested <path>... --docs-result <the audit's result JSON>] [--review-loop-exception <json|@file>]
       Step 15's release commit, Step 16 stages 1-4 (your builds, the reviewed-tree route, docs freshness,
       each lane's receipt run once if stale) and the pregate on the stamped tree; --reviewed-base (the merge base
-      saved with the reviewed tree, or a stack parent's head once the parent landed: REVIEWED_BASE:) routes paths only the base moved as base=, and an adjacent base edit as context=;
+      saved with the reviewed tree, or a stack parent's head once the parent landed: REVIEWED_BASE:) routes paths only the base moved, or whose own hunks are unchanged next to moved base context, as base=, and a hunk the base merge spliced as context=;
       --review-loop-exception (the record write takes) routes paths the branch touched at fix_check.head (narrowed to fix_check.files when listed) and changed since as accepted=
       A lane the base branch maps in .gstack/pregate.json ship_lanes_from is carried from a verified CI run at this exact
       tree, else deferred (EVIDENCE: DEFERRED): the pregate then runs its preflight stage here and its tests stage in accept
@@ -405,9 +406,9 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
   const baseSide = new Set<string>();
   for (const p of [...changedSet, ...onlyShipped].sort()) {
     const verdict = sides ? (!touched.has(p) || (parent && !shipped.has(p) && baseHolds(cwd, sides, p)) ? 'same' : comparePath(cwd, sides, p)) : 'changed';
-    if (verdict === 'context') baseSide.add(p);
+    if (verdict === 'context' || verdict === 'spliced') baseSide.add(p);
     const metadata = isMetadata(p);
-    by[verdict === 'same' ? 'base' : metadata ? 'metadata' : sides && isTestCode(p, opts.testCode) ? 'tests' : classifyPath(p, cwd) === 'docs' && !matchesAny(opts.bookkeeping, p) ? 'docs' : verdict === 'context' ? 'context' : 'behavior'].push(p);
+    by[verdict === 'same' || verdict === 'context' ? 'base' : metadata ? 'metadata' : sides && isTestCode(p, opts.testCode) ? 'tests' : classifyPath(p, cwd) === 'docs' && !matchesAny(opts.bookkeeping, p) ? 'docs' : verdict === 'spliced' ? 'context' : 'behavior'].push(p);
   }
   const shippedTests = by.tests.filter(p => onlyShipped.has(p));
   const gated = new Set([...(gateEditedPaths(cwd, reviewed, now, by.tests.filter(p => !onlyShipped.has(p) && !baseSide.has(p))) ?? by.tests), ...(gateEditedPaths(cwd, sides?.currentBase ?? reviewed, now, shippedTests) ?? shippedTests)]);
@@ -459,7 +460,7 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
   for (const x of mech.refused) r.add(`ROUTE_MECHANICAL_REFUSED: ${x.path} ${x.reason} (docs/troubleshooting.md#route-mechanical-refused)`);
   for (const p of by.sidecar) r.add(`UID_SIDECAR: ${p} (beside ${uid.proven[p]})`);
   for (const x of uid.refused) r.add(`ROUTE_SIDECAR_REFUSED: ${x.path} ${x.reason} (docs/troubleshooting.md#route-sidecar-refused)`);
-  if (by.behavior.length) { r.stop(`behavior, tests or build inputs changed since review (${short(by.behavior.sort())}): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap stops for the owner's grant of one scoped fix-check (stage 2.1)`); return null; }
+  if (by.behavior.length) { r.stop(`behavior, tests or build inputs changed since review (${short(by.behavior.sort())}): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap plans one read-only full review of the final head (stage 2.1)`); return null; }
   const kept = by.mechanical.length || by.sidecar.length ? writeMechanicalRecord(cwd, now, mech.proven, uid.proven) : null;
   if (kept) { r.stop(`the mechanical and sidecar paths cannot be recorded for gstack-ship-receipt write (${kept}): make that directory writable, then rerun finish (stage 2.1)`); return null; }
   const scoped = [...by.context, ...by.tests, ...by.bounded].sort();
@@ -467,7 +468,7 @@ function route(cwd: string, base: string, reviewed: string, reviewedBase: Review
     const packet = path.resolve(cwd, git(cwd, ['rev-parse', '--git-path', `gstack/scoped-review-${now.slice(0, 12)}.md`]).stdout.trim() || `.git/gstack/scoped-review-${now.slice(0, 12)}.md`);
     const built = contextPacket(cwd, sides, by.context, by.tests, late());
     if (!opts.contextReviewed) {
-      const why = [by.context.length ? `base context moved next to the reviewed hunks in ${short(by.context)}` : '', by.tests.length ? `test code changed since review in ${short(by.tests)}` : '',
+      const why = [by.context.length ? `the base merge spliced lines into the reviewed hunks in ${short(by.context)}` : '', by.tests.length ? `test code changed since review in ${short(by.tests)}` : '',
         by.bounded.length ? `bounded edits since review in ${by.bounded.map(p => `${p} (${bounded.kinds[p]})`).join(', ')}` : ''].filter(Boolean).join('; ');
       try {
         fs.mkdirSync(path.dirname(packet), { recursive: true });
@@ -833,9 +834,12 @@ function pushOnce(argv: readonly string[], cwd: string, r: Report): string {
   if (plain.length) { r.add(`BRANCH: refused ${plain.map(f => `"${f.match}"`).join(', ')}`); return refuse(`the branch name ${branch} is not plain words (docs/ship-policy.md#plain-titles): rename it with git branch -m <plain words>[-<issue code>], then rerun push --branch <new name>`); }
   const p = git(cwd, ['push', '-u', 'origin', branch], 600_000);
   if (p.status !== 0) {
-    const nff = /non-fast-forward|fetch first|rejected/.test(p.stderr);
-    return nff ? refuse('non-fast-forward: fetch and merge the remote under Step 3\'s conflict rules, run Steps 5-16, then push again; never force-push', 'PUSH_REJECTED')
-      : refuse(`push failed (${firstLine(p.stderr)}): repair the auth, hook or network cause, repeat Step 16, then push; never bypass a guard`, 'PUSH_GIT_FAILED');
+    if (/^remote: error: GH007:|\[remote rejected\][^\n]*\(push declined due to email privacy restrictions\)/m.test(p.stderr)) return refuse(`GitHub refused the push (GH007): a commit carries the private email address your account blocks from command-line pushes. Set git config user.email to your GitHub noreply address (github.com/settings/emails), rewrite every commit that carries the private one (git rebase origin/${flag('--base') ?? '<base>'} --exec 'git commit --amend --reset-author --no-edit'), repeat Step 16, then push; a fetch and merge will not fix it`, 'PUSH_REJECTED');
+    if (/^ ! \[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)$/m.test(p.stderr)) return refuse('non-fast-forward: fetch and merge the remote under Step 3\'s conflict rules, run Steps 5-16, then push again; never force-push', 'PUSH_REJECTED');
+    const declined = (/^remote: error: (GH\d{3}:.+)$/m.exec(p.stderr) ?? /^remote: error: (.+)$/m.exec(p.stderr) ?? /^ ! \[remote rejected\][^(\n]*\(([^)\n]+)\)$/m.exec(p.stderr))?.[1];
+    const quoted = declined && redactFindingSpans(declined.replace(/[\x00-\x1f\x7f]/g, ' ').trim());
+    if (declined) return refuse(`the remote refused the push (${quoted ? quoted.slice(0, 240) : 'its reason is withheld: the secret scanner could not redact it'}): change what it names, repeat Step 16, then push; a fetch and merge will not fix it; never force-push or bypass a guard`, 'PUSH_REJECTED');
+    return refuse(`push failed (${firstLine(p.stderr)}): repair the auth, hook or network cause, repeat Step 16, then push; never bypass a guard`, 'PUSH_GIT_FAILED');
   }
   r.next('Step 18');
   return `PUSH: pushed remote=origin ref=${branch} head=${local}`;

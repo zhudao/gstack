@@ -444,6 +444,18 @@ machine starts without it, put `GSTACK_PLAN_RECORD` in the project env. On a pub
 render writes `Plan: approved (record r-<id>)` in place of the brief's run id, and ready
 resolves that id to the same approval row.
 
+**First versions.** A first version of anything a person uses (an app, a Mac helper, a new
+route on the owner's box) is a plan with a `### Day one` section, or `--first-version`. Its
+plan quotes the owner's own messages that state the job under `### Owner's words`, each with
+its time and a line: `does it`, `choice` (a lettered choice recommending the build unless the
+line gives a reason to leave it out). Nothing his words
+asked for sits under "What it won't do yet"; the gate letters it, and every cut on a first
+version gets its own letter. The five day-one rows cite those quotes. Before the owner is asked
+to try it, the build clears `gstack-first-use` ([docs/first-use-check.md](../../docs/first-use-check.md)):
+an agent from another model family follows the exact try-it message on the real target and
+records a verdict per step. A one-page day-one plan written without `/autoplan` (an app build
+under the owner's standing rule) carries the same two sections, so the same check reads it.
+
 The copy-paste brief is [`captain/templates/brief.md`](../../captain/templates/brief.md): the
 plan and the ask as step 1, the build after the word as step 2, /ship to READY as step 3,
 and a done line that names the approval row or the exemption.
@@ -560,9 +572,13 @@ lands while /ship runs waits for /ship to finish instead of being fixed mid-run.
 Capy the mechanics are in [the gstack skill](../../capy/skill/gstack/SKILL.md#plan-approve-ship).
 
 When the base moves under a reviewed branch, merge it in; never rebase. A merge that
-leaves the product diff unchanged carries the receipt with `gstack-ship-receipt carry`
-(pregate at HEAD, no review rerun), and a merge whose resolution changed product code
-needs a fresh /ship. A rebase carries only onto a tree the receipt already covers with
+leaves the branch's own lines, file modes and symlink targets byte-identical counts as
+reviewed and carries the receipt with `gstack-ship-receipt carry` (pregate at HEAD, no
+review rerun; CI on the merged head is the check). A merge that spliced main's change into a reviewed hunk, or
+chose the order of the branch's inserted lines against main's at the same spot, gets the one
+scoped reader `RECEIPT_CARRY_SCOPED_REVIEW` asks for, run without asking and not a review
+round; a merge whose resolution changed the branch's own lines, a file mode or a symlink
+target needs a fresh /ship. A rebase carries only onto a tree the receipt already covers with
 the same product diff; any other rebase is a full /ship
 ([ship-policy.md](../../docs/ship-policy.md#receipt-carry)). A controller never asks a lane to
 rebase a reviewed branch.
@@ -654,7 +670,7 @@ What to do with each refusal (nothing was merged unless the code says so):
 | `QUEUE_RECEIPT_MISSING` / `QUEUE_RECEIPT_STALE` | lane | /ship at the pin |
 | `QUEUE_NOT_READY` | lane, or Captain | no READY note: `ready --pr <n> --no-screen` at the pin; `merge: train`: use the train; closed or retargeted PR: as named |
 | `QUEUE_LAND_CHECKS` | Captain, then lane | pending: `gstack-pr-wait <n> --until green` and rerun; red: back to the lane (rule 16 rerun for a flaky case); missing: dispatch the workflow on the branch |
-| `QUEUE_LAND_MERGED_CHECKS` | Captain, then lane | the message says the checks changed files land's git or gh calls read: hold, nothing goes back to the lane yet; restore each named path from a trusted copy, release the lock with `land --pr <n> --pin <sha>` (no `--allow-repo-commands`), and find out why the checks wrote there. Otherwise a `land.merged_checks` command failed, or the `land.merged_ci` run was red, on the pin merged onto main: one rerun of land for a flaky case (rule 16), else back to the lane, which merges main (rule 19), fixes it, /ship, `ready`, new READY ([troubleshooting](../../docs/troubleshooting.md#queue-land-merged-checks)) |
+| `QUEUE_LAND_MERGED_CHECKS` | Captain, then lane | the message says the checks changed files land's git or gh calls read: hold, nothing goes back to the lane yet; restore each named path from a trusted copy, release the lock with `land --pr <n> --pin <sha>` (no `--allow-repo-commands`), and find out why the checks wrote there. Otherwise a `land.merged_checks` command failed, or the `land.merged_ci` run was red, on the pin merged onto main: one rerun for a flaky case (rule 16; for a red `land.merged_ci` run that is `gh run rerun <id>` then land, since land reuses that run), else back to the lane, which merges main (rule 19), fixes it, /ship, `ready`, new READY ([troubleshooting](../../docs/troubleshooting.md#queue-land-merged-checks)) |
 | `QUEUE_LAND_NOT_CLEAN` | lane, or Captain | `CONFLICTING`, or the pin conflicts with main's tip on a stale base: the lane merges main (rule 19), /ship, `ready`; `UNKNOWN`: rerun in a minute |
 | `QUEUE_TRAIN_FROZEN` / `QUEUE_LAND_LOCKED` | Captain | finish the repair or the holder first. land takes over a lock whose land exited or expired by itself; a lock it refuses says why: a land still running (wait, or stop the process it names if stuck), another machine's land (rerun after the expiry it prints, or `--break-lock` once you know that land stopped), or a deliberate hold (release it as the `LOCK:` line says) |
 | `QUEUE_TRAIN_UNTRUSTED` | Captain | a fork head; rewrite on a crew branch |
@@ -780,9 +796,10 @@ case-kind change, closing a contribution without landing it, and anything destru
 Standing spend is the commonest standing approval: `SPEND` in CREW.md names what the
 owner pre-approved (train gates, screens, bisects, the backstop, focused paid cases) with
 the owner's date and words and the cap per rerun; anything over the cap is a fresh ask.
-A review round past a PR's two (`PR_ROUND_CAP`) is the lane's or the controller's call, recorded
-with `gstack-approvals round-grant`, never an owner ask
-([rounds per pull request](../../docs/review-policy.md#rounds-per-pull-request)).
+After a PR's two review rounds (`PR_ROUND_CAP`) it ships with its open notes listed, or the controller
+rules on the blocker; a PR past the cap whose code changed gets one read-only full review of its final head,
+never an owner ask ([rounds per pull request](../../docs/review-policy.md#rounds-per-pull-request)). Round and
+fix-check grants are deprecated and go in the next release.
 
 **B. The plan ask** ([template](../../captain/templates/plan-ask.md)): before → after, why it
 matters, what caused this work, the big decisions, and what we need from you in the ask
