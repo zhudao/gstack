@@ -65,13 +65,14 @@ const HELP = `gstack-review-plan — the review depth of the next /ship step (do
   --gated a,b               specialists the hit-rate stats tag GATE_CANDIDATE
   --force a,b|all           specialists forced by prompt flags (--all-specialists is all): at standard and full depth they join the
                             batched specialist's checklists, where maintainability, performance and simplification are read only when
-                            forced; light runtime-0 docs and scoped passes dispatch them one reader each; targeted is no specialist and
+                            forced; light runtime-0 docs dispatch them one reader each; targeted is no specialist and
                             refuses (exit 2): the plan dispatches it itself
   --reviewed-numbers <fp>   the numeric-claim fingerprint the outside voice already reviewed
   --depth-floor standard|full  raise the depth to at least this (never lowers it); /ship passes its prompt flag on every run
   --range-base <sha>        the fix range's base (this pass's PASS_HEAD; with --post-review --last fix-check, the last fix-check's
-                            commit): after a fixed blocker on a diff below full depth, a
-                            committed range of at most ${SCOPED_RANGE_LINES} runtime lines plans a scoped pass; anything unread plans the full pass
+                            commit): after a fixed blocker, round 2 is a full pass on the range; below full depth, a
+                            committed range of at most ${SCOPED_RANGE_LINES} runtime lines now also gets a full pass (no scoped pass) that keeps
+                            the Red Team and, on a range with runtime lines, the native adversarial; anything unread plans the full pass
   --no-tiers                specialists, audits and watchers at the host's default effort too (as gstack-config review_effort_tiers off does)
   --json                    the plan as JSON (depth, runtime_lines, rules, errors with input and repair, gate_scan, per-dispatch exclude)
   --pass1-depth <d>         pass 1's REVIEW_DEPTH depth: full, or absent, keeps pass 2 full
@@ -303,6 +304,16 @@ function main(): number {
   if (plan.next.reason.startsWith('PR_ROUND_CAP')) plan.next.reason += `: record this stop with gstack-ship-receipt stop --pr ${flag('--pr') ?? '<n>'} --run <this /ship run> --since <REVIEW_SINCE>, which prints the fix-check round grant (gstack-approvals round-grant --kind fix-check) that buys its fix round, in this run or the next; once it is recorded, pass the --round-grant and --stop the PR_REVIEW_FLAGS: line prints: in this run from gstack-ship-receipt history --pr ${flag('--pr') ?? '<n>'} --base <base> --run <this /ship run> (its preflight already ran, and a second one is refused), in a new run from its preflight (docs/troubleshooting.md#pr-round-cap)`;
   if (carried) plan.next.reason = `the edits after the last fix-check ${fixCheckAt!.slice(0, 12)} are ${carried.paths.length ? `${carried.verdict === 'plain' ? 'plain docs' : `docs (${carried.paths.join(', ')})`}${carried.stamps.length ? ' and release stamps' : ''}` : 'release stamps'} (docsChangeSince), no gate-class edit (GST-1702): ${plan.next.reason}`;
   else if (postReview && pass > 0) plan.next.reason = `edits after the review bound (Step 16 stage 2.1) plan as a fix to a gate-class path, never a note: ${plan.next.reason}`;
+  if (postReview && plan.next.step === 'stop') {
+    const status = rangeBase ? git(['diff', '-z', '--name-status', '--no-renames', rangeBase, own ?? head])?.split('\0').filter(Boolean) : undefined;
+    const pairs = status ? Array.from({ length: status.length >> 1 }, (_, i) => [status[2 * i]!, status[2 * i + 1]!] as const) : undefined;
+    const edited = pairs?.filter(([s]) => s !== 'D').map(([, p]) => p), deleted = pairs?.filter(([s]) => s === 'D').map(([, p]) => p) ?? [];
+    const spaced = edited?.filter(p => /\s/.test(p)) ?? [];
+    const rulable = edited?.filter(p => !spaced.includes(p));
+    const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+    const rule = (finding: string) => `gstack-approvals rule --finding ${finding} --head ${head} --reason '<why it ships as a note>' --by '<the owner>' --words '<their exact words>' --owner-ref <thread code>:<message id>`;
+    plan.next.reason += `; if the owner rules instead that the edit ships as a disclosed note, record that ruling once per edited path (each path shell-quoted; the owner-ref is the relay this open /ship run needs): ${rulable?.length ? rulable.map(p => rule(quote(`edit:${p}`))).join(' && ') : rule("'edit:<path>'")}, then rerun finish, which routes each ruled path at the ruled bytes as RULED_EDIT${spaced.length ? `; ${spaced.map(quote).join(', ')} cannot be ruled (a finding holds no whitespace), so an edit there keeps the fix and runs /ship again` : ''}${deleted.length ? `; a deletion (${deleted.map(quote).join(', ')}) cannot be ruled, so it keeps the fix and runs /ship again` : ''}`;
+  }
   const ranArg = flag('--targeted-ran');
   const delta = plan.next.step !== 'done' || !targeted.classes.length || ran ? null
     : carried?.verdict === 'claim' ? { state: 'dispatch' as const, range_base: fixCheckAt!, paths: [...carried.paths] }

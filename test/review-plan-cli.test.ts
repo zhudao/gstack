@@ -391,7 +391,7 @@ describe('gstack-review-plan: review depth', () => {
   });
 });
 
-describe('gstack-review-plan: the scoped second pass (GSTA-152 D6)', () => {
+describe('gstack-review-plan: the full round 2 on a small fix range (GSTA-152 D6, GST-3562 part 3)', () => {
   const code = (n: number, tag = 'v') => Array.from({ length: n }, (_, i) => `export const ${tag}${i} = ${i};`).join('\n') + '\n';
   function fixed(lines: number): { r: { dir: string; state: string }; rangeBase: string } {
     const r = repo({ 'src/a.ts': code(80) });
@@ -403,17 +403,17 @@ describe('gstack-review-plan: the scoped second pass (GSTA-152 D6)', () => {
   }
   const pass2 = ['--pass', '1', '--last', 'full', '--fixed-blocking', '--adversarial-ran', '--pass1-depth', 'standard'];
   const full1 = ['--pass', '1', '--last', 'full', '--fixed-blocking', '--adversarial-ran', '--pass1-depth', 'full'];
-  test('--range-base with a small fix range plans NEXT: scoped with a fix-check and the Red Team, and counts it as pass 2', () => {
+  test('--range-base with a small fix range plans a full pass 2 with the batched specialist, the Red Team and the native adversarial, and no fix-check', () => {
     const { r, rangeBase } = fixed(24);
     const out = run(r, [...pass2, '--range-base', rangeBase]).stdout;
-    expect(out).toMatch(/^REVIEW_PLAN: class=code pass=2 next=scoped dispatches=3 /m);
+    expect(out).toMatch(/^REVIEW_PLAN: class=code pass=2 next=full dispatches=3 /m);
     expect(out).toContain(`FIX_RANGE: runtime_lines=24 base=${rangeBase}`);
-    expect(out).toMatch(/^NEXT: scoped \(a blocking finding was fixed on a light diff with 24 runtime lines in the fix range/m);
-    expect(out).toContain('DISPATCH: fix-check fix-check effort=full');
+    expect(out).toMatch(/^NEXT: full \(a blocking finding was fixed on a light diff with 24 runtime lines in the fix range: full pass on the range, never a scoped pass, so every reader is in the pass record \(GST-3562\)\)$/m);
+    expect(out).not.toContain('DISPATCH: fix-check');
+    expect(out).toMatch(/^DISPATCH: specialist batched effort=\S+ checklists=/m);
     expect(out).toContain('DISPATCH: red-team red-team effort=full');
     expect(out).toContain('DISPATCH: adversarial-native adversarial effort=full');
-    expect(out).not.toContain('DISPATCH: specialist');
-    expect(JSON.parse(run(r, [...pass2, '--range-base', rangeBase, '--json']).stdout)).toMatchObject({ next: { step: 'scoped' }, fix_range: { base: rangeBase, runtime_lines: 24 } });
+    expect(JSON.parse(run(r, [...pass2, '--range-base', rangeBase, '--json']).stdout)).toMatchObject({ next: { step: 'full', keepReader: true, rangeReaders: true }, fix_range: { base: rangeBase, runtime_lines: 24 } });
   });
   test('a 151-line range, no --range-base, an unknown range base and uncommitted fixes keep the full pass 2', () => {
     const big = fixed(151);
@@ -475,4 +475,32 @@ describe('gstack-review-plan: the scoped second pass (GSTA-152 D6)', () => {
     const { r, rangeBase } = fixed(10);
     expect(run(r, [...pass2, '--range-base', rangeBase, '--depth-floor', 'full']).stdout).toMatch(/^NEXT: full \(a blocking finding was fixed and the diff is at full depth/m);
   });
+});
+
+// Value: protects=the stop after an edit that followed the read-only final review names the exact command that records the
+//   owner's ship-with-the-note ruling, with the edited paths and the stop head (GST-3775, GBRA-795); fails_when=the stop
+//   says "ship with it as a ruled note" and names no command finish reads; seam=bin/gstack-review-plan --post-review
+describe('gstack-review-plan --post-review stop names the edit ruling (GST-3775)', () => {
+  test('a fix after the read-only final review prints gstack-approvals rule --finding edit:<path> at the stop head', () => {
+    const r = repo({ 'src/a.ts': 'export const a = 1;\n', 'src/gone.ts': 'export const g = 0;\n' });
+    const git = (...a: string[]) => spawnSync('git', a, { cwd: r.dir, encoding: 'utf8', timeout: 10_000 }).stdout.trim();
+    const passHead = git('rev-parse', 'HEAD');
+    fs.rmSync(path.join(r.dir, 'src/gone.ts'));
+    const odd = "src/q'$(id)`;x|y.ts";
+    fs.appendFileSync(path.join(r.dir, 'src/a.ts'), 'export const b = 2;\n'); fs.writeFileSync(path.join(r.dir, 'src/a b.ts'), 'export const c = 3;\n');
+    fs.writeFileSync(path.join(r.dir, odd), 'export const d = 4;\n');
+    git('add', '.'); git('commit', '-qm', 'edit after the final review');
+    const head = git('rev-parse', 'HEAD');
+    const p = run(r, ['--pass', '3', '--last', 'full', '--range-base', passHead, '--post-review']);
+    expect(p.status, p.stderr).toBe(0);
+    expect(p.stdout).toContain("a fix followed the read-only final review: the lane's Captain decides (R51)");
+    expect(p.stdout).toContain(`record that ruling once per edited path (each path shell-quoted; the owner-ref is the relay this open /ship run needs): gstack-approvals rule --finding 'edit:src/a.ts' --head ${head} --reason '<why`);
+    expect(p.stdout).toContain("'src/a b.ts' cannot be ruled (a finding holds no whitespace), so an edit there keeps the fix and runs /ship again");
+    expect(p.stdout).toContain("; a deletion ('src/gone.ts') cannot be ruled, so it keeps the fix and runs /ship again");
+    const findings = [...p.stdout.split('\n').find(l => l.startsWith('NEXT: '))!.matchAll(/gstack-approvals rule --finding ('(?:[^']|'\\'')*') --head /g)].map(m => m[1]!);
+    expect(findings).toHaveLength(2);
+    const parsed = spawnSync('sh', ['-c', `printf '%s\\n' ${findings.join(' ')}`], { cwd: r.dir, encoding: 'utf8', timeout: 10_000 });
+    expect(parsed.stdout).toBe(`edit:src/a.ts\nedit:${odd}\n`);
+    expect(run(r, ['--pass', '3', '--last', 'full', '--range-base', passHead, '--fixed-below']).stdout).not.toContain('--finding edit:');
+  }, 30_000);
 });
