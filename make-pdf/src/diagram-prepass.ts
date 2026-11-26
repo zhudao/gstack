@@ -96,6 +96,9 @@ export class StrictModeError extends Error {
 
 const DIAGRAM_LANGS = new Set(["mermaid", "excalidraw"]);
 
+/** Start of every diagram placeholder token (render.ts tells a diagram slot from a paragraph by it). */
+export const DIAGRAM_SLOT_PREFIX = "gstack-diagram-slot-";
+
 /**
  * Extract column-0 ```mermaid / ```excalidraw fences, replacing each with a
  * unique placeholder token paragraph. Backtick and tilde fences, any length
@@ -131,7 +134,7 @@ export function extractDiagramFences(markdown: string): FenceExtraction {
         const info = parseInfoString(openFence.info);
         if (DIAGRAM_LANGS.has(info.lang) && info.render && openFence.indent === 0) {
           ordinal++;
-          const token = `gstack-diagram-slot-${runId}-${ordinal}`;
+          const token = `${DIAGRAM_SLOT_PREFIX}${runId}-${ordinal}`;
           fences.push({
             lang: info.lang,
             source: openFence.body.join("\n"),
@@ -832,6 +835,18 @@ const PAGE_HEIGHTS_IN: Record<string, number> = {
   legal: 14,
   tabloid: 17,
 };
+
+export function contentHeightInches(opts: {
+  pageSize?: string;
+  margins?: string;
+  marginTop?: string;
+  marginBottom?: string;
+}): number {
+  const pageH = PAGE_HEIGHTS_IN[opts.pageSize ?? "letter"] ?? 11;
+  const top = dimToInches(opts.marginTop ?? opts.margins, 1);
+  const bottom = dimToInches(opts.marginBottom ?? opts.margins, 1);
+  return Math.max(1, pageH - top - bottom);
+}
 
 /**
  * Content box of the rotated (landscape) named page: portrait page HEIGHT

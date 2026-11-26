@@ -32,7 +32,6 @@ bin/*        text eol=lf
 # copies an older checkout already left with CRLF.
 **/bin/*                           text eol=lf
 hosts/*/hooks/*                    text eol=lf
-lib/cso/images/*                   text eol=lf
 scripts/app/*                      text eol=lf
 browse/test/fixtures/mock-claude/* text eol=lf
 
@@ -61,3 +60,7 @@ Dockerfile*  text eol=lf
 # the content-addressed staged filename.
 lib/diagram-render/dist/*.html text eol=lf
 lib/diagram-render/dist/*.json text eol=lf
+
+# Byte-for-byte golden CSS for make-pdf --style plain; CRLF on a Windows
+# checkout would break the exact comparison.
+make-pdf/test/fixtures/print-css-plain/*.css text eol=lf

@@ -25,12 +25,13 @@ const TIMEOUT = diff('test/worker.test.ts', ["  test('drains', async () => { awa
 const check = (cls: string, d?: string, prior: NoStopRecord[] = []) => checkNoStop({ cls, reason: 'r', evidence: 'run 41715705702', prior, diff: d, root: ROOT });
 
 describe('lib/no-stop: what qualifies', () => {
-  test('scoped-fix-check: a docs-only or timeout-only round-2 fix qualifies once; code, skill prose or a second one stops', () => {
-    expect(check('scoped-fix-check', diff('docs/review-policy-notes.md', ['old wording'], ['new wording']))).toMatchObject({ ok: true, detail: expect.stringContaining('docs-only') });
-    expect(check('scoped-fix-check', TIMEOUT)).toMatchObject({ ok: true, detail: expect.stringContaining('timeout-only') });
-    expect(check('scoped-fix-check', diff('lib/worker.ts', ['return a;'], ['return b;']))).toMatchObject({ ok: false, reason: expect.stringContaining('neither docs-only') });
-    expect(check('scoped-fix-check', diff('ship/SKILL.md.tmpl', ['old'], ['new']))).toMatchObject({ ok: false });
-    expect(check('scoped-fix-check', TIMEOUT, [{ class: 'scoped-fix-check', reason: 'x', evidence: 'y' }])).toMatchObject({ ok: false, reason: expect.stringContaining('a second goes to the owner') });
+  // Value: protects=the retired scoped-fix-check (fix-checks and their grants, GST-3562 part 4) never records a no-stop, so a
+  //   stop after round 2 goes to the lane's Captain; fails_when=checkNoStop still accepts a docs-only or timeout-only round-2
+  //   fix as scoped-fix-check while gstack-no-stop refuses it (#4826 final review); seam=lib/no-stop checkNoStop
+  test('scoped-fix-check is retired: no diff qualifies, not even a docs-only or timeout-only one', () => {
+    for (const d of [diff('docs/review-policy-notes.md', ['old wording'], ['new wording']), TIMEOUT, diff('lib/worker.ts', ['return a;'], ['return b;'])]) {
+      expect(check('scoped-fix-check', d)).toMatchObject({ ok: false, reason: expect.stringContaining('removed with fix-check grants (GST-3562 part 4)') });
+    }
   });
 
   test('test-timeout-fix: only a raised timeout in a test file qualifies', () => {
@@ -43,7 +44,7 @@ describe('lib/no-stop: what qualifies', () => {
 
   test('review pass 1 holes: an assertion bound, a name that only contains "timeout", and a "-- " line inside a hunk are not timeout-only', () => {
     expect(check('test-timeout-fix', diff('test/perf.test.ts', ['  expect(elapsedMs).toBeLessThan(timeoutMs + 100);'], ['  expect(elapsedMs).toBeLessThan(timeoutMs + 5000);']))).toMatchObject({ ok: false });
-    expect(check('scoped-fix-check', diff('lib/retry.ts', ['const MAX_ATTEMPTS_BEFORE_TIMEOUT = 3;'], ['const MAX_ATTEMPTS_BEFORE_TIMEOUT = 30;']))).toMatchObject({ ok: false });
+    expect(check('test-timeout-fix', diff('test/retry.test.ts', ['const MAX_ATTEMPTS_BEFORE_TIMEOUT = 3;'], ['const MAX_ATTEMPTS_BEFORE_TIMEOUT = 30;']))).toMatchObject({ ok: false });
     expect(check('test-timeout-fix', diff('test/x.test.ts', ['  setDefaultTimeout(5_000);'], ['  setDefaultTimeout(30_000);']))).toMatchObject({ ok: true });
     const hidden = 'diff --git a/test/x.test.ts b/test/x.test.ts\n--- a/test/x.test.ts\n+++ b/test/x.test.ts\n@@ -1,2 +1,1 @@\n--- guard\n-  }, 5000);\n+  }, 50000);\n';
     expect(check('test-timeout-fix', hidden)).toMatchObject({ ok: false });
@@ -106,32 +107,12 @@ describe('gstack-no-stop record: the ledger, the grant and the receipt', () => {
   fs.mkdirSync(path.dirname(reviewLog), { recursive: true });
   fs.writeFileSync(reviewLog, JSON.stringify({ skill: 'review', commit_full: base }) + '\n');
 
-  test('a docs-only round-2 fix records the class, prints the grant, and the ledger is a valid receipt no_stop', () => {
-    fs.writeFileSync(path.join(work, 'docs', 'guide.md'), 'new wording\n');
-    git('commit', '-qam', 'docs fix');
-    const narrow = run('record', '--class', 'scoped-fix-check', '--range-base', 'HEAD~0', '--reason', 'r', '--evidence', 'e');
-    expect(narrow.status).toBe(3);
-    expect(narrow.stderr).toContain('is not the commit the last review pass read');
-    const r = run('record', '--class', 'scoped-fix-check', '--range-base', base, '--reason', 'round-2 fix reworded docs/guide.md', '--evidence', `commit ${git('rev-parse', 'HEAD').slice(0, 12)}`);
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toMatch(/^NO_STOP: scoped-fix-check recorded \(docs-only fix in docs\/guide\.md\)$/m);
-    expect(r.stdout).toMatch(/^GRANT: \S+$/m);
-    expect(r.stdout).toContain(`--range-base ${base}`);
-    const file = r.stdout.match(/^NO_STOP_FILE: (.+)$/m)![1]!;
-    const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
-    expect(rows).toEqual([{ class: 'scoped-fix-check', reason: 'round-2 fix reworded docs/guide.md', evidence: expect.stringMatching(/^commit /) }]);
-    const approvals = spawnSync('bun', [...bunIsolationArgs(), path.join(ROOT, 'bin', 'gstack-approvals'), 'list', '--json'], { cwd: work, encoding: 'utf8', timeout: 60_000, env });
-    const grant = r.stdout.match(/^GRANT: (\S+)$/m)![1];
-    expect(JSON.parse(approvals.stdout).rows ?? JSON.parse(approvals.stdout)).toEqual(expect.arrayContaining([expect.objectContaining({ id: grant, outcome: 'approved', by: 'gstack no-stop default (K1)', scope: `review_loop_grant ${git('rev-parse', 'HEAD')}` })]));
-    const receipt = { schema_version: 1, pr: 1, head: 'e'.repeat(40), version: '1.0.0.0', base: 'main', gate: {}, no_stop: rows };
-    expect(validateReceipt(receipt as any).filter(e => /no_stop/.test(String(e)))).toEqual([]);
-  });
 
-  test('a second scoped fix-check and a code fix both stop for the owner (exit 3) and leave the ledger alone', () => {
+  test('a scoped fix-check (removed in GST-3562 part 4) and a code fix both stop (exit 3) and leave the ledger alone', () => {
     const before = run('list', '--json');
     const second = run('record', '--class', 'scoped-fix-check', '--range-base', base, '--reason', 'again', '--evidence', 'commit x');
     expect(second.status).toBe(3);
-    expect(second.stderr).toMatch(/^NO_STOP: refused scoped-fix-check \(one scoped-fix-check per branch is recorded already; a second goes to the owner\); stop for the owner$/m);
+    expect(second.stderr).toMatch(/^NO_STOP: refused scoped-fix-check \(removed with fix-check grants, GST-3562 part 4/m);
     fs.writeFileSync(path.join(work, 'lib.ts'), 'export const a = 2;\n');
     git('commit', '-qam', 'code fix');
     const code = run('record', '--class', 'test-timeout-fix', '--range-base', 'HEAD~1', '--reason', 'r', '--evidence', 'e');
@@ -140,15 +121,6 @@ describe('gstack-no-stop record: the ledger, the grant and the receipt', () => {
     expect(run('list', '--json').stdout).toBe(before.stdout);
   });
 
-  test('a checkout with an empty ledger still sees the branch\'s K1 grant in the approval record and stops', () => {
-    const file = JSON.parse(run('list', '--json').stdout).file as string;
-    const saved = fs.readFileSync(file, 'utf8');
-    fs.rmSync(file);
-    const r = run('record', '--class', 'scoped-fix-check', '--range-base', base, '--reason', 'again', '--evidence', 'commit x');
-    fs.writeFileSync(file, saved);
-    expect(r.status).toBe(3);
-    expect(r.stderr).toContain('the approval record already holds this branch\'s K1 grant');
-  });
 
   test('a class outside the four stops, and the range-based classes need --range-base', () => {
     expect(run('record', '--class', 'merge-anyway', '--reason', 'r', '--evidence', 'e').status).toBe(3);

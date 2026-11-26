@@ -62,8 +62,6 @@ const BASELINE = [
   'test/codex-eval-recording.test.ts',
   'test/codex-resume-flag-semantics.test.ts',
   'test/context-restore-fragment-verdict.test.ts', // GSTA-91: replays three captured false reds (0/3 on main cb99df4) through the paid context-restore-fragment-match case's fragmentRestoreVerdict
-  'test/cso-ntfs-fixture.test.ts',
-  'test/cso-windows-build-contract.test.ts',
   'test/dependency-security.test.ts',
   'test/deps-smoke.test.ts',
   'test/design-completion-handoff-scored.test.ts',
@@ -230,7 +228,6 @@ const BASELINE = [
   'test/shared-libs-source-reads.test.ts', // slices test/skill-e2e-shared-libs-paths.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
   'test/shared-libs-stage-actor.test.ts', // slices test/skill-e2e-shared-libs.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
   'test/ship-coverage-audit-af.test.ts', // slices test/skill-e2e-workflow.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
-  'test/ship-finish-fixed-links.test.ts', // GST-1973: runs bin/gstack-ship-release finish through test/helpers/ship-bin-fixture.ts's RELEASE path, like test/ship-release.test.ts
   'test/ship-release.test.ts', // GSTA-167 PR 4: runs bin/gstack-ship-release through test/helpers/ship-bin-fixture.ts's RELEASE path, so it names no bin/ literal itself
   'test/ship-section-fixture.test.ts',
   'test/skill-budget-regression.test.ts',

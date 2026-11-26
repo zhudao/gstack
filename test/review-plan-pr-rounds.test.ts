@@ -76,25 +76,12 @@ describe('PR round cap', () => {
     for (const roundGrant of [undefined, 'a-000000000001']) {
       const stop = nextStep(h({ priorFull: 3, fullPasses: 1, last: 'full', fixedBlocking: true, roundGrant }), 'standard');
       expect(stop.step).toBe('stop');
-      expect(stop.reason).toContain("the lane's Captain decides (ship with the note, park, or keep the fix and run /ship again for one more read-only full review of the final head)");
+      expect(stop.reason).toContain("the lane's Captain decides (ship with the note, park, or keep the fix and run /gstack-ship again for one more read-only full review of the final head)");
       expect(stop.reason).not.toContain('fix-check grant');
       expect(stop.reason).not.toContain('does not buy a fix round');
     }
   });
 
-  // GST-2968 (matrix row G3): the granted round keeps its fix round (gstack#4272: the grant raised the cap by one, so a blocker the
-  //   granted pass fixed stopped again at PR_ROUND_CAP), and nothing past it.
-  test('a round grant buys one more full round at its head with its fix round, never two', () => {
-    expect(nextStep(h({ priorFull: 2, roundGrant: 'a-1' })).step).toBe('full');
-    expect(nextStep(h({ priorFull: 3, roundGrant: 'a-1' }))).toMatchObject({ step: 'full', reason: expect.stringContaining('read-only final review') });
-    for (const depth of ['standard', 'full'] as const) {
-      const fix = nextStep(h({ priorFull: 2, roundGrant: 'a-1', fullPasses: 1, last: 'full', fixedBlocking: true }), depth);
-      expect(['full', 'scoped']).toContain(fix.step);
-      expect(fix.reason).toContain("round grant a-1 bought pass 1 as this PR's full round 3, and this is that round's fix round");
-    }
-    expect(nextStep(h({ priorFull: 2, roundGrant: 'a-1', fullPasses: 2, last: 'full', fixedBlocking: true }), 'standard').step).toBe('stop');
-    expect(nextStep(h({ priorFull: 2, fullPasses: 1, last: 'full', fixedBlocking: true }), 'standard').reason).toStartWith('PR_ROUND_CAP');
-  });
 
   test('gate class still runs Step 11\'s voices before the PR cap stop', () => {
     expect(nextStep(h({ priorFull: 2, fullPasses: 1, last: 'full', blockingOpen: true, gate: true, adversarialRan: false }), 'standard').step).toBe('voices');

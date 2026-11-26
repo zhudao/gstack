@@ -190,7 +190,7 @@ export const RELEASE_RESULT_CODES = {
   SHIP_BASE_RED_FIXER: {
     anchor: 'ship-base-red-fixer',
     summary: 'ready --base-red names no fixer PR, or the receipt\'s base-red condition no longer matches the base: a conditional READY needs an owner for its condition and a current classification',
-    fix: 'pass --fixer <pr> naming the open PR whose merge fixes the cases; when the base moved, rerun gstack-base-red classify (and /ship) first',
+    fix: 'pass --fixer <pr> naming the open PR whose merge fixes the cases; when the base moved, rerun gstack-base-red classify (and /gstack-ship) first',
   },
   QUEUE_TRAIN_FROZEN: {
     anchor: 'queue-train-frozen',
@@ -291,8 +291,8 @@ export const RELEASE_RESULT_CODES = {
   },
   QUEUE_RECEIPT_EXCEPTION_INVALID: {
     anchor: 'queue-receipt-exception-invalid',
-    summary: 'the PR body’s /ship receipt records an owner exception (docs or review loop) that is malformed, lacks the fix-check it follows, or whose line the body no longer carries verbatim',
-    fix: 'restore the exception line in the PR body word for word, or run /gstack-ship again and record the owner’s acceptance with --docs or --review-loop-exception',
+    summary: 'the PR body’s /ship receipt records a documentation exception that is malformed or whose line the body no longer carries verbatim, or it still records a review-loop exception, which GST-3562 part 4 removed',
+    fix: 'for a documentation exception, restore its line in the PR body word for word, or run /gstack-ship again and record the owner’s acceptance with --docs; for a review-loop exception, run /gstack-ship again for a fresh receipt, with any blocker it shipped recorded as a ruled note (gstack-approvals rule)',
   },
   QUEUE_RECEIPT_TARGETED_MISSING: {
     anchor: 'queue-receipt-targeted-missing',
@@ -418,12 +418,12 @@ export const RELEASE_RESULT_CODES = {
   RECEIPT_BLOCKER_OPEN: {
     anchor: 'receipt-blocker-open',
     summary: 'the review loop stopped at this head with a blocking finding still open (a Step 9 or Step 11 finding, the second-model review included, whose newest review-log action is still open and no owner ruling closed), so no receipt is written',
-    fix: 'fix the finding and run /gstack-ship again on the new head, or take the stop to the owner, whose ruled note or grant closes it; never write the receipt by hand or drop the finding from the review-log row',
+    fix: 'fix the finding and run /gstack-ship again on the new head, or take the stop to the owner, whose ruled note closes it; never write the receipt by hand or drop the finding from the review-log row',
   },
   REVIEW_LOOP_EXCEPTION_INVALID: {
     anchor: 'review-loop-exception-invalid',
-    summary: 'write --review-loop-exception got an exception that is malformed, accepts a stop the review loop does not show (a fix_check with review_loop.fix_checks 0 or missing, or a second_pass with fewer than two passes or no deferred finding), names a head that is not the receipt head or its ancestor, or is missing from the PR body',
-    fix: 'pass { accepted_by, date, via, reason } plus fix_check: { head, findings } or second_pass: { head, deferred: [<finding id>] } with the owner’s words, the --review-loop summary that shows that stop, and the printed "Review-loop exception: …" line in the body',
+    summary: '--review-loop-exception was removed with fix-check grants (GST-3562 part 4), so write and finish refuse it and write nothing',
+    fix: 'drop the flag: an open finding at the round cap ships only as a ruled note the owner records with gstack-approvals rule',
   },
   CI_CARRY_TREE_LOG_UNBOUND: {
     anchor: 'ci-carry-tree-log-unbound',
@@ -443,17 +443,17 @@ export const RELEASE_RESULT_CODES = {
   RECEIPT_CARRY_PRODUCT_CHANGED: {
     anchor: 'receipt-carry-product-changed',
     summary: 'the product diff against the base changed between the receipt\'s head and HEAD (a product file differs beyond a base merge, a test-only fix, release metadata or a regenerated output), so the reviewed verdict does not cover HEAD',
-    fix: 'run /gstack-ship on the new head; the receipt carries only when every changed path is a test, release metadata, a registered output the pregate regen check proved, or the base merge, and the product patch-id is unchanged; base context next to unchanged reviewed hunks carries as the base merge, and a hunk the base merge spliced is RECEIPT_CARRY_SCOPED_REVIEW instead (one scoped reader, no /ship)',
+    fix: 'run /gstack-ship on the new head; the receipt carries only when every changed path is a test, release metadata, a registered output the pregate regen check proved, or the base merge, and the product patch-id is unchanged; base context next to unchanged reviewed hunks carries as the base merge, and a hunk the base merge spliced is RECEIPT_CARRY_SCOPED_REVIEW instead (one scoped reader, no /gstack-ship)',
   },
   STOP_UNBOUND: {
     anchor: 'stop-unbound',
     summary: 'gstack-ship-receipt stop found no review of this run bound to one committed tree, so it recorded no stop record',
-    fix: 'nothing for a grant to answer: the lane or its Captain ships with the open notes listed or parks; a fresh /ship run gives the head its review',
+    fix: 'the lane or its Captain ships with the open notes listed or parks; a fresh /gstack-ship run gives the head its review',
   },
   GRANT_SPENT: {
     anchor: 'grant-spent',
-    summary: 'another /ship run already claimed this round grant, and a grant buys one round',
-    fix: 'the lane or its Captain records a new grant for the stop the PR is at now (gstack-ship-receipt stop prints the command)',
+    summary: 'an older gstack’s claim found the round or fix-check grant spent or unknown; claim and grants were removed in GST-3562 part 4',
+    fix: 'the lane’s Captain decides the stop as PR_ROUND_CAP says: ship with the open notes (a blocker only as a ruled note) or park',
   },
   SHIP_RUN_ABANDON_REFUSED: {
     anchor: 'ship-run-abandon-refused',
@@ -463,17 +463,17 @@ export const RELEASE_RESULT_CODES = {
   SHIP_RUN_RECORD_UNREADABLE: {
     anchor: 'ship-run-record-unreadable',
     summary: 'this checkout\'s /ship run record (git dir gstack-ship-run) is neither a run record nor a run id, so every guard reads it as an open run',
-    fix: 'if no /ship run is working on this checkout, end it with the gstack-ship-run abandon --run unknown --sha256 <digest> command status prints, once',
+    fix: 'if no /gstack-ship run is working on this checkout, end it with the gstack-ship-run abandon --run unknown --sha256 <digest> command status prints, once',
   },
   GRANT_UNKNOWN: {
     anchor: 'grant-unknown',
-    summary: 'the branch approval record holds no approved review_round_grant row with this id',
-    fix: 'pass the id gstack-approvals round-grant printed, from a checkout that sees the record or its mirror',
+    summary: 'an older gstack’s claim found the round or fix-check grant spent or unknown; claim and grants were removed in GST-3562 part 4',
+    fix: 'the lane’s Captain decides the stop as PR_ROUND_CAP says: ship with the open notes (a blocker only as a ruled note) or park',
   },
   RECEIPT_CARRY_SCOPED_REVIEW: {
     anchor: 'receipt-carry-scoped-review',
     summary: 'the base replaced the very lines one of the branch\'s hunks replaces and the merge kept both (GST-2975), so the branch\'s own lines are not the reviewed bytes; the receipt carries only after a scoped review of those hunks',
-    fix: 'dispatch one fix-check reviewer on the packet the refusal names, write its clean verdict as { head, paths, reviewer, verdict } and rerun carry with --scoped-review <record.json>; a blocking finding means /gstack-ship on the new head',
+    fix: 'dispatch one scoped reader (not a review round) on the packet the refusal names, write its clean verdict as { head, paths, reviewer, verdict } and rerun carry with --scoped-review <record.json>; a blocking finding means /gstack-ship on the new head',
   },
   RECEIPT_DOCS_AUDIT_READ: {
     anchor: 'receipt-docs-audit-read',
@@ -540,7 +540,7 @@ export const RELEASE_RESULT_CODES = {
   QUEUE_LAND_DRIFT: {
     anchor: 'queue-land-drift',
     summary: 'the base branch moved between the merge step\'s last check and the squash merge, so main\'s tree is not the stamped tree land verified',
-    fix: 'gstack-ship-queue land --pr <n> --repair opens a PR whose only change is a fragment for what the outside merge brought; /ship and land it, which releases the lock',
+    fix: 'gstack-ship-queue land --pr <n> --repair opens a PR whose only change is a fragment for what the outside merge brought; /gstack-ship and land it, which releases the lock',
   },
   QUEUE_LAND_BASE_BUSY: {
     anchor: 'queue-land-base-busy',

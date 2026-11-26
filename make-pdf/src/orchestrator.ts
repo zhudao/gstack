@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 
 import { render } from "./render";
-import { screenCss } from "./print-css";
+import { DEFAULT_STYLE, resolveMargins, screenCss } from "./print-css";
 import type { GenerateOptions, PreviewOptions } from "./types";
 import { ExitCode } from "./types";
 import { pickEngine } from "../../lib/aside-render";
@@ -84,7 +84,9 @@ class ProgressReporter {
 /**
  * generate — full pipeline. Returns the output PDF path on success.
  */
-export async function generate(opts: GenerateOptions): Promise<string> {
+export async function generate(requested: GenerateOptions): Promise<string> {
+  const style = requested.to === "docx" ? "plain" : requested.style ?? DEFAULT_STYLE;
+  const opts = resolveMargins(requested, style);
   const progress = new ProgressReporter(opts);
   const input = path.resolve(opts.input);
 
@@ -118,6 +120,7 @@ export async function generate(opts: GenerateOptions): Promise<string> {
     watermark: opts.watermark,
     noChapterBreaks: opts.noChapterBreaks,
     confidential: opts.confidential,
+    style,
     pageSize: opts.pageSize,
     margins: opts.margins,
     marginTop: opts.marginTop,
@@ -180,10 +183,9 @@ export async function generate(opts: GenerateOptions): Promise<string> {
 
   // ─── --to html: write the self-contained document, no print round-trip ──
   if (to === "html") {
-    const withScreenLayer = finalHtml.replace(
-      "</style>",
-      `</style>\n<style>\n${screenCss()}\n</style>`,
-    );
+    const withScreenLayer = finalHtml
+      .replace(`<meta charset="utf-8">`, `<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">`)
+      .replace("</style>", `</style>\n<style>\n${screenCss(style)}\n</style>`);
     fs.writeFileSync(outputPath, withScreenLayer, "utf8");
     const kb = Math.round(fs.statSync(outputPath).size / 1024);
     progress.done(`${rendered.meta.wordCount} words · ${kb}KB · ${outputPath}`);
@@ -201,7 +203,8 @@ export async function generate(opts: GenerateOptions): Promise<string> {
     if (opts.headerTemplate) printOnly.push("--header-template");
     if (opts.footerTemplate) printOnly.push("--footer-template");
     if (opts.pageSize) printOnly.push("--page-size");
-    if (opts.margins || opts.marginTop || opts.marginRight || opts.marginBottom || opts.marginLeft) printOnly.push("--margins");
+    if (requested.margins || requested.marginTop || requested.marginRight || requested.marginBottom || requested.marginLeft) printOnly.push("--margins");
+    if (requested.style) printOnly.push("--style");
     if (printOnly.length > 0) {
       warn(`docx is content-fidelity: ${printOnly.join(", ")} do not apply to Word output`);
     }
@@ -240,7 +243,8 @@ export async function generate(opts: GenerateOptions): Promise<string> {
     pageNumbers: false,
     tagged: opts.tagged !== false,
     outline: opts.outline !== false,
-    printBackground: !!opts.watermark,
+    // swiss paints black heading bars and a black cover block: backgrounds must print.
+    printBackground: !!opts.watermark || style === "swiss",
     // Named landscape pages only take effect when Chromium honors CSS page
     // sizes. Flip it ONLY when a promotion exists — minimal behavior change
     // for every other document.
@@ -301,6 +305,7 @@ export async function preview(opts: PreviewOptions): Promise<string> {
     noChapterBreaks: opts.noChapterBreaks,
     confidential: opts.confidential,
     pageNumbers: opts.pageNumbers,
+    style: opts.style,
   });
   progress.end("Rendering HTML", `${rendered.meta.wordCount} words`);
 
