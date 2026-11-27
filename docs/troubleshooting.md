@@ -3758,8 +3758,9 @@ a typo never silently means "default".
 `gstack-ship-policy init --explain` prints each key, its meaning and default.
 
 When the invalid file is the base branch's and its only errors are in
-`review_exclude_paths` or `review_content_patterns` (for example `more than 64
-patterns`), /gstack-ship does not stop: `gstack-review-plan` prints `REVIEW_EXCLUDE:
+`review_exclude_paths` or `review_content_patterns` (for example `more than 256
+patterns` in `review_exclude_paths`, or `more than 64 patterns` in
+`review_content_patterns`), /gstack-ship does not stop: `gstack-review-plan` prints `REVIEW_EXCLUDE:
 fallback (WARNING: …)`, reviews every file and applies the base's other keys,
 so open a PR that corrects the list and ship it as usual
 ([review_exclude_paths](ship-policy.md#review-exclude-paths)). Any other error
@@ -4011,7 +4012,8 @@ record only when it changes no binary file, adds no numeric claim, touches no
 results, prereg or eval path, and names no money, security, secret or auth topic; any other docs change
 needs the reader again (GST-1195). With `--body`, write also refuses, writing
 nothing, a body that does not carry each line the receipt requires as one line,
-word for word: every `Ruled note: …` line `gstack-approvals rulings` prints,
+word for word: every `Ruled note: …` line `gstack-approvals rulings` prints
+(bare, or as a `- ` or `* ` list item),
 every `Gate disposition: …` line `gstack-approvals dispositions` prints (and while
 a gate disposition applies at HEAD, write refuses to run without `--body`),
 finish's `MECHANICAL:` lines as `Mechanical retake: …`, and accept's
@@ -4073,14 +4075,24 @@ of the base can cause that: fetch its history and rerun write).
 ### `REVIEW_DIFF_TOO_LARGE`
 
 **Meaning.** One reviewer's diff is over the 2,000,000-byte review ceiling
-(about 500K tokens). `gstack-review-dispatch pass`, `stage` and `render` read
-each reader's diff once before writing anything, and stop (exit 3, nothing
-written) rather than hand a reader more than it can read. The line names the
-reader, its bytes, the five largest top-level folders (`top=<dir>:<bytes>`) and
-the base policy commit.
+(about 500K tokens) and could not be reviewed in slices. `gstack-review-dispatch
+pass` splits a bigger diff into up to 8 slice readers
+([review slices](review-policy.md#review-ceiling)); this stop means one file is
+over the ceiling by itself (`slices=refused(file=<path>:<bytes>)`), the diff needs
+more than 8 slices (`slices=refused(needs=<n> cap=8)`), a slice's paths are past the
+command-line budget, the diff grew after the pass planned its readers, or a
+standalone `render` was asked for a reader the pass would slice (`slices=fits=<n>`:
+run it through the pass manifest). `pass`, `stage` and `render` read each reader's
+diff once before writing anything, and stop (exit 3, nothing written) rather than
+hand a reader more than it can read. The line names the reader, its bytes, the
+five largest top-level folders (`top=<dir>:<bytes>`) and the base policy commit.
 
 **Fix.** The line prints the fix for where the base policy stands:
 
+- **`slices=fits=<n>`:** the diff fits in slices, so nothing is wrong with the
+  policy. A standalone `render` never slices: run the reader through the pass
+  manifest instead. If the diff grew after the pass planned its readers, start a
+  fresh pass under a new `--pass` and `--out`, which plans the slices again.
 - **No key:** copy the printed JSON (`{"review_exclude_paths":[…],"min_gstack_version":"…"}`)
   into `.gstack/ship-policy.json` on the base as its own PR. A lane cannot land on
   the base itself: ask the repo owner or the coordinator. Once it merges, bring
@@ -4090,7 +4102,11 @@ the base policy commit.
 - **A pattern keeps too many files** stops the plan with
   [`REVIEW_EXCLUDE_KEEP_TOO_LARGE`](#review-exclude-keep-too-large) before any reader runs.
 - **Still over after exclusion:** add the printed folders to the base policy, or
-  split the PR. When published data under a pattern is kept as `code`
+  split the PR. The fix only suggests data, log and binary folders, never `docs/`
+  (the report is what the reviewer is there to read), and when the printed folders
+  would take the base list past 256 patterns or its 24,000-byte pathspec budget it
+  prints no JSON and asks for the existing patterns to be merged under fewer
+  folder globs instead. When published data under a pattern is kept as `code`
   (`REVIEW_EXCLUDE_KEPT: code …` on `.patch`, `.sha256` or extension-less files),
   add [`review_content_patterns`](ship-policy.md#review-content-patterns) for it. Files kept only for a secret line already count as their
   excerpts ([secret-line excerpts](ship-policy.md#secret-line-excerpts)), and so

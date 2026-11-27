@@ -34,7 +34,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { collectLive } from './review-collect';
 import { classifyPath as gateFloor, parseGateIntegrityBlock } from './gate-diff/classify';
-import { readClaudeMd, splitDiffGitLine } from './gate-diff/git';
+import { readClaudeMd, splitDiffGitLine, unquoteGitPath } from './gate-diff/git';
 import { lineTags, swallowsAcrossLines, tagHunk } from './gate-diff/tags';
 import { DATA_PATH, classifyPath, isAgentProse, isDataConfig, isGatePath, type PathLines } from './review-depth';
 import { scan } from './redact-engine';
@@ -42,7 +42,8 @@ import { shannonEntropy } from './redact-patterns';
 import { KEY_NAME, RESULTS_TREE, SECRET_LINE, hashManifest, secretPath } from './review-risk';
 import { secretExcerpt } from './review-secret-excerpt';
 import { cmpVersion, parseVersion } from './version-source';
-import { REVIEW_EXCLUDE_KEY_VERSION, SHIP_POLICY_PATH, isUnavailable, policyUnavailableLine } from './ship-policy';
+import { REVIEW_EXCLUDE_KEY_VERSION, SHIP_POLICY_PATH, excludeListTooLarge, isUnavailable, policyUnavailableLine } from './ship-policy';
+import { fixedIndex, select, type Matched } from './review-exclude-match';
 import { loadPolicyAt } from './ship-policy-at';
 import { resolveStateRoot } from './state-root';
 import { vendoredCacheRoot, vendoredPolicy, vendoredSelection, type VendoredSelection } from './review-vendored';
@@ -161,7 +162,7 @@ function renamedPaths(i: ExcludeInput): Set<string> | null {
 }
 
 /** `paths` in order, split so each chunk's literal pathspecs (`size` bytes each) stay within KEEP_ARG_MAX_BYTES (one path past it is its own chunk). */
-function argChunks(paths: readonly string[], size = (p: string) => argBytes([p])): string[][] {
+export function argChunks(paths: readonly string[], size = (p: string) => argBytes([p])): string[][] {
   const chunks: string[][] = [];
   let bytes = Infinity;
   for (const p of paths) {
@@ -193,31 +194,6 @@ export function literalPrefix(pattern: string): string {
   const at = pattern.search(/[*?[]/);
   const head = at < 0 ? pattern : pattern.slice(0, at);
   return head.slice(0, head.lastIndexOf('/') + 1);
-}
-
-interface Matched { oldMode: string; newMode: string; oldSha: string; newSha: string }
-
-/** Every changed path each pattern matches, with its modes, from git's raw diff; untracked files are never part of it, since no reader's git diff shows them and the receipt reads the committed head. */
-function select(i: ExcludeInput, patterns: readonly string[]): { byPattern: Map<string, string[]>; files: Map<string, Matched> } | { error: string } {
-  const byPattern = new Map<string, string[]>();
-  const files = new Map<string, Matched>();
-  const range = i.head ? [i.mergeBase, i.head] : [i.mergeBase];
-  for (const p of patterns) {
-    const spec = `:(top,glob)${p}`;
-    const raw = git(i.root, ['diff', '--raw', '-z', '--no-abbrev', '--no-renames', ...range, '--', spec]);
-    if (!raw.ok) return { error: `git diff --raw ${range.join(' ')} -- ${spec}: ${raw.err.split('\n')[0] || `exit ${raw.status}`}` };
-    const parts = raw.out.split('\0');
-    const hit: string[] = [];
-    for (let k = 0; k + 1 < parts.length; k += 2) {
-      const [oldMode, newMode, oldSha, newSha] = parts[k]!.slice(1).split(' ');
-      const f = parts[k + 1]!;
-      if (!f) continue;
-      hit.push(f);
-      if (!files.has(f)) files.set(f, { oldMode: oldMode ?? '', newMode: newMode ?? '', oldSha: oldSha ?? '', newSha: newSha ?? '' });
-    }
-    byPattern.set(p, hit);
-  }
-  return { byPattern, files };
 }
 
 /** Executable image magic: ELF, Mach-O (thin, universal and 64-bit universal; 0xcafebabe is also a Java class), PE, WebAssembly and a script's #!. */
@@ -433,8 +409,9 @@ function contractExample(patterns: ReadonlySet<string>, s: string, file: string,
  * the scratch index or grep it (a timeout included). Each tree's file list is filtered to consumers first, so the data under
  * the patterns is never read (GST-1435: a whole-tree grep for 4,354 candidate paths through 30 MB of receipts ran 278 s), and
  * the consumers go into a scratch index that one git grep reads, so the git calls stay fixed however many files there are
- * (GST-1442: 363 chunked greps over a 192k-file tree ran 132 s). `git grep -l` lists the consumers holding any string, and
- * only those are read and searched here: git's -o grew with the number of strings (HARN-64: 2,140 candidate paths in one
+ * (GST-1442: 363 chunked greps over a 192k-file tree ran 132 s). `git grep -l` lists the consumers holding any string's
+ * token (fixedIndex: its extension or last segment, since git's -l also grew with the number of strings: 16,165 paths took 37 s on
+ * harness-evals#616, GST-4003), and only those are read and searched here: git's -o grew with the number of strings (HARN-64: 2,140 candidate paths in one
  * 464 KB pins.sha256 ran past git's 120 s bound, so every candidate stayed in review). A consumer that is a hash or pin
  * manifest (every line a digest and a path, lib/review-risk.ts) names files without reading them, so it keeps none. On a live tree, an entry git reads from its blob
  * (skip-worktree or assume-unchanged) goes into a second index grepped with --cached, as git grep itself would read it.
@@ -445,7 +422,8 @@ function grepFixed(i: Scope, strings: readonly string[], candidates: ReadonlySet
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-exclude-'));
   try {
     const list = path.join(dir, 'patterns');
-    fs.writeFileSync(list, strings.join('\n') + '\n');
+    const index = fixedIndex(strings);
+    fs.writeFileSync(list, index.tokens.join('\n') + '\n');
     let n = 0;
     for (const at of [i.head ?? '', ...revs]) {
       const ls = git(i.root, at ? ['ls-tree', '-r', '-z', at] : ['ls-files', '-s', '-v', '-z']);
@@ -469,25 +447,34 @@ function grepFixed(i: Scope, strings: readonly string[], candidates: ReadonlySet
         const hits = git(i.root, ['grep', ...flags, '-I', '-F', '-l', '-z', '--no-color', '-f', list], undefined, env);
         if (hits.status !== 0 && hits.status !== 1) return null;
         const files = hits.out.split('\0').filter(Boolean);
-        const bodies = new Map<string, string>();
-        if (flags.length && files.length) {
-          const shas = new Map(entries.map(e => [e.slice(e.indexOf('\t') + 1), e.slice(0, e.indexOf('\t')).split(' ')[1]!]));
-          const want = files.map(f => shas.get(f));
-          if (want.some(s => !s)) return null;
-          const b = spawnSync('git', ['cat-file', '--batch'], { cwd: i.root, input: want.join('\n') + '\n', timeout: 120_000, maxBuffer: MAX_BUFFER });
+        const scan = (file: string, body: string) => {
+          if (hashManifest(body.split('\n'))) return;
+          for (const s of index.holds(body)) if (!skip?.(s, file, body)) (found.get(s) ?? found.set(s, new Set()).get(s)!).add(file);
+        };
+        if (!flags.length) {
+          for (const f of files) { let body: string; try { body = fs.readFileSync(path.join(i.root, f), 'utf8'); } catch { return null; } scan(f, body); }
+          continue;
+        }
+        if (!files.length) continue;
+        const shas = new Map(entries.map(e => [e.slice(e.indexOf('\t') + 1), e.slice(0, e.indexOf('\t')).split(' ')[1]!]));
+        const want = files.map(f => shas.get(f));
+        if (want.some(s => !s)) return null;
+        const sized = git(i.root, ['cat-file', '--batch-check'], want.join('\n') + '\n');
+        const sizes = sized.out.split('\n').slice(0, want.length).map(l => Number(l.split(' ')[2]));
+        if (!sized.ok || sizes.length !== want.length || sizes.some(n => !Number.isInteger(n))) return null;
+        for (let k = 0, end = 0; k < files.length; k = end) {
+          let bytes = 0;
+          for (end = k; end < files.length && (end === k || bytes + sizes[end]! <= BLOB_BATCH_BYTES); end++) bytes += sizes[end]!;
+          const b = spawnSync('git', ['cat-file', '--batch'], { cwd: i.root, input: want.slice(k, end).join('\n') + '\n', timeout: 120_000, maxBuffer: bytes + (end - k) * 128 + 1024 });
           if (b.status !== 0 || !b.stdout) return null;
           let at = 0;
-          for (const f of files) {
+          for (const f of files.slice(k, end)) {
             const nl = b.stdout.indexOf(10, at);
             const size = Number(b.stdout.subarray(at, nl).toString().split(' ')[2]);
             if (nl < 0 || !Number.isInteger(size)) return null;
-            bodies.set(f, b.stdout.subarray(nl + 1, nl + 1 + size).toString('utf8'));
+            scan(f, b.stdout.subarray(nl + 1, nl + 1 + size).toString('utf8'));
             at = nl + 2 + size;
           }
-        } else for (const f of files) try { bodies.set(f, fs.readFileSync(path.join(i.root, f), 'utf8')); } catch { return null; }
-        for (const [file, body] of bodies) {
-          if (hashManifest(body.split('\n'))) continue;
-          for (const s of strings) if (body.includes(s) && !skip?.(s, file, body)) (found.get(s) ?? found.set(s, new Set()).get(s)!).add(file);
         }
       }
     }
@@ -646,7 +633,7 @@ export function parseTail(tail: string | undefined): string[] {
 }
 
 export type ReaderDiff =
-  | { ok: true; text: string; bytes: number; byDir: Array<[string, number]>; byFile: Array<[string, number]>; excerpt?: string; whole?: string[] }
+  | { ok: true; text: string; bytes: number; byDir: Array<[string, number]>; byFile: Array<[string, number]>; excerpt?: string; whole?: string[]; units?: DiffUnit[] }
   | { ok: false; reason: 'timeout' | 'git-exit'; exit: number | null; stderr: string; timeoutMs: number };
 
 /** The excerpt of one `git diff --text` over the excerpt files; any throw sends every file whole (fail closed). */
@@ -666,7 +653,7 @@ function excerptOf(out: string, specs: readonly string[]): { text: string; whole
  * excerpt, appended to `text` and returned as `excerpt`; a file the excerpt could not be built for counts whole, its
  * section joins `text` and its item is listed in `whole` for the caller's keep command.
  */
-export function readSelection(root: string, diffBase: string, pathspecs: readonly string[], keep: readonly string[] = [], excerpt: readonly string[] = [], timeoutMs = REVIEW_DIFF_TIMEOUT_MS): ReaderDiff {
+export function readSelection(root: string, diffBase: string, pathspecs: readonly string[], keep: readonly string[] = [], excerpt: readonly string[] = [], timeoutMs = REVIEW_DIFF_TIMEOUT_MS, head?: string): ReaderDiff {
   let text = '';
   let raw = '';
   let full = false;
@@ -676,7 +663,7 @@ export function readSelection(root: string, diffBase: string, pathspecs: readonl
     ...argChunks(excerpt, size).map(c => [c, textFlags] as [readonly string[], string[]])];
   for (const [specs, flags] of reads) {
     const tail = specs.length ? (specs[0] === '--' ? specs : ['--', ...specs]) : [];
-    const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', ...flags, diffBase, ...tail], { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: MAX_BUFFER });
+    const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', ...flags, diffBase, ...(head ? [head] : []), ...tail], { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: MAX_BUFFER });
     const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
     if (code === 'ENOBUFS') { text += raw + (r.stdout ?? ''); full = true; break; }
     if (code === 'ETIMEDOUT' || (r.signal && r.status === null)) return { ok: false, reason: 'timeout', exit: null, stderr: r.stderr ?? '', timeoutMs };
@@ -692,7 +679,18 @@ export function readSelection(root: string, diffBase: string, pathspecs: readonl
   starts.forEach((m, k) => add(splitDiffGitLine(m[1]!)[1], Buffer.byteLength(text.slice(m.index!, k + 1 < starts.length ? starts[k + 1]!.index! : text.length))));
   for (const f of ex?.files ?? []) add(f.path, Buffer.byteLength(f.text));
   const all = ex?.text ? `${text}${text && !text.endsWith('\n') ? '\n' : ''}${ex.text}` : text;
-  return { ok: true, text: all, bytes: Buffer.byteLength(all), byDir: [...byDir].sort((a, b) => b[1] - a[1]), byFile: [...byFile].sort((a, b) => b[1] - a[1]), ...(ex ? { excerpt: ex.text, whole: ex.whole } : {}) };
+  const bytes = Buffer.byteLength(all);
+  const units = bytes > REVIEW_DIFF_MAX_BYTES ? [...starts.map((m, k) => sectionUnit(text.slice(m.index!, k + 1 < starts.length ? starts[k + 1]!.index! : text.length), m[1]!)), ...(ex?.files ?? []).map(f => ({ paths: [f.path], bytes: Buffer.byteLength(f.text) }))] : undefined;
+  return { ok: true, text: all, bytes, byDir: [...byDir].sort((a, b) => b[1] - a[1]), byFile: [...byFile].sort((a, b) => b[1] - a[1]), ...(ex ? { excerpt: ex.text, whole: ex.whole } : {}), ...(units ? { units } : {}) };
+}
+
+/** One `diff --git` section of an over-ceiling selection (lib/review-slices.ts): the paths it shows (both sides of a rename) and its bytes. */
+export interface DiffUnit { paths: string[]; bytes: number }
+function sectionUnit(section: string, header: string): DiffUnit {
+  const head = section.slice(0, (/^(?:--- |@@ |Binary files )/m.exec(section)?.index) ?? section.length);
+  const from = /^rename from (.*)$/m.exec(head)?.[1], to = /^rename to (.*)$/m.exec(head)?.[1];
+  const [a, b] = from !== undefined && to !== undefined ? [unquoteGitPath(from), unquoteGitPath(to)] : splitDiffGitLine(header);
+  return { paths: a === b ? [a] : [a, b], bytes: Buffer.byteLength(section) };
 }
 
 /** Credential-bearing remote URLs and scp-style remotes out of git's stderr. */
@@ -711,15 +709,16 @@ function policyJson(patterns: readonly string[], floor?: string | null): string 
 const excludableByPath = (p: string) => !SOURCE.test(p) && (DATA_PATH.test(p) || /\.log$/i.test(p) || BINARY_CONTENT_EXT.test(p) || classifyPath(p) === 'docs');
 
 /**
- * Folders to suggest: the top directories holding the most bytes the policy could exclude (whole folders when only folder
- * sizes are known), until what is left would fit; none when they cannot get the reader under the ceiling (#4369).
+ * Folders to suggest: the top directories holding the most data, log and binary bytes the policy could exclude (whole folders
+ * when only folder sizes are known), until what is left would fit; none when they cannot get the reader under the ceiling
+ * (#4369). Docs never count and docs/ is never suggested: a results report is what the reviewer is there to read (GST-4003).
  */
 function suggest(d: { bytes: number; byDir: ReadonlyArray<[string, number]>; byFile?: ReadonlyArray<[string, number]> }): string[] {
   let byDir = d.byDir;
   if (d.byFile?.length) {
     const excludable = new Map<string, number>();
     for (const [file, n] of d.byFile) {
-      if (!excludableByPath(file)) continue;
+      if (!excludableByPath(file) || classifyPath(file) === 'docs') continue;
       const dir = file.includes('/') ? file.split('/')[0]! : '(root)';
       excludable.set(dir, (excludable.get(dir) ?? 0) + n);
     }
@@ -729,7 +728,7 @@ function suggest(d: { bytes: number; byDir: ReadonlyArray<[string, number]>; byF
   let left = d.bytes;
   for (const [dir, n] of byDir) {
     if (left <= REVIEW_DIFF_MAX_BYTES || out.length >= 3) break;
-    if (dir === '(root)') continue;
+    if (dir === '(root)' || dir === 'docs') continue;
     out.push(`${dir}/**`);
     left -= n;
   }
@@ -737,20 +736,26 @@ function suggest(d: { bytes: number; byDir: ReadonlyArray<[string, number]>; byF
 }
 
 /** The REVIEW_DIFF_TOO_LARGE line and object: the reader's bytes, the largest folders and files, and a fix chosen by where the policy stands. */
-export function tooLargeLine(context: string, reader: string, d: { bytes: number; byDir: ReadonlyArray<[string, number]>; byFile?: ReadonlyArray<[string, number]> }, c: CeilingContext): { line: string; json: Record<string, unknown> } {
+export function tooLargeLine(context: string, reader: string, d: { bytes: number; byDir: ReadonlyArray<[string, number]>; byFile?: ReadonlyArray<[string, number]> }, c: CeilingContext, slices?: SliceNote): { line: string; json: Record<string, unknown> } {
   const named = (name: string) => (/[\x00-\x1f\x7f]/.test(name) ? JSON.stringify(name) : name);
   const top = d.byDir.slice(0, 5).map(([dir, n]) => `${named(dir)}:${n}`).join(',') || 'none';
   const largest = (d.byFile ?? []).slice(0, 5);
   const split = largest.length ? `split the PR (largest files: ${largest.map(([f, n]) => `${named(f)} (${n} bytes)`).join(', ')})` : 'split the PR';
-  const land = (patterns: readonly string[]) => `ask the repo owner to land ${policyJson(patterns, c.floor)} in ${SHIP_POLICY_PATH} on ${c.base} as its own PR (docs/ship-policy.md#review-exclude-paths), then bring ${c.base} into this branch and rerun once; if it is still over, ${split}`;
+  const land = (patterns: readonly string[]) => excludeListTooLarge(patterns) ? `the base policy cannot take these folders as well: with them its review_exclude_paths fails validation (${excludeListTooLarge(patterns)}), so ask the repo owner to merge its patterns under fewer shared folder globs on ${c.base} as its own PR, or ${split}`
+    : `ask the repo owner to land ${policyJson(patterns, c.floor)} in ${SHIP_POLICY_PATH} on ${c.base} as its own PR (docs/ship-policy.md#review-exclude-paths), then bring ${c.base} into this branch and rerun once; if it is still over, ${split}`;
   const dirs = suggest(d);
   const fresh = dirs.filter(p => !c.record?.patterns.includes(p));
   const fix = c.state === 'head-only' ? `this branch declares review_exclude_paths, but only the copy on ${c.base} applies: ${land(c.headPatterns ?? [])}`
     : c.state === 'active' ? `still over after excluding ${c.record?.excluded ?? 0} files; ${fresh.length ? land([...(c.record?.patterns ?? []), ...fresh]) : split}`
     : dirs.length ? land(dirs) : split;
   const files = largest.length ? ` files=${largest.map(([f, n]) => `${/[\s,:"]/.test(f) ? JSON.stringify(f) : f}:${n}`).join(',')}` : '';
-  const line = `${context}: the reader's diff is over the review ceiling (reader=${reader} bytes=${d.bytes} max=${REVIEW_DIFF_MAX_BYTES} top=${top}${files} policy=${c.source}); fix: ${fix}; nothing was written (REVIEW_DIFF_TOO_LARGE)`;
-  return { line, json: { code: 'REVIEW_DIFF_TOO_LARGE', reader, bytes: d.bytes, max: REVIEW_DIFF_MAX_BYTES, top: d.byDir.slice(0, 5).map(([dir, bytes]) => ({ dir, bytes })), files: largest.map(([file, bytes]) => ({ file, bytes })), policy: c.source, state: c.state, fix, side_effects: 'none' } };
+  const said = slices ? slices.fix ?? `${slices.lead}: ${fix}` : fix;
+  const line = `${context}: the reader's diff is over the review ceiling (reader=${reader} bytes=${d.bytes} max=${REVIEW_DIFF_MAX_BYTES} top=${top}${files} policy=${c.source}${slices ? ` slices=${slices.field}` : ''}); fix: ${said}; nothing was written (REVIEW_DIFF_TOO_LARGE)`;
+  return { line, json: { code: 'REVIEW_DIFF_TOO_LARGE', reader, bytes: d.bytes, max: REVIEW_DIFF_MAX_BYTES, top: d.byDir.slice(0, 5).map(([dir, bytes]) => ({ dir, bytes })), files: largest.map(([file, bytes]) => ({ file, bytes })), policy: c.source, state: c.state, fix: said, ...(slices ? { slices: slices.field } : {}), side_effects: 'none' } };
+}
+
+/** Why an over-ceiling reader was not split into slices (lib/review-slices.ts): the line's `slices=` field, and the sentence that leads its fix, or a fix of its own. */
+export interface SliceNote { field: string; lead?: string; fix?: string
 }
 
 /** The REVIEW_DIFF_UNREADABLE line: timeout or git exit, the timeout, the base, a redacted first stderr line, and the whole (redacted) stderr written under `logDir`. */

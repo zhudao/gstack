@@ -5,6 +5,12 @@ GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v 
 # Native Bun and Git cannot open a /c/x path: keep Git Bash's argument
 # conversion on for everything setup starts, even where a user turned it off (#4386).
 case "${OSTYPE:-}" in msys*|cygwin*) unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL ;; esac
+# That conversion skips any path holding an apostrophe (C:/Users/O'Brien), so a
+# path handed to Bun goes through _bun_path, which spells it C:/... on Windows (#4386).
+_bun_path() {
+  case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; return; fi ;; esac
+  printf '%s\n' "$1"
+}
 umask 077  # Restrict new files to owner-only (0o600 files, 0o700 dirs)
 
 # Heredoc delivery guard. bash 5.2+ writes a heredoc body <=64KiB through a
@@ -609,7 +615,7 @@ EOF
   grep -q '	failed	' "$_RF_SUMMARY" && _RF_FAILED=1
   if [ "$HARNESS_AUTO" -eq 1 ] && [ -d "$GSTACK_STATE_ROOT/harness" ]; then
     # Exit 4: every registration refreshed; a start hook this run turned on is not active (printed above).
-    bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$SOURCE_GSTACK_DIR/bin/gstack-harness" refresh || [ "$?" -eq 4 ] || _RF_FAILED=1
+    bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(_bun_path "$SOURCE_GSTACK_DIR/bin/gstack-harness")" refresh || [ "$?" -eq 4 ] || _RF_FAILED=1
   fi
   echo ""
   if [ "$_RF_FAILED" -eq 1 ]; then
@@ -1045,11 +1051,17 @@ _backup_skill_md() {
 # name: line rewritten to NAME, which is how alias and prefixed copies differ),
 # or whose named source is gone, is a customized file: it is moved to the
 # backup root, never deleted, and if the backup fails it stays. Our
-# runtime-asset links go; the user's files stay. BACKUP_NAME (default NAME)
-# names the backup, so copies of one skill on several hosts never collide.
+# runtime-asset links go, dangling ones included, and with SRC_SKILL_MD so do
+# real files byte-identical to the same path beside it (Windows copies); both
+# are also removed one level into each real subdirectory such as sections/
+# (never through a linked one), which goes once emptied (GST-3999). The
+# user's files and directories stay, an empty one included. BACKUP_NAME
+# (default NAME) names the backup, so copies of one skill on several hosts
+# never collide.
 _cleanup_weak_dir() {
-  local d="$1" g="$2" src="${3:-}" name="${4:-${1##*/}}" e dest
+  local d="$1" g="$2" src="${3:-}" name="${4:-${1##*/}}" e dest had_md=0 swept=0
   local bk="${5:-$name}"
+  { [ -e "$d/SKILL.md" ] || [ -L "$d/SKILL.md" ]; } && had_md=1
   if [ -f "$d/SKILL.md" ] && [ ! -L "$d/SKILL.md" ] && [ -n "$src" ] \
      && { [ ! -f "$src" ] || { ! cmp -s "$d/SKILL.md" "$src" \
      && ! sed "1,/^---\$/ s/^name:[[:space:]].*/name: $name/" "$src" | cmp -s - "$d/SKILL.md"; }; }; then
@@ -1061,12 +1073,20 @@ _cleanup_weak_dir() {
     rm -f "$d/SKILL.md"
   fi
   rm -f "$d/.gstack-owned"
-  for e in "$d"/* "$d"/.[!.]* "$d"/..?*; do
-    [ -L "$e" ] || continue
-    dest="$(_gstack_link_target_abs "$e")" || continue
-    if _gstack_target_is_ours "$dest" "$g"; then rm -f "$e"; fi
+  for e in "$d"/* "$d"/.[!.]* "$d"/..?* "$d"/*/* "$d"/*/.[!.]* "$d"/*/..?*; do
+    [ -L "${e%/*}" ] && continue
+    if [ -L "$e" ]; then
+      dest="$(_gstack_link_target_abs "$e")" || continue
+      _gstack_target_is_ours "$dest" "$g" || continue
+    elif [ ! -f "$e" ] || [ -z "$src" ] || ! cmp -s "$e" "${src%/*}/${e#"$d"/}"; then
+      continue
+    fi
+    rm -f "$e"
+    swept=1
+    [ "${e%/*}" = "$d" ] || rmdir "${e%/*}" 2>/dev/null || true
   done
-  rmdir "$d" 2>/dev/null || echo "  cleaned ${d##*/}/SKILL.md (other files in that directory were left in place)"
+  [ "$had_md" -eq 1 ] || [ "$swept" -eq 1 ] || return 0
+  rmdir "$d" 2>/dev/null || [ "$had_md" -eq 0 ] || echo "  cleaned ${d##*/}/SKILL.md (other files in that directory were left in place)"
 }
 # _gstack_dir_only_links DIR GSTACK_DIR — true when deleting DIR whole loses
 # nothing of the user's: every entry is a symlink resolving into gstack, or
@@ -1175,6 +1195,12 @@ _prune_stale_generated() {
     _skill_source_exists "$gstack_dir" "$n" && continue
     for host in "$@"; do
       [ -n "$host" ] && { [ -e "$host/$n" ] || [ -L "$host/$n" ]; } || continue
+      # A real dir with no SKILL.md and no marker: an older cleanup stranded
+      # it with only our links left, such as sections/ (GST-3999).
+      if [ -d "$host/$n" ] && [ ! -L "$host/$n" ] && [ ! -e "$host/$n/SKILL.md" ] && [ ! -L "$host/$n/SKILL.md" ] && [ ! -f "$host/$n/.gstack-owned" ]; then
+        _cleanup_weak_dir "$host/$n" "$gstack_dir"
+        continue
+      fi
       _owned_for_windows_refresh "$host/$n" || continue
       if [ -L "$host/$n" ]; then
         # Strong proof only when the link resolves into gstack: the render tree
@@ -1416,10 +1442,10 @@ if [ "$LOCAL_INSTALL" -eq 0 ]; then
     _CODEX_PREFLIGHT_SELECTED=1
   fi
 fi
-bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$SOURCE_GSTACK_DIR/scripts/preflight-codex-overlap.ts" \
-  --source "$SOURCE_GSTACK_DIR" --namespace "$CODEX_SKILLS" \
+bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(_bun_path "$SOURCE_GSTACK_DIR/scripts/preflight-codex-overlap.ts")" \
+  --source "$(_bun_path "$SOURCE_GSTACK_DIR")" --namespace "$(_bun_path "$CODEX_SKILLS")" \
   --selected "$_CODEX_PREFLIGHT_SELECTED" --local "$CODEX_REPO_LOCAL" \
-  --windows "$IS_WINDOWS" --relocation "$HOME/.gstack/repos/gstack" || exit 1
+  --windows "$IS_WINDOWS" --relocation "$(_bun_path "$HOME/.gstack/repos/gstack")" || exit 1
 
 # ─── Resolve skill prefix preference ─────────────────────────
 # Priority: CLI flag > saved config > interactive prompt (or flat default for non-TTY)
@@ -2455,7 +2481,7 @@ mkdir -p "$HOME/.gstack/projects"
 # gstack-config harness_start_hook; lib/harness-start-hook.ts). Exit 4 from
 # register means the skills are registered and the start hook is not active.
 # Nothing else in this run applies to them.
-_gstack_harness() { bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$SOURCE_GSTACK_DIR/bin/gstack-harness" "$@"; }
+_gstack_harness() { bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(_bun_path "$SOURCE_GSTACK_DIR/bin/gstack-harness")" "$@"; }
 if [ -n "$INSTALL_HARNESS" ]; then
   _setup_arm_begin "$INSTALL_HARNESS" global "$INSTALL_HARNESS"
   _HARNESS_RC=0
@@ -4978,7 +5004,7 @@ _codex_hook_gate() {
 }
 
 _HOOKS_ON_BY_DEFAULT=""
-SKILL_ROUTE_BIN="$SOURCE_GSTACK_DIR/bin/gstack-skill-route"
+SKILL_ROUTE_BIN="$(_bun_path "$SOURCE_GSTACK_DIR/bin/gstack-skill-route")"
 SKILL_ROUTE_HOOK="$(_hook_command_path hosts/claude/hooks/skill-route-hook || true)"
 SKILL_CONTRACT_HOOK="$(_hook_command_path hosts/claude/hooks/skill-contract-stop-hook || true)"
 _skill_hook_gate skill_routing "$SKILL_ROUTING_MODE" GSTACK_SKILL_ROUTING UserPromptSubmit \
@@ -5023,7 +5049,7 @@ fi
 # gate deadline plus a margin (GST-1615): Claude Code kills a hook at its
 # timeout and lets the stop through unchecked. Empty if bun cannot run, which
 # omits the timeout and leaves Claude Code's default.
-SKILL_GATE_HOOK_TIMEOUT="$(bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$SOURCE_GSTACK_DIR/bin/gstack-skill-gates" hook-timeout 2>/dev/null || true)"
+SKILL_GATE_HOOK_TIMEOUT="$(bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$(_bun_path "$SOURCE_GSTACK_DIR/bin/gstack-skill-gates")" hook-timeout 2>/dev/null || true)"
 # /investigate and its gate are retired (GST-1717): an earlier setup's
 # registration is removed whatever investigate_gate says, and the KNOWN_HOOKS
 # rows stay so the old entries are still recognized as ours.
