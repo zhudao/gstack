@@ -43,9 +43,9 @@ function tmpPage(html: string, name = 'index.html'): string {
   return file;
 }
 
-/** A temporary tree: each key is a relative path (parent directories are created), each value the file's text. */
+/** A temporary tree: each key is a relative path (parent directories are created), each value the file's text. Its root is the real path, as the lint walks real paths. */
 function tmpTree(files: Record<string, string>): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'design-lint-tree-'));
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'design-lint-tree-')));
   tmpDirs.push(dir);
   for (const [rel, text] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
@@ -314,6 +314,8 @@ describe('design-lint: the copy tier', () => {
     expect(copy(CLEAN)).toEqual([]);
     const pretext = fs.readFileSync(path.join(ROOT, 'design-html', 'vendor', 'pretext.js'), 'utf-8');
     expect(copy(CLEAN.replace('</body>', `<script type="module">${pretext}</script></body>`))).toEqual([]);
+    const embed = fs.readFileSync(path.join(ROOT, 'design-html', 'vendor', 'pretext-embed.html'), 'utf-8').replace('PRETEXT_BUNDLE', () => pretext);
+    expect(copy(CLEAN.replace('</body>', `${embed}</body>`))).toEqual([]);
   });
 
   test('every copy-tier id is a lint rule; each but the shell check is a grep-detectable catalog entry whose fix the lint prints', () => {
